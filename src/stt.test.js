@@ -563,11 +563,12 @@ class FakeRec {
 
 // Fake timers so the EOT debounce is deterministic (advance the clock instead of waiting real ms).
 function withWebSpeech(fn) {
-  const realWin = globalThis.window, realPerf = globalThis.performance;
+  const realWin = globalThis.window, realPerf = globalThis.performance, realNav = globalThis.navigator;
   globalThis.window = { SpeechRecognition: FakeRec };
   globalThis.performance = globalThis.performance ?? { now: () => Date.now() };
+  if (!globalThis.navigator) globalThis.navigator = {};   // Node 20 has no global navigator (mic pre-open probe reads navigator.mediaDevices)
   mock.timers.enable({ apis: ['setTimeout'] });
-  return Promise.resolve(fn()).finally(() => { mock.timers.reset(); globalThis.window = realWin; globalThis.performance = realPerf; });
+  return Promise.resolve(fn()).finally(() => { mock.timers.reset(); globalThis.window = realWin; globalThis.performance = realPerf; globalThis.navigator = realNav; });
 }
 const EOT = TUNING.WEBSPEECH_EOT_MS;
 
