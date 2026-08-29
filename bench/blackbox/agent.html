@@ -16,6 +16,21 @@
   const sttProvider = q.get('stt') || 'deepgram';
   const log = (s) => { const d = document.createElement('div'); d.textContent = s; document.getElementById('log').prepend(d); };
 
+  // ── INSTRUMENTATION: internal milestones on the EPOCH clock (mergeable with the driver's
+  // timeline — same machine, same clock). Pulled after the run via window.__bench.
+  const nw = (s) => { let n = 0; for (const c of s || '') if (!/\s/.test(c)) n++; return n; };
+  window.__bench = [];
+  const rec = (type, extra = {}) => window.__bench.push({ epoch: Date.now(), type, ...extra });
+  // First streamed byte of each LLM response = llm_first_token (covers speculative prefetches too).
+  const origFetch = window.fetch.bind(window);
+  window.fetch = async (...a) => {
+    const r = await origFetch(...a);
+    if (!String(a[0]).includes('/v1/chat/completions') || !r.body) return r;
+    let first = false;
+    const ts = new TransformStream({ transform(c, ctrl) { if (!first) { first = true; rec('llm_first_token'); } ctrl.enqueue(c); } });
+    return new Response(r.body.pipeThrough(ts), r);
+  };
+
   prewarmVoice();
 
   const agent = new VoiceAgent({
@@ -25,9 +40,19 @@
     sttProvider,
     sttTokenUrl: `${location.origin}/bench/stt-token`,   // bench server mints (provider grant endpoints reject browser CORS)
     onEvent: (e) => {
-      if (e.type === 'state') document.getElementById('state').textContent = e.state;
-      if (e.type === 'stt' && e.turnComplete) log(`stt: ${e.text}`);
-      if (e.type === 'assistant' && e.final) log(`said: ${e.text}`);
+      if (e.type === 'state') {
+        document.getElementById('state').textContent = e.state;
+        if (e.state === 'thinking') rec('turn_committed');
+      }
+      if (e.type === 'stt') {
+        if (e.turnComplete) { rec('stt_final', { text: e.text }); log(`stt: ${e.text}`); }
+        else if (e.text) rec('stt_partial', { text: e.text });
+      }
+      if (e.type === 'echo') rec('echo_drop', { text: e.text });
+      if (e.type === 'assistant' && e.final) {
+        rec('reply_done', { heardNw: nw(e.text), totalNw: nw(e.full ?? e.text) });
+        log(`said: ${e.text}`);
+      }
       if (e.type === 'error') log(`ERR: ${e.error}`);
     },
   });

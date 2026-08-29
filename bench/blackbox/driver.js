@@ -53,7 +53,7 @@ setInterval(() => {                                  // realtime pacing: one 100
 
 // ── speaker side: record + live speech gate ────────────────────────────────────────────────────
 const events = [];
-const ev = (type, extra = {}) => events.push({ t: Math.round(now() - t0), type, ...extra });
+const ev = (type, extra = {}) => events.push({ t: Math.round(now() - t0), epoch: Date.now(), type, ...extra });
 const spk = spawn('pacat', ['--record', '-d', 'bench_spk.monitor', '--raw', `--rate=${RATE}`, '--channels=1', '--format=s16le', '--latency-msec=40']);
 spk.on('exit', (c) => { if (c && !done) { console.error('pacat spk exited', c); process.exit(1); } });
 

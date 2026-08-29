@@ -39,6 +39,16 @@ const clipEvents = segs.flatMap((s) => [
 
 // Person + barge events from the driver; drop its live clip_* in favor of the offline ones.
 const personEvents = run.events.filter((e) => e.type.startsWith('person_'));
+
+// INSTRUMENTED merge: if the SUT page recorded internal milestones (window.__bench, epoch-clocked),
+// re-base them onto driver time via the shared epoch (same machine, same clock) and fold them in.
+// stt/turn/llm/reply events come from inside; audio truth (clips, barge) still comes from the recording.
+let insideEvents = [];
+if (run.browserEvents?.length) {
+  const anchor = run.events.find((e) => e.epoch != null);
+  const epochT0 = anchor.epoch - anchor.t;   // epoch value at driver t=0
+  insideEvents = run.browserEvents.map(({ epoch, type, ...extra }) => ({ t: Math.round(epoch - epochT0), type, ...extra }));
+}
 // barge_stop: for each scripted interrupt, the first offline clip_end after that person_start.
 const bargeEvents = scenario.turns.flatMap((turn, k) => {
   if (!turn.interrupt) return [];
@@ -48,7 +58,8 @@ const bargeEvents = scenario.turns.flatMap((turn, k) => {
 });
 
 // ── optional: transcribe each reply segment → spokenRatio + response fidelity ───────────────────
-const key = process.env.OPENAI_API_KEY;
+// Skipped when instrumented events exist (they carry exact reply_done/heardNw already).
+const key = insideEvents.length ? null : process.env.OPENAI_API_KEY;
 const replyEvents = [];
 if (key) {
   const nw = (s) => { let n = 0; for (const c of s) if (!/\s/.test(c)) n++; return n; };
@@ -73,9 +84,9 @@ if (key) {
   }
 }
 
-const events = [...personEvents, ...clipEvents, ...bargeEvents, ...replyEvents].sort((a, b) => a.t - b.t);
+const events = [...personEvents, ...clipEvents, ...bargeEvents, ...replyEvents, ...insideEvents].sort((a, b) => a.t - b.t);
 const metrics = computeMetrics(events, scenario);
-const report = formatReport(metrics, `${run.label} / ${run.scenario} (black-box)`);
+const report = formatReport(metrics, `${run.label} / ${run.scenario} (${insideEvents.length ? 'black-box + instrumented' : 'black-box'})`);
 const out = runFile.replace(/\.json$/, '.report.json');
 writeFileSync(out, JSON.stringify({ ...run, offlineEvents: events, metrics }, null, 2));
 console.log(report + `\n\nsaved → ${out}` + (key ? '' : '\n(no OPENAI_API_KEY — spokenRatio/WER columns skipped)'));
