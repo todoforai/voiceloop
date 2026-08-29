@@ -60,7 +60,7 @@
       }
       if (e.type === 'echo') rec('echo_drop', { text: e.text });
       if (e.type === 'vad') rec('vad', { on: e.speaking ?? e.on });
-      if (e.type === 'diag') rec('diag', { msg: e.msg ?? JSON.stringify(e) });
+      if (e.type === 'diag') rec('diag', { msg: JSON.stringify(e) });
       if (e.type === 'assistant' && e.final) {
         rec('reply_done', { heardNw: nw(e.text), totalNw: nw(e.full ?? e.text) });
         log(`said: ${e.text}`);
@@ -72,6 +72,6 @@
   // fake-ui-for-media-stream auto-grants mic; autoplay-policy=no-user-gesture-required lets audio out.
   await unlockAudio();
   await agent.start();
-  log('agent running');
+  window.__agent = agent; log(`agent running`);
 </script>
 </body></html>

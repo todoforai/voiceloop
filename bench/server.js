@@ -85,7 +85,7 @@ http.createServer(async (req, res) => {
   if (!path.startsWith(ROOT)) { res.writeHead(403); return res.end(); }
   try {
     const data = readFileSync(path);
-    res.writeHead(200, { 'Content-Type': MIME[extname(path)] ?? 'application/octet-stream' });
+    res.writeHead(200, { 'Content-Type': MIME[extname(path)] ?? 'application/octet-stream', 'Cache-Control': 'no-store' });   // bench iterates on src/ constantly — never serve stale modules
     res.end(data);
   } catch { res.writeHead(404); res.end('not found'); }
 }).listen(PORT, () => console.log(`bench server: http://localhost:${PORT}/bench/run.html  (scenario: ${scenario.name}, ${scenario.turns.length} turns)`));

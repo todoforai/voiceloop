@@ -310,3 +310,49 @@ test('replay from offset 0 plays the whole reply from the start', async () => {
   assert.ok(firstClipText.startsWith('One'), 'starts at the first sentence');
   assert.equal(out, reply);
 });
+
+// ── speculative first-clip presynth ─────────────────────────────────────────────────────────────
+// presynth() pre-renders the expected first chunk during the end-of-turn debounce; speak() must
+// reuse the clip on exact text match, re-synth on mismatch, and never leak a stale clip forward.
+
+class CountingTTS extends StreamingTTS {
+  constructor() { super('v'); this.synths = []; }
+  async _synth(text) { if (text) this.synths.push(text); return text ? blob(text) : null; }
+}
+
+// Drive a speak() to completion: keep ending whatever clip is playing until speak resolves
+// (between clips _audio is briefly null — poll rather than assume).
+const driveToEnd = async (tts, p) => {
+  let done = false; p.then(() => { done = true; });
+  while (!done) { if (tts._audio) driver(tts._audio).end(); await settle(); }
+  return p;
+};
+
+test('presynth hit: matching first chunk is not synthesized twice', async () => {
+  const tts = new CountingTTS();
+  tts.presynth('Hello');   // = the stage-0 chunk firstWordEnd yields from this reply
+  await settle();
+  const p = tts.speak(async function* () { yield 'Hello there, how are you today.'; }());
+  await driveToEnd(tts, p);
+  assert.equal(tts.synths.filter((s) => s === 'Hello').length, 1, 'first chunk rendered exactly once (by presynth)');
+  assert.equal(tts._preClip, null, 'slot consumed');
+});
+
+test('presynth miss: different reply re-synthesizes and drops the stale clip', async () => {
+  const tts = new CountingTTS();
+  tts.presynth('Wrong guess,');
+  await settle();
+  const p = tts.speak(async function* () { yield 'Actually no. Something else entirely.'; }());
+  const heard = await driveToEnd(tts, p);
+  assert.equal(heard, 'Actually no. Something else entirely.');
+  assert.ok(tts.synths.some((s) => s.startsWith('Actually')), 'real first chunk synthesized');
+  assert.equal(tts._preClip, null, 'stale speculation cleared, not leaked to a later reply');
+});
+
+test('presynth is deduped for the same text', async () => {
+  const tts = new CountingTTS();
+  tts.presynth('Same text');
+  tts.presynth('Same text');
+  await settle();
+  assert.equal(tts.synths.filter((s) => s === 'Same text').length, 1);
+});

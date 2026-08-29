@@ -703,6 +703,29 @@ export class VoiceAgent {
   // the first .next()), so by the time the turn closes the first tokens are usually already here.
   // Never speaks, never touches this.history — _speakTurn consumes it via _takePrefetch() only when
   // the closed turn's text matches exactly; any mismatch/staleness just aborts it.
+  // SPECULATIVE FIRST-CLIP SYNTH: the same dead-time trick as the LLM prefetch, one stage deeper.
+  // By the time the end-of-turn debounce closes, the prefetch usually holds the reply's opening
+  // words — but Piper's first predict() (the whole post-commit critical path, ~300-900ms of WASM
+  // inference) only started AFTER the commit. Here we pull JUST the first chunk out of the running
+  // speculation and hand it to the TTS to pre-synthesize during the debounce, so when the turn
+  // closes the first clip is already (or nearly) done and playback starts almost immediately.
+  // Safe where tools are not: synth has zero side effects — a stale speculation wastes one tiny
+  // predict, nothing more. Serial-session cost is bounded: the chunk is the reply's first WORDS
+  // (stage-0 breaker, ~a dozen chars), so even a wasted predict delays a real turn only briefly.
+  async _presynthFirstClip(p) {
+    if (!this.tts.presynth) return;
+    try {
+      const f = await p.first;                             // opening delta of the speculation
+      if (f.done || p.ctl.signal.aborted || this._prefetch !== p) return;
+      p.first = Promise.resolve(f);                        // re-stitch: first was consumed here, adoption must still see it
+      // LLM chunks are { text } / { tool, … } objects (or raw strings from simple custom llms) —
+      // only text is voiceable.
+      const chunk = typeof f.value === 'string' ? f.value : (f.value?.text ?? '');
+      const end = firstWordEnd(chunk);
+      if (end > 0) this.tts.presynth(chunk.slice(0, end).trim());   // enough for the stage-0 chunk → warm the exact clip
+    } catch { /* speculation failed/aborted — the real turn re-runs it */ }
+  }
+
   _startPrefetch(text) {
     // NEVER speculate when the LLM executes tools INSIDE its generator (llm.executesTools): pulling
     // the first chunk of a speculation could fire real side effects on a transcript the user is
@@ -720,6 +743,7 @@ export class VoiceAgent {
     const p = { text, ctl, gen, first: gen.next(), histLen: this.history.length };   // pull NOW → fetch fires during the debounce; histLen pins the base the speculation saw
     p.first.catch(() => {});                           // aborted/failed speculation must not be an unhandled rejection
     this._prefetch = p;
+    this._presynthFirstClip(p);                        // fire-and-forget: warm the first TTS clip off the same speculation
   }
   _dropPrefetch() {
     clearTimeout(this._prefetchTimer); this._prefetchTimer = null;
@@ -1402,7 +1426,26 @@ export class StreamingTTS {
   // `onProgress(spokenText)` (set via setOnProgress) fires while a clip plays with the chars heard
   // SO FAR across the whole reply — drives the host's live "spoken cursor".
   constructor(voiceId, speed = 1.0) { this.voiceId = voiceId; this.speed = speed; this._audio = null; this._onProgress = null;
-    this._tape = null; this._speaking = false; this._seekTarget = null; this._seekPending = false; this._curIdx = -1; }
+    this._tape = null; this._speaking = false; this._seekTarget = null; this._seekPending = false; this._curIdx = -1;
+    this._synthQ = Promise.resolve(); this._preClip = null; }
+
+  // Serialize EVERY synth through one instance-level queue: a single ONNX session cannot run two
+  // predict()s, and presynth() below may fire while a previous reply's chain is still draining.
+  // Returns a promise that RESOLVES (wav or null-on-error) — callers surface errors per-entry.
+  _enqueueSynth(text, signal) {
+    const run = this._synthQ.then(() => this._synth(stripMd(text) || text, signal), () => null);   // || raw: a pure-syntax chunk strips to empty — voice the raw rather than abort
+    this._synthQ = run.catch(() => null);
+    return run;
+  }
+
+  // SPECULATIVE first-clip synth (see VoiceAgent._presynthFirstClip): pre-render the expected first
+  // chunk of the NEXT reply during the end-of-turn debounce, so speak() finds the clip already made.
+  // Single-slot cache keyed by exact chunk text; a mismatched or unused clip is simply dropped.
+  presynth(text) {
+    if (!text || this._preClip?.text === text) return;
+    this.onEvent?.({ type: 'diag', diag: 'presynth', text });
+    this._preClip = { text, blobP: this._enqueueSynth(text).catch(() => null) };
+  }
   setSpeed(speed) { this.speed = speed; }
   setVoice(voiceId) { this.voiceId = voiceId; }
   setOnProgress(fn) { this._onProgress = fn; }
@@ -1526,22 +1569,25 @@ export class StreamingTTS {
     // parked in awaitEntry() never hangs past an abort/barge-in even if the LLM stream is slow to react.
     const bump = () => { const w = wake; wake = null; w?.(); };
     this._ttsWake = bump;             // let seek() wake a consumer parked in a stream gap (see seek())
-    // Synth is serial: ONE ONNX session can't run concurrent predict()s. We chain each _synth behind
-    // the previous (synthChain) so audio is produced one-at-a-time, in order — but the TEXT stream
-    // (it.next(), which drives the LLM) is drained as fast as tokens arrive, decoupled from both synth
-    // pace AND playback pace. That's the whole fix: generation no longer stalls sentence-by-sentence.
-    let synthChain = Promise.resolve();
+    // Synth is serial: ONE ONNX session can't run concurrent predict()s. Every _synth goes through
+    // the instance-level _synthQ (see _enqueueSynth) so audio is produced one-at-a-time, in order —
+    // but the TEXT stream (it.next(), which drives the LLM) is drained as fast as tokens arrive,
+    // decoupled from both synth pace AND playback pace: generation never stalls sentence-by-sentence.
     const pull = async () => {
       const r = await it.next();
       if (r.done) return null;
-      const prev = synthChain;
-      // Each clip's synth is chained AFTER the previous one → serial synthesis (one ONNX predict at a
-      // time). blobP always RESOLVES — to the wav, or to null carrying the error on the entry — so an
-      // ahead-of-playback synth failure never raises unhandledrejection; the chain keeps going for the
-      // rest of the reply, and the consumer re-throws entry.err only if it actually reaches this clip.
-      synthChain = prev.then(() => this._synth(stripMd(r.value) || r.value, signal), () => null);   // raw text drives the cursor/seek; only the audio gets markdown stripped (|| r.value: a pure-syntax chunk strips to empty — voice the raw rather than abort the turn)
       const entry = { text: r.value, nwStart: nwTotal };
-      entry.blobP = synthChain.catch((e) => { entry.err = e; return null; });
+      // Speculative hit: the first chunk was already rendered during the end-of-turn debounce
+      // (presynth) with EXACTLY this text — reuse the clip instead of predicting again. Single-shot:
+      // hit or miss, the slot is cleared (a stale speculation must not leak into a later reply).
+      const pre = tape.length === 0 ? this._preClip : null;
+      if (pre) this.onEvent?.({ type: 'diag', diag: pre.text === r.value ? 'presynth-hit' : 'presynth-miss', text: r.value, pre: pre.text });
+      this._preClip = null;
+      // blobP always RESOLVES — to the wav, or null carrying the error on the entry — so an
+      // ahead-of-playback synth failure never raises unhandledrejection; the queue keeps going for
+      // the rest of the reply, and the consumer re-throws entry.err only if it actually reaches it.
+      const p = pre && pre.text === r.value ? pre.blobP : this._enqueueSynth(r.value, signal);
+      entry.blobP = p.catch((e) => { entry.err = e; return null; });
       tape.push(entry);
       nwTotal += nw(r.value);
       return entry;
@@ -1610,7 +1656,7 @@ export class StreamingTTS {
       // return while one is running — the next turn would start a second predict() on the same session.
       // Await the producer first (it may queue one last synth after the abort check), then the tail.
       await produce.catch(() => {});
-      await synthChain.catch(() => {});
+      await this._synthQ.catch(() => {});
       this._ttsWake = null;
       this._speaking = false; this._tape = null; this._seekTarget = null; this._seekPending = false; this._curIdx = -1;
     }

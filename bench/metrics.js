@@ -72,8 +72,12 @@ export function computeMetrics(events, scenario) {
     t.eotMs = commit ? Math.round(commit.t - end.t) : null;
 
     // LLM + TTS: first token → first audible clip. voiceToVoice is the headline: person stops → agent audible.
-    const tok = firstAfter(events, 'llm_first_token', end.t - 2000, windowEnd);    // -2000: speculative prefetch fires DURING the person's speech
+    // A turn can carry SEVERAL llm_first_token events (aborted speculative prefetches + the real
+    // request) — attribute the LATEST one before the reply's first clip: that's the stream that
+    // actually fed the TTS (an adopted prefetch is the only token and still wins, staying negative).
     const clip = firstAfter(events, 'clip_start', end.t, windowEnd);
+    const toks = between(events, 'llm_first_token', end.t - 2000, clip?.t ?? windowEnd);   // -2000: prefetch fires DURING the person's speech
+    const tok = toks[toks.length - 1] ?? null;
     t.llmFirstTokenMs = tok ? Math.round(tok.t - end.t) : null;                    // negative = prefetch beat the turn close
     t.ttsFirstAudioMs = tok && clip ? Math.round(clip.t - tok.t) : null;
     t.voiceToVoiceMs = clip ? Math.round(clip.t - end.t) : null;
