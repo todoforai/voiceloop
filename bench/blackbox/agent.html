@@ -21,6 +21,16 @@
   const nw = (s) => { let n = 0; for (const c of s || '') if (!/\s/.test(c)) n++; return n; };
   window.__bench = [];
   const rec = (type, extra = {}) => window.__bench.push({ epoch: Date.now(), type, ...extra });
+  // RIG FIX: the virtual mic has NO acoustic coupling to the virtual speaker (headset-equivalent),
+  // but Chrome's AEC — with the TTS as far-end reference and zero echo to find — suppresses the
+  // person's speech during playback (double-talk suppression), eating whole interruptions.
+  // Force echoCancellation off unless ?aec=on (to test the speakers-with-echo scenario instead).
+  if (q.get('aec') !== 'on') {
+    const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = (c) =>
+      gum(c?.audio ? { ...c, audio: { ...(c.audio === true ? {} : c.audio), echoCancellation: false, noiseSuppression: false } } : c);
+  }
+
   // First streamed byte of each LLM response = llm_first_token (covers speculative prefetches too).
   const origFetch = window.fetch.bind(window);
   window.fetch = async (...a) => {
@@ -49,6 +59,8 @@
         else if (e.text) rec('stt_partial', { text: e.text });
       }
       if (e.type === 'echo') rec('echo_drop', { text: e.text });
+      if (e.type === 'vad') rec('vad', { on: e.speaking ?? e.on });
+      if (e.type === 'diag') rec('diag', { msg: e.msg ?? JSON.stringify(e) });
       if (e.type === 'assistant' && e.final) {
         rec('reply_done', { heardNw: nw(e.text), totalNw: nw(e.full ?? e.text) });
         log(`said: ${e.text}`);
