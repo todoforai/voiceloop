@@ -49,12 +49,16 @@ if (run.browserEvents?.length) {
   const epochT0 = anchor.epoch - anchor.t;   // epoch value at driver t=0
   insideEvents = run.browserEvents.map(({ epoch, type, ...extra }) => ({ t: Math.round(epoch - epochT0), type, ...extra }));
 }
-// barge_stop: for each scripted interrupt, the first offline clip_end after that person_start.
+// barge_stop: for each scripted interrupt, the end of the clip ACTIVE while the person speaks.
+// A clip must overlap the interrupting utterance — otherwise the interrupt landed in a gap between
+// the agent's sentences (nothing to cut) and attributing the NEXT reply's clip_end would be bogus.
 const bargeEvents = scenario.turns.flatMap((turn, k) => {
   if (!turn.interrupt) return [];
   const ps = personEvents.find((e) => e.type === 'person_start' && e.turn === k);
-  const stop = ps && clipEvents.find((e) => e.type === 'clip_end' && e.t >= ps.t);
-  return stop ? [{ t: stop.t, type: 'barge_stop' }] : [];
+  const pe = personEvents.find((e) => e.type === 'person_end' && e.turn === k);
+  if (!ps) return [];
+  const active = segs.find((s) => s.startMs + offsetMs < (pe?.t ?? ps.t + 3000) && s.endMs + offsetMs > ps.t);
+  return active ? [{ t: Math.round(active.endMs + offsetMs), type: 'barge_stop' }] : [];
 });
 
 // ── optional: transcribe each reply segment → spokenRatio + response fidelity ───────────────────

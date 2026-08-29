@@ -58,8 +58,12 @@ export function computeMetrics(events, scenario) {
     t.firstPartialMs = p ? Math.round(p.t - start.t) : null;
     // Black-box runs see no STT internals: wer only when a final was actually observed, else null
     // (an INSTRUMENTED run that lost the final still counts it as a total miss via hasStt).
+    // Matching is BEST-WER within a generous window, not first-in-window: some stacks (ElevenLabs)
+    // only surface the user transcript alongside the agent's reply — after the next turn already
+    // started — so a strict [start, nextStart) window would misattribute perfectly-heard turns.
     const hasStt = events.some((e) => e.type === 'stt_final' || e.type === 'stt_partial');
-    const fin = firstAfter(events, 'stt_final', start.t, windowEnd);
+    const finals = between(events, 'stt_final', start.t - 500, windowEnd + 15000).filter((e) => e.text?.trim() && e.text !== '...');
+    const fin = finals.reduce((best, e) => (!best || wer(script.person, e.text) < wer(script.person, best.text) ? e : best), null);
     t.sttFinal = fin?.text ?? '';
     t.wer = fin ? +wer(script.person, fin.text).toFixed(3) : (hasStt ? 1 : null);
 

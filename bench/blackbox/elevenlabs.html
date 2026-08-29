@@ -1,0 +1,49 @@
+<!doctype html>
+<!-- bench/blackbox/elevenlabs.html — ElevenLabs Agents (ConvAI) as a SYSTEM UNDER TEST.
+     Same virtual-audio contract as agent.html: launch Chrome with PULSE_SOURCE=bench_mic
+     PULSE_SINK=bench_spk. The agent is configured (server-side, on the EL platform) to call our
+     tunneled mock LLM, so the "brain" is the same fixed script as every other SUT.
+     Query: ?agent=<agent_id>  [&aec=on to keep Chrome AEC]                                      -->
+<html lang="en">
+<head><meta charset="utf-8"><title>elevenlabs — bench SUT</title>
+<style>body{font:14px/1.5 monospace;margin:1rem} #log div{white-space:pre-wrap}</style></head>
+<body>
+<div id="state">booting…</div><div id="log"></div>
+<script type="module">
+  import { Conversation } from 'https://cdn.jsdelivr.net/npm/@elevenlabs/client@0.7.1/+esm';
+
+  const q = new URLSearchParams(location.search);
+  const log = (s) => { const d = document.createElement('div'); d.textContent = s; document.getElementById('log').prepend(d); };
+  const state = (s) => document.getElementById('state').textContent = s;
+
+  // Same rig fix as agent.html: virtual devices have no acoustic echo; Chrome AEC with a far-end
+  // reference and nothing to cancel suppresses the person's barge-ins. Off unless ?aec=on.
+  if (q.get('aec') !== 'on') {
+    const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = (c) =>
+      gum(c?.audio ? { ...c, audio: { ...(c.audio === true ? {} : c.audio), echoCancellation: false, noiseSuppression: false } } : c);
+  }
+
+  // Instrumentation: EL is a closed box, but its SDK callbacks still give user/agent transcript
+  // timing — recorded epoch-clocked like agent.html so merge-inside.js works unchanged.
+  window.__bench = [];
+  const rec = (type, extra = {}) => window.__bench.push({ epoch: Date.now(), type, ...extra });
+
+  try {
+    const r = await fetch(`${location.origin}/bench/el-signed-url`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: q.get('agent') }) });
+    const { signed_url } = await r.json();
+    const conv = await Conversation.startSession({
+      signedUrl: signed_url,
+      onModeChange: (m) => { state(m.mode); rec('mode', { mode: m.mode }); },          // 'speaking' | 'listening'
+      onMessage: (m) => {                                                              // transcripts (user + agent)
+        rec(m.source === 'user' ? 'stt_final' : 'agent_text', { text: m.message });
+        log(`${m.source}: ${m.message}`);
+      },
+      onStatusChange: (s) => { rec('status', { status: s.status }); log(`status: ${s.status}`); },
+      onError: (e) => log(`ERR: ${e}`),
+    });
+    window.__conv = conv;
+    log('conversation started');
+  } catch (e) { log(`FATAL: ${e.message}`); }
+</script>
+</body></html>

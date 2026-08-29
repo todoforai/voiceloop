@@ -62,6 +62,13 @@ http.createServer(async (req, res) => {
     let body = ''; for await (const c of req) body += c;
     try {
       if (url.pathname === '/v1/chat/completions') return await mockLLM(req, res, body);
+      if (url.pathname === '/bench/el-signed-url') {   // ElevenLabs ConvAI signed URL (key stays server-side)
+        const agentId = new URLSearchParams(body).get('agent_id') || JSON.parse(body || '{}').agent_id;
+        const r = await fetch(`https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${agentId}`, { headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY } });
+        const b = await r.json();
+        res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        return res.end(JSON.stringify(b));
+      }
       if (url.pathname === '/bench/stt-token') {   // browser can't call Deepgram's grant endpoint (CORS) — mint here
         const r = await fetch('https://api.deepgram.com/v1/auth/grant', { method: 'POST', headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` } });
         const b = await r.json();
