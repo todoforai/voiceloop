@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- bench/blackbox/agent.html — voiceloop AS A SYSTEM UNDER TEST for the black-box rig.
+     Plain voiceloop wired to the bench mock LLM (fixed responses); mic/speaker come from whatever
+     the browser is given — launch Chrome with PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk and
+     fake-ui-for-media-stream so no permission prompt blocks the run.
+     Query params: ?stt=deepgram|elevenlabs|webspeech (default deepgram) &token=<provider api key> -->
+<html lang="en">
+<head><meta charset="utf-8"><title>voiceloop — bench SUT</title>
+<style>body{font:14px/1.5 monospace;margin:1rem} #log div{white-space:pre-wrap}</style></head>
+<body>
+<div id="state">booting…</div><div id="log"></div>
+<script type="module">
+  import { VoiceAgent, unlockAudio, prewarmVoice } from '../../src/index.js';
+
+  const q = new URLSearchParams(location.search);
+  const sttProvider = q.get('stt') || 'deepgram';
+  const log = (s) => { const d = document.createElement('div'); d.textContent = s; document.getElementById('log').prepend(d); };
+
+  prewarmVoice();
+
+  const agent = new VoiceAgent({
+    llmUrl: `${location.origin}/v1/chat/completions`,   // the bench server's FIXED mock LLM
+    model: 'bench',
+    persona: 'irrelevant — the mock LLM ignores the prompt',
+    sttProvider,
+    sttTokenUrl: `${location.origin}/bench/stt-token`,   // bench server mints (provider grant endpoints reject browser CORS)
+    onEvent: (e) => {
+      if (e.type === 'state') document.getElementById('state').textContent = e.state;
+      if (e.type === 'stt' && e.turnComplete) log(`stt: ${e.text}`);
+      if (e.type === 'assistant' && e.final) log(`said: ${e.text}`);
+      if (e.type === 'error') log(`ERR: ${e.error}`);
+    },
+  });
+
+  // fake-ui-for-media-stream auto-grants mic; autoplay-policy=no-user-gesture-required lets audio out.
+  await unlockAudio();
+  await agent.start();
+  log('agent running');
+</script>
+</body></html>
