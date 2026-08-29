@@ -1,0 +1,89 @@
+<!doctype html>
+<!-- voiceloop minimal example: mic → agent → speaker. No bundler, no framework.
+     Serve the repo root (e.g. `npx serve` or `python3 -m http.server`) and open
+     /examples/simple-browser.html — file:// won't work (mic + module imports need http). -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>voiceloop — minimal example</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+    #talk { font-size: 1.1rem; padding: .6rem 1.6rem; border-radius: 2rem; border: 1px solid #888; cursor: pointer; }
+    #talk.on { background: #e33; color: #fff; border-color: #e33; }
+    #state { color: #888; margin-left: .8rem; }
+    .msg { margin: .8rem 0; }
+    .user { color: #06c; }
+    .agent .unspoken { color: #aaa; }
+  </style>
+</head>
+<body>
+  <h1>voiceloop</h1>
+  <p>
+    <button id="talk">Start talking</button>
+    <span id="state">idle</span>
+  </p>
+  <div id="log"></div>
+
+  <script type="module">
+    import { VoiceAgent, unlockAudio, prewarmVoice } from '../src/index.js';
+
+    prewarmVoice();   // preload VAD/WASM while the page sits idle
+
+    const $ = (id) => document.getElementById(id);
+    const log = $('log');
+    let userEl = null, agentEl = null;
+
+    const bubble = (cls) => {
+      const el = document.createElement('div');
+      el.className = `msg ${cls}`;
+      log.appendChild(el);
+      return el;
+    };
+
+    const agent = new VoiceAgent({
+      // Point at any OpenAI-compatible /chat/completions endpoint.
+      // For a quick local test: `ollama serve` and use its URL + a local model.
+      llmUrl: 'http://localhost:11434/v1/chat/completions',
+      model: 'llama3.2',
+
+      persona: 'You are a concise, friendly voice assistant.',
+
+      onEvent: (e) => {
+        if (e.type === 'state') {
+          $('state').textContent = e.state;
+        } else if (e.type === 'stt') {
+          userEl ??= bubble('user');
+          userEl.textContent = e.text;
+          if (e.turnComplete) userEl = null;
+        } else if (e.type === 'assistant') {
+          agentEl ??= bubble('agent');
+          const full = e.full ?? e.text;
+          agentEl.innerHTML = '';
+          agentEl.append(e.text);                       // spoken so far
+          if (full.length > e.text.length) {            // not yet spoken → dimmed
+            const rest = document.createElement('span');
+            rest.className = 'unspoken';
+            rest.textContent = full.slice(e.text.length);
+            agentEl.appendChild(rest);
+          }
+          if (e.final) agentEl = null;
+        } else if (e.type === 'error') {
+          bubble('user').textContent = `⚠ ${e.error}`;
+        }
+      },
+    });
+
+    $('talk').onclick = async () => {
+      if (agent.state === 'idle') {
+        unlockAudio();                                  // must happen inside the click gesture
+        $('talk').textContent = 'Stop'; $('talk').classList.add('on');
+        await agent.start();
+      } else {
+        agent.stop();
+        $('talk').textContent = 'Start talking'; $('talk').classList.remove('on');
+      }
+    };
+  </script>
+</body>
+</html>

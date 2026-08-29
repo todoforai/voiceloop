@@ -1,0 +1,169 @@
+# voiceloop
+
+**The fastest way to put a real, interruptible voice agent in the browser.**
+
+A zero-dependency JavaScript library that runs the full voice loop — **VAD → STT → LLM → TTS** — with the hard parts already solved:
+
+- **Real barge-in** — interrupt the agent mid-sentence. Triggers on *transcribed novel words*, not raw mic energy, so the agent's own voice leaking into the mic never cuts it off.
+- **Self-echo filtering** — a word-match filter compares what the mic hears against what the agent is currently saying. Works even when browser echo cancellation is weak.
+- **First-sentence streaming TTS** — the LLM streams text, TTS synthesizes the first sentence *while the rest is still generating*, then stays one sentence ahead. First audio in well under a second.
+- **Speculative prefetch** — the LLM call starts while you're still finishing your sentence, overlapping model latency with the end-of-turn pause. Replies feel instant.
+- **Tap-to-seek** — playback keeps a tape of synthesized clips; tap anywhere in the transcript to jump the voice there, backward or forward.
+- **Turn serialization** — rapid-fire turns, tool results, holds and replays can never overlap or talk over each other. Locked in by a 100-test regression suite.
+- **Local-first defaults** — Silero VAD (WASM) and Piper TTS (WASM) run entirely in the browser. Free, offline-capable, no cloud round-trip for voice output.
+
+Everything is pluggable: bring your own LLM (any OpenAI-compatible endpoint or a custom async generator), pick an STT provider (Web Speech, ElevenLabs Scribe, Deepgram Flux, Speechmatics), swap the TTS.
+
+## Quick start
+
+```js
+import { VoiceAgent, unlockAudio, prewarmVoice } from 'voiceloop';
+
+prewarmVoice(); // optional: preload VAD/WASM while your UI sits idle
+
+const agent = new VoiceAgent({
+  // Any OpenAI-compatible /chat/completions endpoint. In production point this at
+  // YOUR proxy route — never ship a provider secret key to the page.
+  llmUrl: '/api/chat/completions',
+  model: 'gpt-4o-mini',
+
+  persona: 'You are a friendly cooking assistant.',
+  sysmsg: 'The user is on the recipes page.',   // live context, update via setSysmsg()
+
+  onEvent: (e) => {
+    if (e.type === 'stt')       render.user(e.text, e.final);
+    if (e.type === 'assistant') render.agent(e.text, e.full);   // e.text = spoken so far
+    if (e.type === 'state')     render.state(e.state);          // idle|listening|thinking|speaking
+    if (e.type === 'error')     console.error(e.error);
+  },
+});
+
+// From a click handler (browsers require a gesture for audio + mic):
+button.onclick = async () => {
+  unlockAudio();
+  await agent.start();
+};
+```
+
+That's it. Speak, get spoken answers, interrupt at will.
+
+## How the latency adds up
+
+```
+you stop speaking ──┐
+                    │  end-of-turn debounce (~600ms)
+   LLM prefetch ────┤  ← already streaming since your interim transcript stabilized
+                    │
+first LLM tokens ───┤  first sentence boundary (~8+ chars)
+                    │  Piper synthesizes sentence 1 while sentence 2 streams in
+first audio ────────┘  next sentences pre-synthesized during playback → zero gaps
+```
+
+## STT providers
+
+```js
+new VoiceAgent({ sttProvider: 'webspeech' })     // default: free, browser-native (Chrome/Safari)
+new VoiceAgent({ sttProvider: 'elevenlabs',  sttTokenUrl: '/api/stt/token' })
+new VoiceAgent({ sttProvider: 'deepgram',    sttTokenUrl: '/api/stt/token' })
+new VoiceAgent({ sttProvider: 'speechmatics', sttTokenUrl: '/api/stt/token' })
+```
+
+Cloud providers authenticate with a **short-TTL token minted by your backend** so the raw API key never reaches the page. Either:
+
+- `sttTokenUrl` — a POST route on your server that returns `{ token }` (mint it against the provider's temp-token API with your secret key), or
+- `getSttToken` — an async callback `() => ({ token })` when your auth doesn't fit a bare POST.
+
+`webspeech` automatically falls back to a cloud provider on browsers without SpeechRecognition (Firefox, WebKitGTK).
+
+| Provider | End-of-turn | Notes |
+|---|---|---|
+| `webspeech` | VAD-gated | Free, on-device, Chrome/Safari only |
+| `elevenlabs` | VAD-gated | Scribe v2 realtime, great accuracy |
+| `deepgram` | **Native** (Flux) | Provider's own turn model hears the full stream |
+| `speechmatics` | VAD-gated | Cheapest per second, locked-words-only finals |
+
+## Bring your own LLM
+
+The default adapter speaks OpenAI's streaming wire format (OpenAI, Groq, Cerebras, OpenRouter, Ollama, vLLM, LiteLLM, ...). For anything else, pass an async generator:
+
+```js
+const agent = new VoiceAgent({
+  llm: async function* (history, system, signal) {
+    // history: [{ role: 'user'|'assistant', content }], system: composed persona+context
+    for await (const delta of myProvider.stream({ history, system, signal })) {
+      yield { text: delta };                        // speech text → streamed into TTS
+      // yield { tool: 'name', args: {...} };       // tool call → fired during playback
+    }
+  },
+});
+```
+
+## Tools
+
+```js
+const agent = new VoiceAgent({
+  tools: {
+    get_weather: {
+      description: 'Current weather for a city',
+      params: { city: { type: 'string' } },       // JSON-schema properties
+      run: async ({ city }) => fetchWeather(city), // fires DURING speech, in parallel
+    },
+  },
+});
+```
+
+Tool calls execute while the agent is still talking. Results are recorded in a per-turn ledger so the model never re-fires the same call, and `agent.notify('[TOOL RESULT get_weather] 22°C sunny')` relays an async outcome back for a spoken follow-up — bursts of results collapse into one reply instead of three interrupting monologues.
+
+## API surface
+
+```js
+await agent.start(deviceId?)   // acquire mic, begin listening (needs a user gesture)
+agent.stop()                   // pause — pipeline stays warm for instant resume
+agent.destroy()                // full teardown
+agent.sendUserText(text)       // typed input, same turn pipeline as speech
+agent.notify(text)             // soft turn: reply only if nothing newer is queued
+agent.setHeld(bool)            // hold: queue utterances, reply over all of them on release
+agent.setMuted(bool)           // mic mute
+agent.setTtsMuted(bool)        // silent mode: transcript + tools still run
+agent.setSysmsg(text)          // update live context mid-session
+agent.seek(charIndex)          // tap-to-seek within the current reply
+agent.replay(text)             // re-voice a past reply
+agent.dumpAudio()              // last 30s of mic audio as WAV + stall report (debugging)
+```
+
+Events via `onEvent(e)`: `state`, `stt`, `assistant`, `tool`, `vad`, `echo`, `error`, `diag`.
+
+## Tuning
+
+Every latency/sensitivity knob lives in [`src/tuning.js`](src/tuning.js) — VAD thresholds, barge-in minimum characters, sentence-break aggressiveness, prefetch stability window, echo-match threshold. Constructor options (`bargeInMinChars`, `vadOptions`, `turnDetector`, `maxPauseMs`) override per-agent.
+
+## TTS
+
+Default is **Piper** (local WASM, free, many languages and voices):
+
+```js
+import { PiperTTS } from 'voiceloop';
+new VoiceAgent({ tts: new PiperTTS('en_US-amy-medium', 1.15) });  // voice, speed
+```
+
+Custom engines subclass `StreamingTTS` and implement one method:
+
+```js
+class MyTTS extends StreamingTTS {
+  async _synth(text) { return wavBlob; }   // sentence in, audio Blob out
+}
+```
+
+Sentence chunking, the playback tape, tap-to-seek, barge-in and progress reporting all come from the base class.
+
+## Testing
+
+```
+npm test        # 101 tests, no browser needed
+```
+
+The suite locks in turn serialization, hold/release semantics, tool dedup, self-echo classification, prefetch adoption rules, tape seeking, and each STT provider's turn-boundary state machine.
+
+## License
+
+MIT

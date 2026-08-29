@@ -1,0 +1,44 @@
+{
+  "name": "voiceloop",
+  "version": "0.1.0",
+  "description": "Fast, interruptible browser voice agent: VAD → STT → LLM → TTS with real barge-in, echo filtering, streaming first-sentence TTS and tap-to-seek. Zero runtime dependencies.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./stt": "./src/stt.js",
+    "./tuning": "./src/tuning.js",
+    "./llm-openai": "./src/llm-openai.js"
+  },
+  "files": [
+    "src",
+    "!src/*.test.js"
+  ],
+  "scripts": {
+    "test": "node --test src/*.test.js"
+  },
+  "keywords": [
+    "voice",
+    "voice-agent",
+    "speech",
+    "stt",
+    "tts",
+    "vad",
+    "barge-in",
+    "llm",
+    "realtime",
+    "conversational-ai",
+    "elevenlabs",
+    "deepgram",
+    "speechmatics",
+    "piper"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/todoforai/voiceloop.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
