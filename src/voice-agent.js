@@ -651,7 +651,7 @@ export class VoiceAgent {
   }
 
   // Inject an out-of-band turn: feed `text` to the LLM as if the user had said it, then speak the
-  // reply. Used by the host to surface external events (a tool result, a background TODO finishing)
+  // reply. Used by the host to surface external events (a tool result, a background job finishing)
   // — only meaningful while the agent is running, so it's a no-op once stopped.
   //
   // SOFT turn (supersede: false): unlike a user utterance this must NOT cut the reply in flight.
@@ -804,11 +804,11 @@ export class VoiceAgent {
     let answer = '', calls = [];
     // The tools this turn dispatched, as a ledger line recorded INTO its assistant message. The
     // runtime's tool calls are fire-and-forget (no tool_use/tool_result pair on the wire, and history
-    // is provider-neutral {role, content} text), so without this the history reads as if he never
-    // called anything and the next turn happily calls it AGAIN — the duplicate-todo spam. Legacy
-    // calls: the outcome arrives separately as the host's `[TOOL RESULT <name>]` relay turn. Loop
-    // calls (agentLoop) arrive with the outcome ATTACHED and there is no relay turn, so the ledger
-    // line carries it — bounded — or the next turn would see the call with no result and lose what
+    // is provider-neutral {role, content} text), so without this the history reads as if it never
+    // called anything and the next turn happily calls it AGAIN — duplicate tool-call spam. Relayed
+    // calls: the outcome arrives separately as the host's `[TOOL RESULT <name>]` notify() turn.
+    // Custom LLMs that execute tools inside their own generator (llm.executesTools) attach the
+    // outcome directly, so the ledger line carries it — bounded — or the next turn would see the call with no result and lose what
     // the model learned (a barge-in cuts the spoken follow-up but not the fact). Read late (the
     // stream may still be appending) and on EVERY exit path, including a failed reply.
     const toolNote = () => calls.map((c) => `[TOOL CALL ${c.tool}] ${callArgs(c)}${ledgerOutcome(c)}`).join('\n');
@@ -819,7 +819,7 @@ export class VoiceAgent {
         if (item.tool) {
           // Same key = same act (provider re-emit / model asking twice). A MIMIC chunk carries no id,
           // so also match by name+args across the id boundary — a typed echo of an id-carrying native
-          // call (agent-loop mode) must collapse too, or it would execute the tool a second time.
+          // call (llm.executesTools mode) must collapse too, or it would execute the tool a second time.
           const dup = calls.some((c) => callKey(c) === callKey(item) ||
             ((!c.id || !item.id) && c.tool === item.tool && callArgs(c) === callArgs(item)));
           if (!dup) { calls.push(item); self._runTool(item); }
@@ -982,6 +982,9 @@ export class VoiceAgent {
   _onSpeechEnd() { this._speaking = false; this.onEvent({ type: 'vad', active: false }); this._endOfSpeech(); }
 
   async _startVad(gen) {
+    // Self-serve the UMD deps (onnxruntime + vad-web) if the host never called prewarmVoice() —
+    // prewarming is an optimization, not a setup requirement.
+    if (!window.vad) { const { loadVoiceDeps } = await import('./deps.js'); await loadVoiceDeps(); }
     const d = window.vad;
     const vad = await d.MicVAD.new({
       model: 'v5',
@@ -1648,7 +1651,16 @@ export class PiperTTS extends StreamingTTS {
   // webpackIgnore is honored by webpack AND Turbopack (vite needs its own marker) — without it
   // bundlers rewrite this into their runtime require, which can't load a URL
   // ("turbopack_context.x is not a function").
-  async _tts() { return this._lib ??= await import(/* webpackIgnore: true */ /* @vite-ignore */ CDN_PIPER); }
+  async _tts() {
+    return this._lib ??= (async () => {
+      // Piper imports a bare "onnxruntime-web" specifier resolved via the importmap that
+      // loadVoiceDeps() installs — ensure it exists before the module loads.
+      if (typeof document !== 'undefined' && !document.getElementById('vl-importmap')) {
+        const { loadVoiceDeps } = await import('./deps.js'); await loadVoiceDeps();
+      }
+      return import(/* webpackIgnore: true */ /* @vite-ignore */ CDN_PIPER);
+    })();
+  }
 
   // List installable Piper voices: [{ id, name, language }]. `id` is what you pass as
   // `voiceId` (lib calls it `key`). Lets the UI build a voice picker; switch with setVoice.

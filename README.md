@@ -10,7 +10,7 @@ A zero-dependency JavaScript library that runs the full voice loop — **VAD →
 - **Speculative prefetch** — the LLM call starts while you're still finishing your sentence, overlapping model latency with the end-of-turn pause. Replies feel instant.
 - **Tap-to-seek** — playback keeps a tape of synthesized clips; tap anywhere in the transcript to jump the voice there, backward or forward.
 - **Turn serialization** — rapid-fire turns, tool results, holds and replays can never overlap or talk over each other. Locked in by a 100-test regression suite.
-- **Local-first defaults** — Silero VAD (WASM) and Piper TTS (WASM) run entirely in the browser. Free, offline-capable, no cloud round-trip for voice output.
+- **Local-first defaults** — Silero VAD (WASM) and Piper TTS (WASM) run in the browser. Free, no cloud round-trip for voice output (assets load from CDN, then cache).
 
 Everything is pluggable: bring your own LLM (any OpenAI-compatible endpoint or a custom async generator), pick an STT provider (Web Speech, ElevenLabs Scribe, Deepgram Flux, Speechmatics), swap the TTS.
 
@@ -19,7 +19,7 @@ Everything is pluggable: bring your own LLM (any OpenAI-compatible endpoint or a
 ```js
 import { VoiceAgent, unlockAudio, prewarmVoice } from 'voiceloop';
 
-prewarmVoice(); // optional: preload VAD/WASM while your UI sits idle
+prewarmVoice(); // optional but recommended: preload VAD/WASM while your UI sits idle
 
 const agent = new VoiceAgent({
   // Any OpenAI-compatible /chat/completions endpoint. In production point this at
@@ -31,8 +31,9 @@ const agent = new VoiceAgent({
   sysmsg: 'The user is on the recipes page.',   // live context, update via setSysmsg()
 
   onEvent: (e) => {
-    if (e.type === 'stt')       render.user(e.text, e.final);
-    if (e.type === 'assistant') render.agent(e.text, e.full);   // e.text = spoken so far
+    // stt: e.committed = locked prefix, e.text = live tail (on turnComplete, e.text is the whole turn)
+    if (e.type === 'stt')       render.user(e.turnComplete ? e.text : `${e.committed ?? ''} ${e.text}`.trim(), e.turnComplete);
+    if (e.type === 'assistant') render.agent(e.text, e.full);   // e.text = spoken so far, e.full = whole answer
     if (e.type === 'state')     render.state(e.state);          // idle|listening|thinking|speaking
     if (e.type === 'error')     console.error(e.error);
   },
@@ -73,11 +74,11 @@ Cloud providers authenticate with a **short-TTL token minted by your backend** s
 - `sttTokenUrl` — a POST route on your server that returns `{ token }` (mint it against the provider's temp-token API with your secret key), or
 - `getSttToken` — an async callback `() => ({ token })` when your auth doesn't fit a bare POST.
 
-`webspeech` automatically falls back to a cloud provider on browsers without SpeechRecognition (Firefox, WebKitGTK).
+On browsers without SpeechRecognition (Firefox, WebKitGTK) `webspeech` falls back to `elevenlabs` — which needs a token route configured, so pass `sttTokenUrl`/`getSttToken` if you want the fallback to work.
 
 | Provider | End-of-turn | Notes |
 |---|---|---|
-| `webspeech` | VAD-gated | Free, on-device, Chrome/Safari only |
+| `webspeech` | Native (browser-managed) | Free, on-device, Chrome/Safari only |
 | `elevenlabs` | VAD-gated | Scribe v2 realtime, great accuracy |
 | `deepgram` | **Native** (Flux) | Provider's own turn model hears the full stream |
 | `speechmatics` | VAD-gated | Cheapest per second, locked-words-only finals |
@@ -105,7 +106,8 @@ const agent = new VoiceAgent({
   tools: {
     get_weather: {
       description: 'Current weather for a city',
-      params: { city: { type: 'string' } },       // JSON-schema properties
+      params: { city: { type: 'string' } },        // JSON-schema properties
+      required: ['city'],                          // optional; defaults to all params
       run: async ({ city }) => fetchWeather(city), // fires DURING speech, in parallel
     },
   },
@@ -126,8 +128,9 @@ agent.setHeld(bool)            // hold: queue utterances, reply over all of them
 agent.setMuted(bool)           // mic mute
 agent.setTtsMuted(bool)        // silent mode: transcript + tools still run
 agent.setSysmsg(text)          // update live context mid-session
-agent.seek(charIndex)          // tap-to-seek within the current reply
-agent.replay(text)             // re-voice a past reply
+agent.seek(nwIndex)            // tap-to-seek within the current reply (nwIndex = count of
+                               // NON-WHITESPACE chars before the tap — whitespace doesn't count)
+agent.replay(text, fromNw?, onProgress?)   // re-voice a past reply; onProgress(spokenText, done)
 agent.dumpAudio()              // last 30s of mic audio as WAV + stall report (debugging)
 ```
 
@@ -143,7 +146,7 @@ Default is **Piper** (local WASM, free, many languages and voices):
 
 ```js
 import { PiperTTS } from 'voiceloop';
-new VoiceAgent({ tts: new PiperTTS('en_US-amy-medium', 1.15) });  // voice, speed
+new VoiceAgent({ tts: new PiperTTS('en_US-amy-medium') });
 ```
 
 Custom engines subclass `StreamingTTS` and implement one method:

@@ -43,7 +43,11 @@
 
     const agent = new VoiceAgent({
       // Point at any OpenAI-compatible /chat/completions endpoint.
-      // For a quick local test: `ollama serve` and use its URL + a local model.
+      // Quick local test with Ollama (from the repo root):
+      //   ollama pull llama3.2
+      //   OLLAMA_ORIGINS='*' ollama serve
+      //   npx serve .          → open http://localhost:3000/examples/simple-browser.html
+      // (OLLAMA_ORIGINS allows this page's origin; mic access needs http://localhost or https.)
       llmUrl: 'http://localhost:11434/v1/chat/completions',
       model: 'llama3.2',
 
@@ -54,11 +58,13 @@
           $('state').textContent = e.state;
         } else if (e.type === 'stt') {
           userEl ??= bubble('user');
-          userEl.textContent = e.text;
+          // partial: committed prefix + live tail; turnComplete: e.text is the whole turn
+          userEl.textContent = e.turnComplete ? e.text : `${e.committed ?? ''} ${e.text}`.trim();
           if (e.turnComplete) userEl = null;
         } else if (e.type === 'assistant') {
-          agentEl ??= bubble('agent');
           const full = e.full ?? e.text;
+          if (!full) { agentEl?.remove(); agentEl = null; return; }   // aborted before any audio → drop the draft
+          agentEl ??= bubble('agent');
           agentEl.innerHTML = '';
           agentEl.append(e.text);                       // spoken so far
           if (full.length > e.text.length) {            // not yet spoken → dimmed
@@ -74,14 +80,19 @@
       },
     });
 
+    const setBtn = (on) => {
+      $('talk').textContent = on ? 'Stop' : 'Start talking';
+      $('talk').classList.toggle('on', on);
+    };
     $('talk').onclick = async () => {
       if (agent.state === 'idle') {
         unlockAudio();                                  // must happen inside the click gesture
-        $('talk').textContent = 'Stop'; $('talk').classList.add('on');
-        await agent.start();
+        setBtn(true);
+        try { await agent.start(); } catch { /* error surfaced via onEvent */ }
+        if (agent.state === 'idle') setBtn(false);      // start failed (mic denied, …)
       } else {
         agent.stop();
-        $('talk').textContent = 'Start talking'; $('talk').classList.remove('on');
+        setBtn(false);
       }
     };
   </script>
