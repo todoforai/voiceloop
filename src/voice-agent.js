@@ -1692,6 +1692,37 @@ export class StreamingTTS {
 // ── Piper TTS (local WASM, free, has Hungarian) via @mintplex-labs/piper-tts-web.
 //    Default voice: en_US-joe-medium.
 const CDN_PIPER = `${CDN}@mintplex-labs/piper-tts-web@1.0.4/dist/piper-tts-web.js`;
+// The espeak phonemizer chunk (createPiperPhonemize) — a build artifact of the pinned 1.0.4, not a
+// public export; imported directly because the lib only exposes it via TtsSession.predict(), whose
+// per-call module setup is exactly what we bypass (see PiperTTS._session).
+const CDN_PIPER_PHONEMIZE = `${CDN}@mintplex-labs/piper-tts-web@1.0.4/dist/piper-o91UDS6e.js`;
+const CDN_PIPER_WASM = `${CDN}@diffusionstudio/piper-wasm@1.0.0/build/piper_phonemize`;
+
+// OPFS blob cache — same 'piper' directory and url-basename filenames as the lib's own cache, so
+// models already downloaded through the lib are reused (and vice versa).
+async function opfsCachedFetch(url) {
+  const name = url.split('/').at(-1);
+  const dir = () => navigator.storage.getDirectory().then((r) => r.getDirectoryHandle('piper', { create: true }));
+  try { return await (await (await dir()).getFileHandle(name)).getFile(); } catch {}
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`);
+  const blob = await res.blob();
+  try { const w = await (await (await dir()).getFileHandle(name, { create: true })).createWritable(); await w.write(blob); await w.close(); } catch {}
+  return blob;
+}
+
+// float32 PCM → 16-bit mono WAV (the lib's pcm2wav isn't exported).
+function pcm2wav(f32, sampleRate) {
+  const n = f32.length, v = new DataView(new ArrayBuffer(44 + n * 2));
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0, p = 44; i < n; i++, p += 2) v.setInt16(p, Math.max(-1, Math.min(1, f32[i])) * 32767 | 0, true);
+  return v.buffer;
+}
 export class PiperTTS extends StreamingTTS {
   constructor(voiceId = 'en_US-joe-medium', speed = 1.0) { super(voiceId, speed); }
   // webpackIgnore is honored by webpack AND Turbopack (vite needs its own marker) — without it
@@ -1715,25 +1746,56 @@ export class PiperTTS extends StreamingTTS {
     return list.map(v => ({ id: v.key, name: v.name || v.key, language: v.language?.code || v.language || '' }));
   }
 
-  // A TtsSession for the current voice. The lib's `predict()` reuses a module-level singleton
-  // (`TtsSession._instance`) and on a voice change only overwrites its `.voiceId` WITHOUT
-  // re-running init() — so the old ONNX model keeps speaking. Build (and cache) our own session,
-  // null-ing that singleton first so a changed voice truly reloads its model.
+  // Our OWN synth pipeline instead of lib.TtsSession.predict(): the lib instantiates a FRESH espeak
+  // phonemizer WASM module (fetch + compile + espeak-data mount) on EVERY predict() — measured
+  // 220–360ms per call, dwarfing the ~10ms phonemize itself. We build the phonemizer ONCE per
+  // session and reuse it (callMain is re-entrant — verified over repeated calls), then run the ONNX
+  // inference directly. Measured first-word synth: 500–575ms (lib) → ~185ms (this path).
+  // Cached as a PROMISE keyed by voice so concurrent callers build one session, not two. Only
+  // called from _synth (which every path — speak, presynth, warm — reaches through the serialized
+  // _synthQ), so when a voice change builds a new session the old one is idle → release it.
   async _session() {
-    const lib = await this._tts();
-    if (this._sess && this._sessVoice === this.voiceId) return this._sess;
-    lib.TtsSession._instance = null;
-    this._sessVoice = this.voiceId;
-    // Override the lib's DEFAULT_WASM_PATHS: its baked-in onnxWasm points at cdnjs onnxruntime-web
-    // 1.18.0, but our importmap resolves `onnxruntime-web` to 1.22.0 — whose loader fetches
-    // ort-wasm-simd-threaded.jsep.mjs, a file the 1.18.0 cdnjs folder doesn't have (404 →
-    // "no available backend found"). Point the WASM path at the SAME version/CDN as the import.
-    // wasmPaths replaces the whole object (no merge), so restate the piper phonemize paths too.
-    return this._sess = await lib.TtsSession.create({ voiceId: this.voiceId, wasmPaths: {
-      onnxWasm: `${CDN}onnxruntime-web@1.22.0/dist/`,
-      piperData: `${CDN}@diffusionstudio/piper-wasm@1.0.0/build/piper_phonemize.data`,
-      piperWasm: `${CDN}@diffusionstudio/piper-wasm@1.0.0/build/piper_phonemize.wasm`,
-    } });
+    const voiceId = this.voiceId;   // snapshot: setVoice() mid-build must not mix voices
+    if (this._sessP && this._sessVoice === voiceId) return this._sessP;
+    this._sessVoice = voiceId;
+    const prev = this._sessP;
+    const p = this._sessP = (async () => {
+      prev?.then((s) => s.onnx.release()).catch(() => {});   // free the old voice's model (worker-side memory isn't GC'd with the JS ref)
+      const lib = await this._tts();   // also installs the importmap that resolves 'onnxruntime-web' below
+      const path = lib.PATH_MAP[voiceId];
+      if (!path) throw new Error(`unknown Piper voice: ${voiceId}`);
+      const [ort, phonMod, cfgBlob, modelBlob] = await Promise.all([
+        import(/* webpackIgnore: true */ /* @vite-ignore */ 'onnxruntime-web'),
+        import(/* webpackIgnore: true */ /* @vite-ignore */ CDN_PIPER_PHONEMIZE),
+        opfsCachedFetch(`${lib.HF_BASE}/${path}.json`),
+        opfsCachedFetch(`${lib.HF_BASE}/${path}`),
+      ]);
+      const cfg = JSON.parse(await cfgBlob.text());
+      // Match the importmap's onnxruntime-web version: the lib's baked-in default points at a
+      // 1.18.0 CDN folder missing 1.22.0's threaded loader files (404 → "no available backend").
+      ort.env.allowLocalModels = false;
+      ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;   // >1 needs crossOriginIsolated; ort falls back to 1 otherwise
+      ort.env.wasm.proxy = true;   // run inference in a worker: session.run computes ON the calling thread otherwise, so an ahead-of-playback synth would starve the clip that's trying to start (measured ~450ms added first-audio delay)
+      ort.env.wasm.wasmPaths = `${CDN}onnxruntime-web@1.22.0/dist/`;
+      const onnx = await ort.InferenceSession.create(await modelBlob.arrayBuffer());
+      let ids = null;
+      const phonemizer = await phonMod.createPiperPhonemize({
+        print: (d) => { ids ??= JSON.parse(d).phoneme_ids; },   // first line only (parity with the lib)
+        printErr: (e) => { throw new Error(e); },
+        locateFile: (u) => u.endsWith('.wasm') ? `${CDN_PIPER_WASM}.wasm` : u.endsWith('.data') ? `${CDN_PIPER_WASM}.data` : u,
+      });
+      // Synchronous; safe to reuse because _synthQ already serializes every synth on this instance.
+      const phonemize = (text) => {
+        ids = null;
+        phonemizer.callMain(['-l', cfg.espeak.voice, '--input', JSON.stringify([{ text }]), '--espeak_data', '/espeak-ng-data']);
+        if (!ids) throw new Error('phonemize produced no output');
+        return ids;
+      };
+      const sid = Object.keys(cfg.speaker_id_map ?? {}).length ? [0] : null;
+      return { ort, onnx, cfg, phonemize, sid };
+    })();
+    p.catch(() => { if (this._sessP === p) this._sessP = null; });   // failed init must not poison the cache — next call retries (only clear if still current: a stale failure must not evict a newer voice's build)
+    return p;
   }
 
   // Eagerly download+compile the ONNX model and JIT the WASM inference path, so the first real reply
@@ -1742,13 +1804,25 @@ export class PiperTTS extends StreamingTTS {
   // is still speaking. A throwaway predict primes the inference path; failures are non-fatal (the first
   // real _synth retries). Idempotent: _session() caches, so a second warm() is cheap.
   async warm() {
-    try { await (await this._session()).predict('.'); } catch {}
+    try { await this._enqueueSynth('.'); } catch {}   // through the queue: a late warm-up must not run concurrently with (or ahead of) a real first clip
   }
 
   // Synthesize text → WAV Blob (the slow part; run it ahead of playback).
   async _synth(text, signal) {
+    text = text?.trim();
     if (signal?.aborted || !text) return null;
-    const wav = await (await this._session()).predict(text);   // Blob
-    return signal?.aborted ? null : wav;
+    const s = await this._session();
+    if (signal?.aborted) return null;   // barge-in during cold model download/compile → skip the wasted inference
+    const phonemeIds = s.phonemize(text);
+    const { noise_scale, length_scale, noise_w } = s.cfg.inference;
+    const feeds = {
+      input: new s.ort.Tensor('int64', phonemeIds, [1, phonemeIds.length]),
+      input_lengths: new s.ort.Tensor('int64', [phonemeIds.length]),
+      scales: new s.ort.Tensor('float32', [noise_scale, length_scale, noise_w]),
+    };
+    if (s.sid) feeds.sid = new s.ort.Tensor('int64', s.sid);
+    const { output } = await s.onnx.run(feeds);
+    if (signal?.aborted) return null;
+    return new Blob([pcm2wav(output.data, s.cfg.audio.sample_rate)], { type: 'audio/x-wav' });
   }
 }
