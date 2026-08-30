@@ -97,9 +97,12 @@ function makeUsageReporter(sttUsageUrl, apiKey, provider, extra = {}) {
 // the key stays server-side. Billing is trust-but-verify: the client reports streamed seconds to
 // /stt/usage (the backend can't meter a direct browser↔ElevenLabs socket).
 export function makeElevenLabsSTT(opts) {
-  const { apiKey, sttUrl = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime',
-          sttModel = 'scribe_v2_realtime', sttLang, keyterms = [], sttTokenUrl, getToken, sttUsageUrl,
+  // `||` fallbacks, not destructuring defaults: VoiceAgent passes '' for unset knobs, which a
+  // `= default` would NOT replace — an empty model_id makes ElevenLabs hard-close the socket (1006).
+  const { apiKey, sttLang, keyterms = [], sttTokenUrl, getToken, sttUsageUrl,
           onPartial, onFinal, onError, onFatal, onClose, isClosed } = opts;
+  const sttUrl = opts.sttUrl || 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
+  const sttModel = opts.sttModel || 'scribe_v2_realtime';
   let ws = null, opening = false, outbox = [], sentSinceCommit = false, sttStart = 0;
   const usage = makeUsageReporter(sttUsageUrl, apiKey, 'elevenlabs');
 

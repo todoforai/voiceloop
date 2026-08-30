@@ -149,6 +149,17 @@ import { PiperTTS } from 'voiceloop';
 new VoiceAgent({ tts: new PiperTTS('en_US-amy-medium') });
 ```
 
+**ElevenLabs** for human-grade voices (cloud; key stays server-side behind your proxy route):
+
+```js
+import { ElevenLabsTTS } from 'voiceloop';
+new VoiceAgent({ tts: new ElevenLabsTTS({ ttsUrl: '/api/tts' }) });   // your backend adds xi-api-key
+// dev only: new ElevenLabsTTS({ apiKey: 'xi-…' }) — direct browser→ElevenLabs
+```
+
+Same behavior (sentence streaming, barge-in, seek, speculative presynth) either way — only the voice
+and the cost change: Piper is free and offline, ElevenLabs is paid and sounds human.
+
 Custom engines subclass `StreamingTTS` and implement one method:
 
 ```js

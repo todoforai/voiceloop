@@ -9,6 +9,7 @@ export {
   makeWebSpeechSTT, makeElevenLabsSTT, makeSpeechmaticsSTT, makeDeepgramSTT,
   warmDeepgramToken,
 } from './stt.js';
+export { ElevenLabsTTS } from './tts-elevenlabs.js';
 export { loadVoiceDeps, prewarmVoice } from './deps.js';
 export { makeOpenAILLM } from './llm-openai.js';
 export { TUNING } from './tuning.js';

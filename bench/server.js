@@ -75,6 +75,30 @@ http.createServer(async (req, res) => {
         res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
         return res.end(JSON.stringify({ token: b.access_token, expires_in: b.expires_in ?? 30, error: b.err_msg }));
       }
+      if (url.pathname === '/bench/sm-stt-token') {   // Speechmatics realtime JWT (ttl 60s)
+        const r = await fetch('https://mp.speechmatics.com/v1/api_keys?type=rt', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.SPEECHMATICS_ACCESS_KEY}` },
+          body: JSON.stringify({ ttl: 60 }),
+        });
+        const b = await r.json();
+        res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        return res.end(JSON.stringify({ token: b.key_value, error: b.detail }));
+      }
+      if (url.pathname === '/bench/el-stt-token') {   // ElevenLabs Scribe realtime single-use token
+        const r = await fetch('https://api.elevenlabs.io/v1/single-use-token/realtime_scribe', { method: 'POST', headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY } });
+        const b = await r.json();
+        res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        return res.end(JSON.stringify({ token: b.token, error: b.detail?.message }));
+      }
+      if (url.pathname === '/bench/el-tts') {   // ElevenLabsTTS proxy form: key stays here
+        const { text, voice_id, model_id, output_format } = JSON.parse(body);
+        const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice_id}?output_format=${output_format || 'mp3_44100_64'}`, {
+          method: 'POST', headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, model_id }),
+        });
+        res.writeHead(r.status, { 'Content-Type': r.headers.get('content-type') ?? 'audio/mpeg', 'Access-Control-Allow-Origin': '*' });
+        return res.end(Buffer.from(await r.arrayBuffer()));
+      }
       if (url.pathname === '/bench/save') { const report = saveRun(body); res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' }); return res.end(report); }
     } catch (e) { res.writeHead(500); return res.end(String(e.message)); }
     res.writeHead(404); return res.end();
