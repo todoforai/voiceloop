@@ -30,6 +30,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function mockLLM(req, res, body) {
   const { messages = [] } = JSON.parse(body);
   const turn = messages.filter((m) => m.role === 'user').length - 1;
+  console.log(`[llm] turn ${turn} request @ ${Date.now()}`);   // epoch-clocked: lets us quantify SUT→mock-LLM network RTT (tunneled SUTs pay extra)
   const text = scenario.turns[turn]?.response ?? "I have nothing scripted for this turn.";
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });
   const send = (delta) => res.write(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: null }] })}\n\n`);

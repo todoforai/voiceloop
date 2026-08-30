@@ -19,7 +19,7 @@ so the numbers measure the voice pipeline, not the language model.
 |---|---|---|---|---|
 | **voiceloop** · deepgram + ElevenLabs flash TTS | **984ms** | 1169 | 1019ms | 15 |
 | **voiceloop** · deepgram + Piper (free, local) | **981–1101ms** | 1306 | 1452ms | 23 |
-| ElevenLabs ConvAI (their full agent stack) | 1538ms | 1717 | 945ms | 5 |
+| ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1042ms | 8 |
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
 
@@ -43,8 +43,26 @@ barge-in stop = person starts interrupting → agent audio actually stops.
 - **EL Scribe / Speechmatics STT** — both gate the turn on late partials (~1.2–1.5s EOT):
   accurate transcripts, but not tuned for conversational end-of-turn. Deepgram flux's
   turn-events win this scenario.
-- **ConvAI** — wins barge-in (945ms; energy-VAD vs our word-based barge-in — we require real
-  words so background noise never falsely stops the agent: 0 false barge-ins in every config).
+- **ConvAI** — measured through their standard `@elevenlabs/client` SDK with a default-config
+  agent (scribe_realtime ASR, `turn_v3`/normal eagerness, `optimize_streaming_latency: 3`; we
+  even upgraded its TTS from the default turbo_v2 to the faster flash_v2). Per-run medians were
+  tight (1438–1501ms) and match ElevenLabs' own published ~1.5s ConvAI latency — this is the
+  product's real number, not a rig artifact. Barge-in is competitive (1042ms; energy-VAD vs our
+  word-based barge-in — we require real transcribed words, so background noise never falsely
+  stops the agent: 0 false barge-ins in every config).
+
+### Fairness caveats (both directions)
+
+- **ConvAI pays a network toll we don't**: its custom-LLM calls travel EL cloud → Cloudflare
+  tunnel → our mock, while voiceloop hits it on localhost. Measured tunnel overhead from here is
+  ~170–240ms TTFB. Even crediting ConvAI the full ~240ms (→ ~1210ms), voiceloop at 984ms is
+  still ~230ms ahead — and in production voiceloop's LLM is a real network hop too.
+- **AEC is disabled for every SUT** (including ConvAI): virtual devices have no acoustic echo,
+  and Chrome AEC with nothing to cancel suppresses the person's barge-ins. This helps, not
+  hurts, each system.
+- ConvAI is a closed box, so its EOT/STT sub-metrics come from SDK callback timing and are not
+  comparable to our instrumented splits; only the audio-truth columns (voice→voice, barge-in,
+  stalls) are apples-to-apples.
 
 ## Environment
 

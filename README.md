@@ -68,7 +68,7 @@ conversation and the same fixed mock LLM. Pooled 5-run medians:
 |---|---|
 | **voiceloop** (deepgram + ElevenLabs flash TTS) | **984ms** |
 | **voiceloop** (deepgram + Piper, free local TTS) | **~1050ms** |
-| ElevenLabs ConvAI (their full agent stack) | 1538ms |
+| ElevenLabs ConvAI (their full agent stack) | 1454ms |
 
 Full tables, method and reproduction steps: [`bench/results/RESULTS.md`](bench/results/RESULTS.md).
 
