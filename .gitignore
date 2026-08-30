@@ -1,2 +1,7 @@
 node_modules/
 *.log
+
+# bench run artifacts are per-machine measurements — only curated summaries
+# (bench/results/*.md) are tracked; raw audio + per-run json stay local.
+bench/results/*.raw
+bench/results/*.json
