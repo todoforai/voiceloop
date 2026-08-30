@@ -1,0 +1,36 @@
+{
+  "name": "noise",
+  "ttftMs": 300,
+  "charsPerSec": 300,
+  "noise": { "bed": "bed.raw" },
+  "turns": [
+    {
+      "person": "Hey there, can you hear me properly?",
+      "response": "Yes, I can hear you loud and clear. What can I do for you today?",
+      "noiseBurst": { "afterMs": 1000, "kind": "cough", "file": "burst-cough.raw" }
+    },
+    {
+      "person": "What is the weather looking like today?",
+      "response": "It is sunny and around twenty four degrees outside, with a light breeze from the west. A perfect day for a walk in the park if you ask me."
+    },
+    {
+      "person": "Actually wait, tell me about tomorrow instead.",
+      "response": "Tomorrow looks a bit cooler with some rain expected in the morning, clearing up by early afternoon.",
+      "interrupt": { "afterMs": 1200 },
+      "noiseBurst": { "afterMs": 1500, "kind": "door", "file": "burst-door.raw" }
+    },
+    {
+      "person": "Great, and should I bring an umbrella to the office?",
+      "response": "Yes, I would take one. The morning rain could be heavy, and you will be out right in the middle of it."
+    },
+    {
+      "person": "Stop stop, just tell me one word, yes or no.",
+      "response": "Yes.",
+      "interrupt": { "afterMs": 900 }
+    },
+    {
+      "person": "Perfect, thank you very much for the help.",
+      "response": "You are welcome. Have a great day at the office!"
+    }
+  ]
+}
