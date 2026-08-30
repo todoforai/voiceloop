@@ -1,0 +1,71 @@
+<!doctype html>
+<!-- bench/blackbox/openai-realtime.html — OpenAI Realtime API (speech-to-speech, gpt-realtime)
+     as a SYSTEM UNDER TEST. Same virtual-audio contract as agent.html/elevenlabs.html: launch
+     Chrome with PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk.
+     CAVEAT: Realtime is speech-to-speech — it CANNOT use our fixed mock LLM. The session's
+     instructions (minted server-side in /bench/oai-realtime-token) pin its answers to the
+     scenario script, but the brain is still its own model, not identical to the other SUTs.
+     Turn detection: their standard default (server_vad), untuned.
+     Query: [&aec=on to keep Chrome AEC]                                                        -->
+<html lang="en">
+<head><meta charset="utf-8"><title>openai realtime — bench SUT</title>
+<style>body{font:14px/1.5 monospace;margin:1rem} #log div{white-space:pre-wrap}</style></head>
+<body>
+<div id="state">booting…</div><div id="log"></div>
+<script type="module">
+  const q = new URLSearchParams(location.search);
+  const log = (s) => { const d = document.createElement('div'); d.textContent = s; document.getElementById('log').prepend(d); };
+  const state = (s) => document.getElementById('state').textContent = s;
+
+  // Same rig fix as agent.html: virtual devices have no acoustic echo; Chrome AEC with a far-end
+  // reference and nothing to cancel suppresses the person's barge-ins. Off unless ?aec=on.
+  if (q.get('aec') !== 'on') {
+    const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = (c) =>
+      gum(c?.audio ? { ...c, audio: { ...(c.audio === true ? {} : c.audio), echoCancellation: false, noiseSuppression: false } } : c);
+  }
+
+  // Instrumentation: closed box, but its server events give speech/transcript timing —
+  // recorded epoch-clocked like agent.html so merge-inside.js works unchanged.
+  window.__bench = [];
+  const rec = (type, extra = {}) => window.__bench.push({ epoch: Date.now(), type, ...extra });
+
+  try {
+    const r = await fetch(`${location.origin}/bench/oai-realtime-token`, { method: 'POST' });
+    const tok = await r.json();
+    if (!tok.value) throw new Error(`token mint failed: ${JSON.stringify(tok)}`);
+
+    const pc = new RTCPeerConnection();
+    const audioEl = new Audio(); audioEl.autoplay = true;
+    pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    pc.addTrack(mic.getTracks()[0]);
+
+    const dc = pc.createDataChannel('oai-events');
+    dc.onmessage = (m) => {
+      const e = JSON.parse(m.data);
+      rec(e.type, e.transcript !== undefined ? { text: e.transcript } : {});
+      switch (e.type) {
+        case 'input_audio_buffer.speech_started': state('user_speaking'); break;
+        case 'input_audio_buffer.speech_stopped': state('listening'); break;
+        case 'conversation.item.input_audio_transcription.completed': log(`user: ${e.transcript}`); break;
+        case 'response.output_audio_transcript.done': log(`agent: ${e.transcript}`); break;
+        case 'output_audio_buffer.started': state('speaking'); break;
+        case 'output_audio_buffer.stopped': case 'output_audio_buffer.cleared': state('listening'); break;
+        case 'error': log(`ERR: ${JSON.stringify(e.error)}`); break;
+      }
+    };
+
+    await pc.setLocalDescription(await pc.createOffer());
+    const sdp = await fetch('https://api.openai.com/v1/realtime/calls?model=gpt-realtime', {
+      method: 'POST', headers: { Authorization: `Bearer ${tok.value}`, 'Content-Type': 'application/sdp' },
+      body: pc.localDescription.sdp,
+    });
+    if (!sdp.ok) throw new Error(`SDP exchange failed: ${sdp.status} ${await sdp.text()}`);
+    await pc.setRemoteDescription({ type: 'answer', sdp: await sdp.text() });
+
+    dc.onopen = () => { state('listening'); rec('session_open'); log('session open'); };
+    window.__pc = pc;
+  } catch (e) { state('FATAL'); log(`FATAL: ${e.message}`); }
+</script>
+</body></html>

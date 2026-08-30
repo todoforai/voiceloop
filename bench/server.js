@@ -73,6 +73,23 @@ http.createServer(async (req, res) => {
         res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
         return res.end(JSON.stringify(b));
       }
+      if (url.pathname === '/bench/oai-realtime-token') {   // OpenAI Realtime ephemeral client secret (key stays server-side)
+        // Realtime is speech-to-speech: it can't use our mock LLM. Closest-possible brain: pin
+        // its responses to the scenario script via instructions (caveat noted in RESULTS.md).
+        const instructions = [
+          'You are a benchmark voice agent. For each user turn, reply with EXACTLY the scripted answer below, verbatim, and nothing else. Never add greetings, fillers or extra words. If interrupted, stop immediately.',
+          ...scenario.turns.map((t, i) => `Turn ${i + 1} — user: "${t.person}" → you say exactly: "${t.response}"`),
+        ].join('\n');
+        const r = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
+          method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session: { type: 'realtime', model: 'gpt-realtime', instructions, audio: {
+            input: { transcription: { model: 'gpt-4o-mini-transcribe' },        // instrumentation only (stt_final events)
+                     turn_detection: { type: 'server_vad' } } } } }),           // their standard default — no tuning
+        });
+        const b = await r.json();
+        res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        return res.end(JSON.stringify(b));
+      }
       if (url.pathname === '/bench/stt-token') {   // browser can't call Deepgram's grant endpoint (CORS) — mint here
         const r = await fetch('https://api.deepgram.com/v1/auth/grant', { method: 'POST', headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` } });
         const b = await r.json();
