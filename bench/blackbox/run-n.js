@@ -99,12 +99,14 @@ const fmt = (s) => (s ? `${s.median} (p95 ${s.p95}, ${s.min}–${s.max}, n=${s.n
     '| metric | pooled median (p95, range, n) |',
     '|---|---|',
     `| voice→voice | ${fmt(pool('voiceToVoiceMs'))} |`,
+    `| first content word | ${fmt(pool('contentWordMs'))} |`,
     `| EOT delay | ${fmt(pool('eotMs'))} |`,
     `| TTS first audio | ${fmt(pool('ttsFirstAudioMs'))} |`,
     `| STT first partial | ${fmt(pool('firstPartialMs'))} |`,
     `| barge-in stop | ${fmt(pool('interruptStopMs'))} |`,
     `| per-run v→v medians | ${agg.map((a) => a.voiceToVoiceMs?.median ?? '—').join(', ')} |`,
     `| stalls / false barge-ins (total) | ${agg.reduce((s, a) => s + a.stalls, 0)} / ${agg.reduce((s, a) => s + a.falseBargeIns, 0)} |`,
+    `| user-interrupted (total) | ${agg.reduce((s, a) => s + (a.userInterrupted ?? 0), 0)} |`,
   ].join('\n');
   const out = join(BENCH, 'results', `pooled-${scenario}-${label}-${new Date().toISOString().replace(/[:.]/g, '-')}.md`);
   writeFileSync(out, md);

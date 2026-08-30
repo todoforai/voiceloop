@@ -16,7 +16,7 @@ import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { segments, RATE } from './energy.js';
-import { computeMetrics, formatReport, wer } from '../metrics.js';
+import { computeMetrics, formatReport, wer, norm } from '../metrics.js';
 
 const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
 const runFile = process.argv[2];
@@ -61,18 +61,20 @@ const bargeEvents = scenario.turns.flatMap((turn, k) => {
   return active ? [{ t: Math.round(active.endMs + offsetMs), type: 'barge_stop' }] : [];
 });
 
-// ── optional: transcribe each reply segment → spokenRatio + response fidelity ───────────────────
-// Skipped when instrumented events exist (they carry exact reply_done/heardNw already).
-const key = insideEvents.length ? null : process.env.OPENAI_API_KEY;
+// ── optional: transcribe each reply segment → spokenRatio, fidelity + first CONTENT word ────────
+// reply_done is skipped when instrumented events exist (they carry exact heardNw); the
+// content_word timing however only exists via transcription, so that always runs with a key.
+const key = process.env.OPENAI_API_KEY;
 const replyEvents = [];
 if (key) {
   const nw = (s) => { let n = 0; for (const c of s) if (!/\s/.test(c)) n++; return n; };
-  // A "reply" = consecutive segments between two person turns (join segments < 1.2s apart).
+  // A "reply" = the agent-audio segments between two person turns. Person events are DRIVER-clock,
+  // segs are AUDIO-clock (recording starts audioStartMs earlier) — compare on the audio clock.
   for (let k = 0; k < scenario.turns.length; k++) {
     const end = personEvents.find((e) => e.type === 'person_end' && e.turn === k)?.t;
     const next = personEvents.find((e) => e.type === 'person_start' && e.turn === k + 1)?.t ?? Infinity;
     if (end == null) continue;
-    const replySegs = segs.filter((s) => s.startMs >= end && s.startMs < next);
+    const replySegs = segs.filter((s) => s.startMs + offsetMs >= end && s.startMs + offsetMs < next);
     if (!replySegs.length) continue;
     const from = replySegs[0].startMs, to = replySegs[replySegs.length - 1].endMs;
     const slice = pcm.subarray(Math.floor((from / 1000) * RATE) * 2, Math.ceil((to / 1000) * RATE) * 2);
@@ -81,10 +83,20 @@ if (key) {
     const form = new FormData();
     form.append('file', new Blob([readFileSync(wav)], { type: 'audio/wav' }), 'r.wav');
     form.append('model', 'whisper-1');
+    form.append('response_format', 'verbose_json');
+    form.append('timestamp_granularities[]', 'word');
     const r = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: form });
-    const heardText = r.ok ? (await r.json()).text ?? '' : '';
+    const j = r.ok ? await r.json() : {};
+    const heardText = j.text ?? '';
     const scripted = scenario.turns[k].response;
-    replyEvents.push({ t: to, type: 'reply_done', heardNw: Math.round(nw(scripted) * Math.max(0, 1 - wer(scripted, heardText))), totalNw: nw(scripted), transcript: heardText });
+    if (!insideEvents.length)
+      replyEvents.push({ t: Math.round(to + offsetMs), type: 'reply_done', heardNw: Math.round(nw(scripted) * Math.max(0, 1 - wer(scripted, heardText))), totalNw: nw(scripted), transcript: heardText });
+    // First word of the SCRIPTED response in the transcript (any of its first 6 words, so a
+    // mis-heard opener doesn't void the turn). Filler head starts ("Hmm," "Okay,") don't match →
+    // content_word lands later than clip_start, which is exactly the tradeoff being measured.
+    const head = new Set(norm(scripted).slice(0, 6));
+    const hit = (j.words ?? []).find((w) => head.has(norm(w.word)[0]));
+    if (hit) replyEvents.push({ t: Math.round(from + hit.start * 1000 + offsetMs), type: 'content_word', turn: k, word: hit.word });
   }
 }
 

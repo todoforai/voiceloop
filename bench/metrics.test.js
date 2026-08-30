@@ -104,6 +104,49 @@ test('stalls: a >250ms silent gap between clips with text remaining is counted',
   assert.equal(m.turns[0].stalls, 1);
 });
 
+test('user-interrupted: clip_start inside an open person turn counts; scripted interrupts do not', () => {
+  const hesitation = {
+    turns: [
+      { person: 'i would like to book umm a table for four', response: 'A table for four, wonderful.' },
+      { person: 'stop wait', response: 'Okay.', interrupt: { afterMs: 500 } },
+    ],
+  };
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },                  // line contains an 800ms pause…
+    { t: 1200, type: 'clip_start' },                          // …agent answers the half-sentence mid-pause
+    { t: 1900, type: 'clip_end' },
+    { t: 3000, type: 'person_end', turn: 0 },
+    { t: 3600, type: 'clip_start' },                          // real reply after the turn closed — fine
+    { t: 5000, type: 'person_start', turn: 1 },               // scripted barge-in over that reply
+    { t: 5300, type: 'barge_stop' }, { t: 5300, type: 'clip_end' },
+    { t: 5800, type: 'person_end', turn: 1 },
+    { t: 6300, type: 'clip_start' }, { t: 6800, type: 'clip_end' },
+  ];
+  const m = computeMetrics(events, hesitation);
+  assert.equal(m.turns[0].userInterruptions, 1, 'the mid-pause clip counts');
+  assert.equal(m.turns[1].userInterruptions, undefined, 'scripted interrupt turn excluded');
+  assert.equal(m.aggregate.userInterrupted, 1);
+});
+
+test('no agent audio during person turns → user-interrupted 0', () => {
+  const m = computeMetrics(timeline, scenario);
+  assert.equal(m.aggregate.userInterrupted, 0);
+});
+
+test('content_word: first scripted word timing lands next to voice→voice', () => {
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1000, type: 'person_end', turn: 0 },
+    { t: 1600, type: 'clip_start' },                          // audio starts here ("Hmm," filler)
+    { t: 2400, type: 'content_word', turn: 0, word: 'It' },   // scripted content only here
+    { t: 3000, type: 'clip_end' },
+  ];
+  const m = computeMetrics(events, { turns: [scenario.turns[0]] });
+  assert.equal(m.turns[0].voiceToVoiceMs, 600);
+  assert.equal(m.turns[0].contentWordMs, 1400, 'filler head start visible as the v→v/content gap');
+  assert.equal(m.aggregate.contentWordMs.median, 1400);
+});
+
 test('a turn with no person audio in the timeline reports missing, not a crash', () => {
   const m = computeMetrics([], scenario);
   assert.equal(m.turns[0].missing, true);

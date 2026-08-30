@@ -1,0 +1,59 @@
+{
+  "name": "hesitation",
+  "ttftMs": 300,
+  "charsPerSec": 300,
+  "turns": [
+    {
+      "person": "Hi, I need some help with umm with a dinner reservation.",
+      "personParts": [
+        { "text": "Hi, I need some help with", "pauseMs": 550 },
+        { "text": "umm,", "pauseMs": 700 },
+        { "text": "with a dinner reservation." }
+      ],
+      "response": "Of course, I can help with that. When would you like to come in, and for how many people?"
+    },
+    {
+      "person": "I'd like to book umm a table for four.",
+      "personParts": [
+        { "text": "I'd like to book", "pauseMs": 850 },
+        { "text": "umm,", "pauseMs": 600 },
+        { "text": "a table for four." }
+      ],
+      "response": "A table for four, wonderful. What day and time should I put you down for?"
+    },
+    {
+      "person": "Let's do Thursday at seven. Actually, make that Friday.",
+      "personParts": [
+        { "text": "Let's do Thursday at seven.", "pauseMs": 750 },
+        { "text": "Actually, make that Friday." }
+      ],
+      "response": "Friday at seven it is. Would you prefer a table inside or out on the terrace?"
+    },
+    {
+      "person": "Inside please, and could we get umm one of the booths by the window.",
+      "personParts": [
+        { "text": "Inside please, and could we get", "pauseMs": 500 },
+        { "text": "umm,", "pauseMs": 800 },
+        { "text": "one of the booths by the window." }
+      ],
+      "response": "I have reserved a window booth for four on Friday at seven. Anything else I can set up?"
+    },
+    {
+      "person": "Send the confirmation to my email. Actually, make that a text message.",
+      "personParts": [
+        { "text": "Send the confirmation to my email.", "pauseMs": 900 },
+        { "text": "Actually, make that a text message." }
+      ],
+      "response": "No problem, I will text the confirmation to the number on file instead of emailing it."
+    },
+    {
+      "person": "Great, that's everything. Oh wait, do you have parking?",
+      "personParts": [
+        { "text": "Great, that's everything.", "pauseMs": 650 },
+        { "text": "Oh wait,", "pauseMs": 450 },
+        { "text": "do you have parking?" }
+      ],
+      "response": "Yes, there is free parking right behind the restaurant. See you on Friday evening!"
+    }
+  ]
+}

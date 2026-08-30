@@ -14,6 +14,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { segments, RATE } from './energy.js';
 
 const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
 const scenarioName = process.argv[2] || 'smalltalk';
@@ -48,15 +49,51 @@ async function elevenlabs(text, key, mp3Path) {
 const key = findKey();
 console.log(`voice: ${key ? `elevenlabs/${voiceId}` : 'espeak-ng (no ELEVENLABS_API_KEY — robotic fallback)'}`);
 
-for (let k = 0; k < scenario.turns.length; k++) {
-  const text = scenario.turns[k].person;
-  const raw = join(outDir, `person-${k}.raw`);
-  const src = join(outDir, `person-${k}.${key ? 'mp3' : 'wav'}`);
-  if (existsSync(raw)) { console.log(`turn ${k}: exists, skipping`); continue; }
+async function synthToRaw(text, src, raw) {
   if (key) await elevenlabs(text, key, src);
   else execFileSync('espeak-ng', ['-v', 'en-us', '-s', '160', '-w', src, text]);
   toRaw(src, raw);
+  return readFileSync(raw);
+}
+
+// Trim a segment's PCM to its energy bounds so the silence WE insert between parts is the whole
+// pause — TTS-added lead-in/tail silence would otherwise stretch every scripted pause.
+function trimToSpeech(pcm) {
+  const segs = segments(pcm);
+  if (!segs.length) return pcm;
+  const from = Math.floor((segs[0].startMs / 1000) * RATE) * 2;
+  const to = Math.ceil((segs[segs.length - 1].endMs / 1000) * RATE) * 2;
+  return pcm.subarray(from, Math.min(to, pcm.length));
+}
+
+const silenceOf = (ms) => Buffer.alloc(Math.round((ms / 1000) * RATE) * 2);
+
+for (let k = 0; k < scenario.turns.length; k++) {
+  const turn = scenario.turns[k];
+  const raw = join(outDir, `person-${k}.raw`);
+  if (existsSync(raw)) { console.log(`turn ${k}: exists, skipping`); continue; }
+
+  if (turn.personParts) {
+    // Hesitation-style turn: render each part separately, energy-trim, join with EXACT silence.
+    // (Single-render SSML/break tags are not honored reliably by eleven_turbo — this is.)
+    const pieces = [];
+    for (let j = 0; j < turn.personParts.length; j++) {
+      const part = turn.personParts[j];
+      const pSrc = join(outDir, `person-${k}-part${j}.${key ? 'mp3' : 'wav'}`);
+      const pRaw = join(outDir, `person-${k}-part${j}.raw`);
+      pieces.push(trimToSpeech(await synthToRaw(part.text, pSrc, pRaw)));
+      if (part.pauseMs) pieces.push(silenceOf(part.pauseMs));
+    }
+    writeFileSync(raw, Buffer.concat(pieces));
+    // Verify the rendered gaps against the scripted pauses (the whole point of this scenario).
+    const segs = segments(readFileSync(raw));
+    const gaps = segs.slice(1).map((s, i) => Math.round(s.startMs - segs[i].endMs));
+    console.log(`turn ${k}: pauses scripted [${turn.personParts.filter((p) => p.pauseMs).map((p) => p.pauseMs)}] rendered gaps [${gaps}]`);
+  } else {
+    const src = join(outDir, `person-${k}.${key ? 'mp3' : 'wav'}`);
+    await synthToRaw(turn.person, src, raw);
+  }
   const secs = (readFileSync(raw).length / 2 / 16000).toFixed(2);
-  console.log(`turn ${k}: ${secs}s  "${text}"`);
+  console.log(`turn ${k}: ${secs}s  "${turn.person}"`);
 }
 console.log(`\ndone → ${outDir}`);

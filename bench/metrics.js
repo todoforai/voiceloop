@@ -16,7 +16,7 @@
 // the agent's PREVIOUS reply (a barge-in), so its metrics include the interruption reactivity.
 
 // ── text normalization + word error rate ────────────────────────────────────────────────────────
-const norm = (s) => (s.toLowerCase().normalize('NFKD').match(/[\p{L}\p{N}']+/gu) ?? []);
+export const norm = (s) => (s.toLowerCase().normalize('NFKD').match(/[\p{L}\p{N}']+/gu) ?? []);
 
 // Word-level Levenshtein distance (substitution/insert/delete all cost 1).
 export function wer(refText, hypText) {
@@ -89,6 +89,17 @@ export function computeMetrics(events, scenario) {
       .map((s) => ({ start: s.t, end: firstAfter(events, 'clip_end', s.t)?.t ?? s.t }));
     t.stalls = clips.slice(1).filter((c, i) => c.start - clips[i].end > STALL_MS).length;
 
+    // User-interrupted: agent audio STARTING inside the person's still-open turn (a mid-utterance
+    // pause is an open turn — this is where aggressive endpointing pays its bill). Scripted
+    // interrupt turns are excluded: there the agent is SUPPOSED to be audible while the person talks.
+    if (!script.interrupt) t.userInterruptions = between(events, 'clip_start', start.t, end.t).length;
+
+    // First CONTENT word: analyze.js transcribes the reply with word timestamps and emits a
+    // turn-tagged content_word at the first word matching the scripted response — a filler head
+    // start ("Hmm,") moves clip_start but not this. Negative = content began mid-pause.
+    const cw = events.find((e) => e.type === 'content_word' && e.turn === k);
+    t.contentWordMs = cw ? Math.round(cw.t - end.t) : null;
+
     // Interruption (this turn's person speech starts over the previous reply): overlap between the
     // person starting and the agent's audio actually stopping. Some overlap is natural; report it.
     if (script.interrupt) {
@@ -116,6 +127,7 @@ export function computeMetrics(events, scenario) {
     turns,
     aggregate: {
       voiceToVoiceMs: stats('voiceToVoiceMs'),
+      contentWordMs: stats('contentWordMs'),
       eotMs: stats('eotMs'),
       ttsFirstAudioMs: stats('ttsFirstAudioMs'),
       firstPartialMs: stats('firstPartialMs'),
@@ -126,6 +138,7 @@ export function computeMetrics(events, scenario) {
         return v.length ? +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(3) : null;
       })(),
       stalls: nums('stalls').reduce((a, b) => a + b, 0),
+      userInterrupted: nums('userInterruptions').reduce((a, b) => a + b, 0),
       falseBargeIns,
       echoDrops: events.filter((e) => e.type === 'echo_drop').length,
     },
@@ -142,19 +155,21 @@ export function formatReport(m, label = '') {
     '| metric | value |',
     '|---|---|',
     `| voice→voice latency | ${f(a.voiceToVoiceMs)} |`,
+    `| first content word (vs person end) | ${f(a.contentWordMs)} |`,
     `| end-of-turn delay | ${f(a.eotMs)} |`,
     `| TTS first audio (after 1st token) | ${f(a.ttsFirstAudioMs)} |`,
     `| STT first partial | ${f(a.firstPartialMs)} |`,
     `| barge-in stop overlap | ${f(a.interruptStopMs)} |`,
     `| STT word error rate | ${a.wer == null ? '—' : (a.wer * 100).toFixed(1) + '%'} |`,
     `| spoken ratio (uninterrupted) | ${a.spokenRatioUninterrupted ?? '—'} |`,
+    `| user-interrupted (agent spoke into open turn) | ${a.userInterrupted} |`,
     `| stalls / false barge-ins / echo drops | ${a.stalls} / ${a.falseBargeIns} / ${a.echoDrops} |`,
     '',
-    '| turn | v→v | EOT | 1st tok | TTS 1st | WER | spoken | stop |',
-    '|---|---|---|---|---|---|---|---|',
+    '| turn | v→v | EOT | 1st tok | TTS 1st | WER | spoken | stop | cw | uint |',
+    '|---|---|---|---|---|---|---|---|---|---|',
     ...m.turns.map((t) => t.missing
-      ? `| ${t.turn} | (missing) |||||||`
-      : `| ${t.turn} | ${t.voiceToVoiceMs ?? '—'} | ${t.eotMs ?? '—'} | ${t.llmFirstTokenMs ?? '—'} | ${t.ttsFirstAudioMs ?? '—'} | ${t.wer == null ? '—' : (t.wer * 100).toFixed(0) + '%'} | ${t.spokenRatio ?? '—'} | ${t.interruptStopMs ?? (t.interruptStopMs === null ? 'FAIL' : '—')} |`),
+      ? `| ${t.turn} | (missing) |||||||||`
+      : `| ${t.turn} | ${t.voiceToVoiceMs ?? '—'} | ${t.eotMs ?? '—'} | ${t.llmFirstTokenMs ?? '—'} | ${t.ttsFirstAudioMs ?? '—'} | ${t.wer == null ? '—' : (t.wer * 100).toFixed(0) + '%'} | ${t.spokenRatio ?? '—'} | ${t.interruptStopMs ?? (t.interruptStopMs === null ? 'FAIL' : '—')} | ${t.contentWordMs ?? '—'} | ${t.userInterruptions ?? '—'} |`),
   ];
   return lines.join('\n');
 }
