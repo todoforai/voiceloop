@@ -56,11 +56,15 @@
     onEvent: (e) => {
       if (e.type === 'state') {
         document.getElementById('state').textContent = e.state;
+        rec('state', { state: e.state });                     // full transition log (barge-in shows as speaking→listening with no commit)
         if (e.state === 'thinking') rec('turn_committed');
       }
       if (e.type === 'stt') {
-        if (e.turnComplete) { rec('stt_final', { text: e.text }); log(`stt: ${e.text}`); }
-        else if (e.text) rec('stt_partial', { text: e.text });
+        // Echo diagnosis: snapshot the agent's echo-latch state per STT callback — which reply
+        // text the filter compared against and whether the turn is latched as self-echo.
+        const diag = { echoRef: !!window.__agent?._echoRef, replyText: window.__agent?._replyText ?? '', replyEcho: window.__agent?._replyEcho ?? '' };
+        if (e.turnComplete) { rec('stt_final', { text: e.text, ...diag }); log(`stt: ${e.text}`); }
+        else if (e.text) rec('stt_partial', { text: e.text, committed: e.committed ?? '', ...diag });
       }
       if (e.type === 'echo') rec('echo_drop', { text: e.text });
       if (e.type === 'vad') rec('vad', { on: e.speaking ?? e.on });

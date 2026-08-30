@@ -53,6 +53,16 @@ const echo = scenario.echo;
 const echoGain = echo ? Math.pow(10, (echo.gainDb ?? -15) / 20) : 0;
 let echoBuf = echo ? Buffer.alloc(Math.round((RATE * 2 * (echo.delayMs ?? 30)) / 1000) & ~1) : null;
 
+// ── background noise (scenario.noise: { bed } + per-turn noiseBurst) ───────────────────────────
+// The bed (café chatter + floor, pre-scaled to ~15dB SNR by gen-noise.js) loops into the mic
+// CONTINUOUSLY — through person lines, agent replies and the gaps; a quiet moment for an energy
+// VAD never comes. Bursts (cough/door, person-line loudness) are queued mid-reply by fireBurst().
+// Mixing is a saturating per-sample add, same as the echo path above.
+const bed = scenario.noise?.bed ? readFileSync(join(AUDIO_DIR, scenario.noise.bed)) : null;
+const burstPcm = Object.fromEntries(scenario.turns.filter((t) => t.noiseBurst)
+  .map((t) => [t.noiseBurst.file, readFileSync(join(AUDIO_DIR, t.noiseBurst.file))]));
+let bedOff = 0, burst = null, burstOff = 0, burstMeta = null;
+
 // ── mic side: one continuous realtime stream (agents need an always-live mic) ──────────────────
 const mic = spawn('pacat', ['--playback', '-d', 'bench_mic_sink', '--raw', `--rate=${RATE}`, '--channels=1', '--format=s16le', '--latency-msec=40']);
 mic.on('exit', (c) => { if (c) { console.error('pacat mic exited', c); process.exit(1); } });
@@ -68,6 +78,18 @@ setInterval(() => {                                  // realtime pacing: one 100
     out = Buffer.from(out);                          // never mutate micQueue/silence views
     for (let i = 0; i + 1 < take.length; i += 2) {
       const v = out.readInt16LE(i) + take.readInt16LE(i);
+      out.writeInt16LE(v > 32767 ? 32767 : v < -32768 ? -32768 : v, i);
+    }
+  }
+  if (bed || burst) {                                // mix noise bed (looped) + any active burst
+    // noise_burst is emitted HERE, on the tick that injects the first burst sample — not when
+    // fireBurst() queued it — so the event is ground truth for when noise actually hit the mic.
+    if (burst && burstOff === 0) { ev('noise_burst', burstMeta); console.log(`burst '${burstMeta.kind}' → mic`); }
+    out = out === chunk || out === silence ? Buffer.from(out) : out;
+    for (let i = 0; i + 1 < out.length; i += 2) {
+      let v = out.readInt16LE(i);
+      if (bed) { v += bed.readInt16LE(bedOff); bedOff = (bedOff + 2) % bed.length; }
+      if (burst) { v += burst.readInt16LE(burstOff); if ((burstOff += 2) >= burst.length) { burst = null; burstOff = 0; } }
       out.writeInt16LE(v > 32767 ? 32767 : v < -32768 ? -32768 : v, i);
     }
   }
@@ -103,9 +125,23 @@ spk.stdout.on('data', (c) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (cond, timeout) => { const end = now() + timeout; while (!cond() && now() < end) await sleep(20); return cond(); };
 
+// Queue this turn's noiseBurst afterMs into THIS turn's reply. Fresh-onset semantics: right after
+// person_end the PREVIOUS reply may still be draining (barge-in turns), so first wait for silence,
+// then for the new reply's audio. The mic tick emits the noise_burst event when it injects the
+// first sample (ground truth for analyze.js attribution).
+async function fireBurst(k, nb) {
+  await waitFor(() => !agentSpeaking, REPLY_TIMEOUT_MS);
+  if (!(await waitFor(() => agentSpeaking, REPLY_TIMEOUT_MS))) return console.log(`turn ${k}: no reply — burst '${nb.kind}' skipped`);
+  await sleep(nb.afterMs);
+  const pcm = burstPcm[nb.file];
+  burstMeta = { turn: k, kind: nb.kind, durMs: Math.round((pcm.length / 2 / RATE) * 1000) };
+  burst = pcm; burstOff = 0;
+  console.log(`turn ${k}: burst '${nb.kind}' queued @${nb.afterMs}ms into reply`);
+}
+
 // ── the conversation ───────────────────────────────────────────────────────────────────────────
 (async () => {
-  console.log(`driver: scenario=${scenario.name} turns=${scenario.turns.length}${echo ? ` echo=${echo.gainDb ?? -15}dB/${echo.delayMs ?? 30}ms` : ''} → speak into bench_mic, listen on bench_spk`);
+  console.log(`driver: scenario=${scenario.name} turns=${scenario.turns.length}${echo ? ` echo=${echo.gainDb ?? -15}dB/${echo.delayMs ?? 30}ms` : ''}${bed ? ` noise-bed=${(bed.length / 2 / RATE).toFixed(1)}s loop` : ''} → speak into bench_mic, listen on bench_spk`);
   console.log('driver: start your agent now — first line plays in', (scenario.startDelayMs ?? 5000) / 1000, 's');
   await sleep(scenario.startDelayMs ?? 5000);
   t0 = now();
@@ -128,6 +164,7 @@ const waitFor = async (cond, timeout) => { const end = now() + timeout; while (!
     await sleep(durMs);
     ev('person_end', { turn: k });
     console.log(`turn ${k}: "${turn.person}" (${Math.round(durMs)}ms${turn.interrupt ? `, interrupt @${turn.interrupt.afterMs}ms` : ''})`);
+    if (turn.noiseBurst) fireBurst(k, turn.noiseBurst);   // fire-and-forget; the next turn's settle wait outlives it
   }
 
   // Let the final reply play out fully, then close.

@@ -16,7 +16,7 @@ import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { segments, RATE } from './energy.js';
-import { computeMetrics, formatReport, wer, norm } from '../metrics.js';
+import { computeMetrics, formatReport, wer, norm, deriveNoiseStops } from '../metrics.js';
 
 const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
 const runFile = process.argv[2];
@@ -61,6 +61,14 @@ const bargeEvents = scenario.turns.flatMap((turn, k) => {
   return active ? [{ t: Math.round(active.endMs + offsetMs), type: 'barge_stop' }] : [];
 });
 
+// noise_stop: derived by the shared pure function (metrics.js) from the driver's noise_burst
+// ground truth + the offline segments, with double-attribution guards against scripted barge-ins.
+const noiseBurstEvents = run.events.filter((e) => e.type === 'noise_burst');
+const noiseStops = deriveNoiseStops({
+  segs: segs.map((s) => ({ startMs: s.startMs + offsetMs, endMs: s.endMs + offsetMs })),   // → driver clock
+  bursts: noiseBurstEvents, personEvents, bargeStops: bargeEvents,
+});
+
 // ── optional: transcribe each reply segment → spokenRatio, fidelity + first CONTENT word ────────
 // reply_done is skipped when instrumented events exist (they carry exact heardNw); the
 // content_word timing however only exists via transcription, so that always runs with a key.
@@ -100,7 +108,7 @@ if (key) {
   }
 }
 
-const events = [...personEvents, ...clipEvents, ...bargeEvents, ...replyEvents, ...insideEvents].sort((a, b) => a.t - b.t);
+const events = [...personEvents, ...noiseBurstEvents, ...clipEvents, ...bargeEvents, ...noiseStops, ...replyEvents, ...insideEvents].sort((a, b) => a.t - b.t);
 const metrics = computeMetrics(events, scenario);
 const report = formatReport(metrics, `${run.label} / ${run.scenario} (${insideEvents.length ? 'black-box + instrumented' : 'black-box'})`);
 const out = runFile.replace(/\.json$/, '.report.json');

@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { wer, computeMetrics, formatReport } from './metrics.js';
+import { wer, computeMetrics, formatReport, deriveNoiseStops } from './metrics.js';
 
 test('wer: exact match 0, total miss 1, substitutions counted', () => {
   assert.equal(wer('hello world', 'hello world'), 0);
@@ -192,6 +192,73 @@ test('self-interruption: short spokenRatio alone (no barge_stop event) is caught
   ];
   const m = computeMetrics(events, { turns: [scenario.turns[0]] });
   assert.equal(m.turns[0].selfInterrupted, true);
+});
+
+test('noise: an unresumed noise_stop counts as a false barge-in, a resumed one as a noise stall', () => {
+  const noiseScenario = { turns: [scenario.turns[0], { ...scenario.turns[0] }] };
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1000, type: 'person_end', turn: 0 },
+    { t: 1600, type: 'clip_start' },
+    { t: 2200, type: 'noise_burst', turn: 0, kind: 'cough', durMs: 2000 },
+    { t: 2600, type: 'noise_stop', kind: 'cough', stopMs: 400 },                    // never resumed → reply killed
+    { t: 2600, type: 'clip_end' },
+    { t: 6000, type: 'person_start', turn: 1 },
+    { t: 7000, type: 'person_end', turn: 1 },
+    { t: 7600, type: 'clip_start' },
+    { t: 8200, type: 'noise_burst', turn: 1, kind: 'door', durMs: 1500 },
+    { t: 8500, type: 'noise_stop', kind: 'door', stopMs: 300, resumedMs: 900 },     // flinched, came back
+    { t: 8500, type: 'clip_end' },
+    { t: 9400, type: 'clip_start' }, { t: 11000, type: 'clip_end' },
+  ];
+  const m = computeMetrics(events, noiseScenario);
+  assert.equal(m.aggregate.falseBargeIns, 1, 'the killed reply is a false barge-in');
+  assert.equal(m.aggregate.agentStalledByNoise, 1, 'the halt-and-resume is a noise stall');
+});
+
+test('noise: bursts the agent talks through leave falseBargeIns at 0', () => {
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1000, type: 'person_end', turn: 0 },
+    { t: 1600, type: 'clip_start' },
+    { t: 2200, type: 'noise_burst', turn: 0, kind: 'cough', durMs: 2000 },
+    { t: 6000, type: 'clip_end' },
+  ];
+  const m = computeMetrics(events, { turns: [scenario.turns[0]] });
+  assert.equal(m.aggregate.falseBargeIns, 0);
+  assert.equal(m.aggregate.agentStalledByNoise, 0);
+});
+
+test('deriveNoiseStops: kill, stall, talk-through, silence and barge-guard cases', () => {
+  const personEvents = [
+    { t: 0, type: 'person_start', turn: 0 }, { t: 1000, type: 'person_end', turn: 0 },
+    { t: 20000, type: 'person_start', turn: 1 }, { t: 21000, type: 'person_end', turn: 1 },
+  ];
+  const segs = [
+    { startMs: 1600, endMs: 2600 },      // ends 400ms after burst A → reaction
+    { startMs: 3600, endMs: 4600 },      // resumes 1000ms later → stall
+    { startMs: 8000, endMs: 8300 },      // ends right after burst B, next seg only 200ms away → sentence gap
+    { startMs: 8500, endMs: 12000 },     // burst C at 10000 lands inside, seg outlives it → no reaction
+  ];
+  const bursts = [
+    { t: 2200, type: 'noise_burst', turn: 0, kind: 'cough', durMs: 880 },
+    { t: 8100, type: 'noise_burst', turn: 0, kind: 'door', durMs: 500 },
+    { t: 10000, type: 'noise_burst', turn: 0, kind: 'cough', durMs: 880 },
+    { t: 15000, type: 'noise_burst', turn: 0, kind: 'door', durMs: 500 },   // agent silent → nothing to cut
+  ];
+  const stops = deriveNoiseStops({ segs, bursts, personEvents });
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].t, 2600);
+  assert.equal(stops[0].stopMs, 400);
+  assert.equal(stops[0].resumedMs, 1000, 'came back → stall, not kill');
+});
+
+test('deriveNoiseStops: a stop owned by a scripted barge-in is not double-counted', () => {
+  const personEvents = [{ t: 3000, type: 'person_start', turn: 1 }, { t: 4000, type: 'person_end', turn: 1 }];
+  const segs = [{ startMs: 1600, endMs: 3400 }];               // cut during the person's scripted speech
+  const bursts = [{ t: 3100, type: 'noise_burst', turn: 1, kind: 'cough', durMs: 880 }];
+  assert.equal(deriveNoiseStops({ segs, bursts, personEvents }).length, 0, 'person line open at stop');
+  assert.equal(deriveNoiseStops({ segs, bursts, personEvents: [], bargeStops: [{ t: 3400, type: 'barge_stop' }] }).length, 0, 'derived barge_stop within 250ms');
 });
 
 test('a turn with no person audio in the timeline reports missing, not a crash', () => {

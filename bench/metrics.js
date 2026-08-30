@@ -9,6 +9,9 @@
 //   { t, type: 'clip_start' } / { t, type: 'clip_end' }       — one TTS clip physically playing / done
 //   { t, type: 'reply_done', heardNw, totalNw }               — reply over: chars voiced vs generated
 //   { t, type: 'barge_stop' }                                 — agent playback cut by barge-in
+//   { t, type: 'noise_burst', turn, kind, durMs }             — driver mixed a non-speech burst into the mic (ground truth)
+//   { t, type: 'noise_stop', resumedMs? }                     — agent audio halted right after a burst (analyze.js);
+//                                                               resumedMs set = it came back (stall, not a lost reply)
 //   { t, type: 'echo_drop', text }                            — a final swallowed as self-echo
 //
 // Scenario: { turns: [{ person, response, interrupt? }] } — `person` is the ground-truth text of what
@@ -30,6 +33,31 @@ export function wer(refText, hypText) {
     prev = cur;
   }
   return prev[hyp.length] / ref.length;
+}
+
+// ── noise_stop derivation (used by analyze.js on offline segments; pure → unit-testable) ────────
+// For each driver noise_burst (ground truth: first burst sample on the mic), did the agent's
+// audio halt in REACTION? Heuristic, stated as such: the segment active at burst time must end
+// inside the reaction window (burst end + 1s). A halt that resumes ≥600ms later is a noise stall
+// (resumedMs set); one that never resumes before the next person line is a killed reply. Gaps
+// <600ms are normal TTS sentence pauses (clean smalltalk runs show inter-clip gaps up to ~500ms).
+// Guards: a stop already attributable to scripted person speech (person line open at the stop, or
+// a derived barge_stop within 250ms) is NOT double-counted as a noise stop.
+export function deriveNoiseStops({ segs, bursts, personEvents, bargeStops = [] }) {
+  const personOpen = (t) => personEvents.some((ps) => ps.type === 'person_start' &&
+    t >= ps.t && t < (personEvents.find((pe) => pe.type === 'person_end' && pe.turn === ps.turn)?.t ?? ps.t + 10000));
+  return bursts.flatMap((nb) => {
+    const active = segs.find((s) => s.startMs <= nb.t && s.endMs > nb.t);
+    if (!active) return [];                                     // burst hit agent silence — nothing to cut
+    const stopT = active.endMs;
+    if (stopT > nb.t + (nb.durMs ?? 2000) + 1000) return [];    // reply outlived the burst — no reaction
+    if (personOpen(stopT) || bargeStops.some((b) => Math.abs(b.t - stopT) < 250)) return [];   // scripted speech owns this stop
+    const nextPerson = personEvents.find((e) => e.type === 'person_start' && e.t > nb.t)?.t ?? Infinity;
+    const next = segs.find((s) => s.startMs > stopT && s.startMs < nextPerson);
+    const gapMs = next ? Math.round(next.startMs - stopT) : null;
+    if (gapMs != null && gapMs < 600) return [];                // natural sentence gap, not a flinch
+    return [{ t: Math.round(stopT), type: 'noise_stop', turn: nb.turn, kind: nb.kind, stopMs: Math.round(stopT - nb.t), ...(gapMs != null ? { resumedMs: gapMs } : {}) }];
+  });
 }
 
 // ── per-turn + aggregate metrics ────────────────────────────────────────────────────────────────
@@ -142,12 +170,18 @@ export function computeMetrics(events, scenario) {
     turns.push(t);
   }
 
-  // False barge-ins: barge_stop events not attributable to any scripted interruption.
+  // False barge-ins: barge_stop events not attributable to any scripted interruption, PLUS
+  // noise_stop events without a resume (analyze.js: agent audio halted right after a driver
+  // noise_burst — the burst event is ground truth, so attribution is exact, no window guessing).
+  // A noise stop the agent RECOVERS from (resumedMs set) is reported separately as
+  // agent-stalled-by-noise: the reply survives, but the listener hears the agent flinch.
   const interruptStarts = scenario.turns
     .map((s, k) => (s.interrupt ? events.find((e) => e.type === 'person_start' && e.turn === k)?.t : null))
     .filter((x) => x != null);
+  const noiseStops = events.filter((e) => e.type === 'noise_stop');
   const falseBargeIns = events.filter((e) =>
-    e.type === 'barge_stop' && !interruptStarts.some((ts) => e.t >= ts - 500 && e.t < ts + 10000)).length;
+    e.type === 'barge_stop' && !interruptStarts.some((ts) => e.t >= ts - 500 && e.t < ts + 10000)).length
+    + noiseStops.filter((e) => e.resumedMs == null).length;
 
   const nums = (key) => turns.map((t) => t[key]).filter((v) => typeof v === 'number');
   const stats = (key) => {
@@ -173,6 +207,7 @@ export function computeMetrics(events, scenario) {
       stalls: nums('stalls').reduce((a, b) => a + b, 0),
       userInterrupted: nums('userInterruptions').reduce((a, b) => a + b, 0),
       falseBargeIns,
+      agentStalledByNoise: noiseStops.filter((e) => e.resumedMs != null).length,   // subset of `stalls` (a ≥600ms resume gap is also a >250ms stall)
       echoDrops: events.filter((e) => e.type === 'echo_drop').length,
       echoWords,
       selfInterruptions: turns.filter((t) => t.selfInterrupted).length,
@@ -199,6 +234,7 @@ export function formatReport(m, label = '') {
     `| spoken ratio (uninterrupted) | ${a.spokenRatioUninterrupted ?? '—'} |`,
     `| user-interrupted (agent spoke into open turn) | ${a.userInterrupted} |`,
     `| stalls / false barge-ins / echo drops | ${a.stalls} / ${a.falseBargeIns} / ${a.echoDrops} |`,
+    `| agent-stalled-by-noise (halt + resume, subset of stalls) | ${a.agentStalledByNoise} |`,
     `| echo words / self-interruptions | ${a.echoWords} / ${a.selfInterruptions} |`,
     '',
     '| turn | v→v | EOT | 1st tok | TTS 1st | WER | spoken | stop | cw | uint |',
