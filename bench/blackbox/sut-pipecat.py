@@ -69,7 +69,25 @@ async def main():
     )
 
     # The bench mock LLM: fixed scripted responses, 300ms TTFT, 300 chars/s — same brain for every SUT.
-    llm = OpenAILLMService(api_key="x", base_url="http://localhost:7777/v1")
+    # It selects the scripted turn by counting user messages; Pipecat's aggregator sometimes emits one
+    # utterance as two user messages (split STT finals), so merge consecutive user messages — request
+    # normalization to the mock's one-user-message-per-turn contract, no timing change. Limitation:
+    # if Pipecat swallows a reply (self-interruption), two REAL turns sit adjacent and get merged too,
+    # shifting the script by one — disclosed in RESULTS.md, not repairable at the request layer.
+    class MockLLMService(OpenAILLMService):
+        def build_chat_completion_params(self, params_from_context):
+            params = super().build_chat_completion_params(params_from_context)
+            merged = []
+            for m in params["messages"]:
+                if (merged and m["role"] == "user" and merged[-1]["role"] == "user"
+                        and isinstance(m.get("content"), str) and isinstance(merged[-1].get("content"), str)):
+                    merged[-1] = {"role": "user", "content": f"{merged[-1]['content']} {m['content']}"}
+                else:
+                    merged.append(dict(m))
+            params["messages"] = merged
+            return params
+
+    llm = MockLLMService(api_key="x", base_url="http://localhost:7777/v1")
 
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(

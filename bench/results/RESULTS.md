@@ -20,7 +20,7 @@ so the numbers measure the voice pipeline, not the language model.
 | OpenAI Realtime (gpt-realtime, speech-to-speech) * | 866ms | 1644 | 429ms | 20 |
 | **voiceloop** · deepgram + ElevenLabs flash TTS | **984ms** | 1169 | 1019ms | 15 |
 | **voiceloop** · deepgram + Piper (free, local) | **981–1101ms** | 1306 | 1452ms | 23 |
-| Pipecat 1.8.1 · deepgram + EL flash TTS | 1032ms | 3594 | 559ms | 9 |
+| Pipecat 1.8.1 · deepgram + EL flash TTS | 1046ms | 3573 | 542ms | 14 |
 | ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1042ms | 8 |
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
@@ -65,11 +65,17 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
   config, though: Pipecat's stock integration is nova-3 STT + SileroVAD start +
   `LocalSmartTurnAnalyzerV3` end-of-turn, where voiceloop uses Deepgram **Flux** with its native
   turn events — so the row compares each framework's out-of-the-box turn-taking stack, not
-  orchestration overhead alone. Two faces: the fastest barge-in of the cascade systems (559ms
-  median; only speech-to-speech Realtime is quicker) — its VAD-triggered interruption cuts
-  output immediately, no transcription gate — but a fat latency tail: the smart-turn model
-  judges "Stop stop, just tell me one word, yes or no." INCOMPLETE and holds the turn ~2.8s
-  past end of speech (3.5s v→v on that turn in 4/5 runs; all other turns 0.6–1.5s). VAD
+  orchestration overhead alone. Per-run v→v medians were among the tightest measured
+  (1035–1105ms). Two faces: the fastest barge-in of the cascade systems (542ms median; only
+  speech-to-speech Realtime is quicker) — its VAD-triggered interruption cuts output
+  immediately, no transcription gate — but two failure modes fatten the tail. (1) The
+  smart-turn model judges "Stop stop, just tell me one word, yes or no." INCOMPLETE and holds
+  the turn ~2.8s past end of speech (~3.5s v→v on that turn in every run; all other turns
+  0.6–1.5s). (2) **Self-interruption**: when nova-3 splits an utterance into two finals
+  ("Hey there." + "can you hear me properly?"), smart-turn commits on the first and the late
+  second final triggers `TranscriptionUserTurnStartStrategy` — the framework interrupts its own
+  nascent reply, the recovery stop fires no inference, and the orphaned reply flushes after the
+  NEXT turn (2/5 runs lost turn 0 this way → v→v n=28, and the flushed audio adds stalls). VAD
   barge-in also means loud non-speech noise can cut the agent's output; voiceloop's word-based
   gate needs transcribed words (both showed 0 false barge-ins here — the scripted audio is
   clean speech).
@@ -105,13 +111,16 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
 - ConvAI is a closed box, so its EOT/STT sub-metrics come from SDK callback timing and are not
   comparable to our instrumented splits; only the audio-truth columns (voice→voice, barge-in,
   stalls) are apples-to-apples.
-- **Pipecat script desync**: our mock LLM picks the scripted response by counting user messages;
+- **Pipecat mock-LLM contract**: our mock picks the scripted response by counting user messages;
   Pipecat's aggregator sometimes emits one utterance as two user messages (split STT finals), so
-  in 2 of 5 runs later turns received a shifted scripted line (4 LLM calls fell off the script
-  end entirely → stock fallback reply). The mock's 300ms TTFT and char rate are identical
-  whatever text it serves, so first-token timing is unchanged, but a different reply text can
-  shift sentence boundaries and reply length — treat Pipecat's stall count and v→v tail with
-  that grain of salt. One turn produced no measurable reply (v→v n=29 of 30). Pipecat runs as a
+  the SUT merges consecutive user messages before each request — request normalization only, no
+  timing change. This removed the off-script fallback replies of an earlier run (all heard
+  speech is now script text, whisper-checked), but it cannot repair the self-interruption case:
+  when a reply is swallowed, the next request has two genuine turns with no assistant message
+  between them, the merge collapses them, and the script stays shifted by one for parts of those
+  runs (2/5) — shifted reply text can move sentence boundaries, so read the stall count with
+  that in mind. The self-interruption itself is Pipecat default-config behavior, kept in the
+  numbers. Pipecat runs as a
   native process (`run-proc.js` restarts it per run), audio via pyaudio→pulse on the same
   bench_mic/bench_spk pair; its mock-LLM calls are localhost, same as voiceloop's.
 - **OpenAI Realtime does not use the shared mock LLM at all** — it is speech-to-speech, so its
