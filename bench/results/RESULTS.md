@@ -20,7 +20,9 @@ so the numbers measure the voice pipeline, not the language model.
 | OpenAI Realtime (gpt-realtime, speech-to-speech) * | 866ms | 1644 | 429ms | 20 |
 | **voiceloop** · deepgram + ElevenLabs flash TTS | **984ms** | 1169 | 1019ms | 15 |
 | **voiceloop** · deepgram + Piper (free, local) | **981–1101ms** | 1306 | 1452ms | 23 |
+| Pipecat 1.8.1 · deepgram + EL flash TTS | 1032ms | 3594 | 559ms | 9 |
 | ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1042ms | 8 |
+| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + Piper | _2414ms_ | _4771_ | _1406ms_ | _32_ |
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
 
@@ -57,6 +59,32 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
   (word-based SUTs like voiceloop can't be noise-interrupted; here 0 false barge-ins only
   because the rig is silent between lines). The short "Yes." turn was often not detected as a
   separate reply (n=26 of 30 turns).
+- **Pipecat** — `bench/blackbox/sut-pipecat.py`: the official local-audio example
+  (PipelineWorker/WorkerRunner) with the same provider vendors as our winning config — Deepgram
+  STT, the same ElevenLabs flash voice, the shared mock LLM on localhost. Same vendors ≠ same
+  config, though: Pipecat's stock integration is nova-3 STT + SileroVAD start +
+  `LocalSmartTurnAnalyzerV3` end-of-turn, where voiceloop uses Deepgram **Flux** with its native
+  turn events — so the row compares each framework's out-of-the-box turn-taking stack, not
+  orchestration overhead alone. Two faces: the fastest barge-in of the cascade systems (559ms
+  median; only speech-to-speech Realtime is quicker) — its VAD-triggered interruption cuts
+  output immediately, no transcription gate — but a fat latency tail: the smart-turn model
+  judges "Stop stop, just tell me one word, yes or no." INCOMPLETE and holds the turn ~2.8s
+  past end of speech (3.5s v→v on that turn in 4/5 runs; all other turns 0.6–1.5s). VAD
+  barge-in also means loud non-speech noise can cut the agent's output; voiceloop's word-based
+  gate needs transcribed words (both showed 0 false barge-ins here — the scripted audio is
+  clean speech).
+- **TODOforAI shared-voice** — NOT a competitor: our own product's shipped voice agent
+  (`todoforai/packages/shared-voice`, an earlier cousin of voiceloop), benchmarked in its
+  production default config (browser Web Speech STT + Piper 1.2×) via a thin SUT page +
+  `/llm` wire shim (`packages/shared-voice/bench/`). Per-run medians very tight (2393–2468ms).
+  The 1430ms gap to voiceloop·piper splits cleanly: **EOT delay 1570ms** vs 366 (Chrome
+  Web Speech endpointing + 500ms debounce + tail-defer waits, vs Deepgram flux native
+  turn events) and **TTS first audio 1930ms** vs 418 (its Piper path lacks voiceloop's
+  phonemizer reuse, `ort.env.wasm.proxy` worker inference, presynth, and runs without
+  crossOriginIsolated — single-threaded ONNX, like the production site). The p95 outlier
+  (~4.8s) is turn-0 Piper cold start. Barge-in is word-based like voiceloop (0 false
+  barge-ins) but slower to drain (1406ms). This row exists to track our shipped product
+  against the state of this repo — the deltas above are its upgrade backlog.
 - **ConvAI** — measured through their standard `@elevenlabs/client` SDK with a default-config
   agent (scribe_realtime ASR, `turn_v3`/normal eagerness, `optimize_streaming_latency: 3`; we
   even upgraded its TTS from the default turbo_v2 to the faster flash_v2). Per-run medians were
@@ -77,6 +105,15 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
 - ConvAI is a closed box, so its EOT/STT sub-metrics come from SDK callback timing and are not
   comparable to our instrumented splits; only the audio-truth columns (voice→voice, barge-in,
   stalls) are apples-to-apples.
+- **Pipecat script desync**: our mock LLM picks the scripted response by counting user messages;
+  Pipecat's aggregator sometimes emits one utterance as two user messages (split STT finals), so
+  in 2 of 5 runs later turns received a shifted scripted line (4 LLM calls fell off the script
+  end entirely → stock fallback reply). The mock's 300ms TTFT and char rate are identical
+  whatever text it serves, so first-token timing is unchanged, but a different reply text can
+  shift sentence boundaries and reply length — treat Pipecat's stall count and v→v tail with
+  that grain of salt. One turn produced no measurable reply (v→v n=29 of 30). Pipecat runs as a
+  native process (`run-proc.js` restarts it per run), audio via pyaudio→pulse on the same
+  bench_mic/bench_spk pair; its mock-LLM calls are localhost, same as voiceloop's.
 - **OpenAI Realtime does not use the shared mock LLM at all** — it is speech-to-speech, so its
   "brain" is gpt-realtime itself. Every other row pays the mock's simulated 300ms TTFT +
   300 chars/s streaming; Realtime pays whatever its internal model latency is instead. We
@@ -103,10 +140,16 @@ PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk google-chrome --user-data-dir=/tmp/s
   --autoplay-policy=no-user-gesture-required \
   'http://localhost:7777/bench/blackbox/agent.html?stt=deepgram&tts=elevenlabs'
 node bench/blackbox/run-n.js smalltalk mylabel 5 9223
+
+# process SUTs (e.g. Pipecat) use the process runner instead of a Chrome page:
+PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk DEEPGRAM_API_KEY=… ELEVENLABS_API_KEY=… \
+  node bench/blackbox/run-proc.js smalltalk pipecat 5 -- \
+  /tmp/pipecat-venv/bin/python bench/blackbox/sut-pipecat.py
 ```
 
 Raw per-run artifacts (`bb-*.json`, `*.agent.raw` recordings) are not tracked — every pooled
-summary in this directory was produced by `run-n.js` from 5 fresh runs.
+summary in this directory was produced by `run-n.js` (or `run-proc.js` for process SUTs) from
+5 fresh runs.
 
 Want your agent in this table? See [`bench/ADDING_A_SUT.md`](../ADDING_A_SUT.md) for the SUT
 contract, fairness rules and PR checklist.
