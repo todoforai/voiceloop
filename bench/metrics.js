@@ -43,6 +43,28 @@ export function computeMetrics(events, scenario) {
   events = [...events].sort((a, b) => a.t - b.t);
   const turns = [];
 
+  // ECHO WORDS (echo scenarios): response-script words surfacing in the USER-side transcript —
+  // the SUT transcribing its own speakers→mic echo as user speech. Counted over ALL stt_final
+  // text: words that occur in some scripted RESPONSE but in NO person line (so a correctly-heard
+  // person contributes zero). Exact normalized matching keeps it deterministic; misheard echo
+  // undercounts slightly — the conservative direction. SUTs that FILTER their echo emit no such
+  // finals (voiceloop surfaces them as echo_drop instead), so this measures pollution that the
+  // SUT would actually have acted on.
+  const respWords = new Set(scenario.turns.flatMap((s) => norm(s.response ?? '')));
+  const personWords = new Set(scenario.turns.flatMap((s) => norm(s.person ?? '')));
+  const echoWords = events.filter((e) => e.type === 'stt_final' && e.text)
+    .reduce((n, e) => n + norm(e.text).filter((w) => respWords.has(w) && !personWords.has(w)).length, 0);
+
+  // Person speech intervals — "was anyone talking around t?" for self-interruption attribution
+  // (a real person-caused stop follows live person speech within STT latency; POST_MS bounds it).
+  const PERSON_POST_MS = 800;
+  const personIntervals = scenario.turns.map((_, i) => {
+    const ps = events.find((e) => e.type === 'person_start' && e.turn === i);
+    const pe = events.find((e) => e.type === 'person_end' && e.turn === i);
+    return ps ? [ps.t, (pe?.t ?? ps.t + 10000) + PERSON_POST_MS] : null;
+  }).filter(Boolean);
+  const personNear = (t) => personIntervals.some(([a, b]) => t >= a && t <= b);
+
   for (let k = 0; k < scenario.turns.length; k++) {
     const script = scenario.turns[k];
     const start = events.find((e) => e.type === 'person_start' && e.turn === k);
@@ -106,6 +128,17 @@ export function computeMetrics(events, scenario) {
       const stop = firstAfter(events, 'barge_stop', start.t - 500, windowEnd);
       t.interruptStopMs = stop ? Math.round(stop.t - start.t) : null;              // null = never stopped (failed barge-in)
     }
+
+    // SELF-INTERRUPTION: the agent cut its own reply with nobody talking — the signature failure
+    // of broken echo handling (it hears its own voice, "barges in" on itself). Audio truth: on a
+    // turn whose reply no scripted interrupt touches, the reply was delivered visibly short
+    // (spokenRatio, from reply_done or the offline transcript), OR an explicit barge_stop landed
+    // outside every person-speech window. 0.8: whisper-derived ratios on fully-voiced replies sit
+    // well above it, a self-cut loses at least a sentence.
+    const scriptedNext = !!scenario.turns[k + 1]?.interrupt;
+    const selfStop = between(events, 'barge_stop', end.t, windowEnd).some((e) => !personNear(e.t));
+    t.selfInterrupted = !scriptedNext &&
+      (selfStop || (typeof t.spokenRatio === 'number' && t.spokenRatio < 0.8));
     turns.push(t);
   }
 
@@ -141,6 +174,8 @@ export function computeMetrics(events, scenario) {
       userInterrupted: nums('userInterruptions').reduce((a, b) => a + b, 0),
       falseBargeIns,
       echoDrops: events.filter((e) => e.type === 'echo_drop').length,
+      echoWords,
+      selfInterruptions: turns.filter((t) => t.selfInterrupted).length,
     },
   };
 }
@@ -164,6 +199,7 @@ export function formatReport(m, label = '') {
     `| spoken ratio (uninterrupted) | ${a.spokenRatioUninterrupted ?? '—'} |`,
     `| user-interrupted (agent spoke into open turn) | ${a.userInterrupted} |`,
     `| stalls / false barge-ins / echo drops | ${a.stalls} / ${a.falseBargeIns} / ${a.echoDrops} |`,
+    `| echo words / self-interruptions | ${a.echoWords} / ${a.selfInterruptions} |`,
     '',
     '| turn | v→v | EOT | 1st tok | TTS 1st | WER | spoken | stop | cw | uint |',
     '|---|---|---|---|---|---|---|---|---|---|',

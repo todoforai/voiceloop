@@ -27,7 +27,7 @@ const scenarioName = process.argv[2] || 'smalltalk';
 const label = process.argv[3] || 'blackbox';
 const scenario = JSON.parse(readFileSync(join(BENCH, 'scenarios', `${scenarioName}.json`), 'utf8'));
 
-const AUDIO_DIR = join(BENCH, 'audio', scenarioName);
+const AUDIO_DIR = join(BENCH, 'audio', scenario.audio ?? scenarioName);   // scenario.audio: reuse another scenario's renders (echo = smalltalk lines + coupling)
 const CHUNK_MS = 100, CHUNK_BYTES = (RATE * 2 * CHUNK_MS) / 1000;
 const SETTLE_MS = scenario.settleMs ?? 2500;   // agent silent this long after speaking = reply over (person's patience at a pause)
 const REPLY_TIMEOUT_MS = 20000;  // agent never answered → move on, metrics show the hole
@@ -40,6 +40,19 @@ const utt = scenario.turns.map((_, k) => {
   return readFileSync(f);
 });
 
+// ── echo coupling (scenario.echo: { gainDb, delayMs }) ─────────────────────────────────────────
+// Simulates a laptop speaker→mic acoustic path: the agent's own output, attenuated and delayed,
+// mixed back into the mic. SOFTWARE mix in the driver (not a pulse loopback module): the driver
+// already taps bench_spk.monitor, so scaling those samples into the outgoing mic chunks is fully
+// deterministic — same gain every run, no module lifetime/permission state on the machine.
+// Timing: echoBuf is pre-charged with delayMs of silence; producer (pacat record) and consumer
+// (the 100ms mic tick) both run realtime, so the nominal delay only gains pacat latency (~40ms
+// per side) + tick quantization — an effective ~70–200ms acoustic path, the realistic range for
+// speaker→mic on consumer devices. Samples clamp at int16 (loud overlap clips, like a real mic).
+const echo = scenario.echo;
+const echoGain = echo ? Math.pow(10, (echo.gainDb ?? -15) / 20) : 0;
+let echoBuf = echo ? Buffer.alloc(Math.round((RATE * 2 * (echo.delayMs ?? 30)) / 1000) & ~1) : null;
+
 // ── mic side: one continuous realtime stream (agents need an always-live mic) ──────────────────
 const mic = spawn('pacat', ['--playback', '-d', 'bench_mic_sink', '--raw', `--rate=${RATE}`, '--channels=1', '--format=s16le', '--latency-msec=40']);
 mic.on('exit', (c) => { if (c) { console.error('pacat mic exited', c); process.exit(1); } });
@@ -48,7 +61,17 @@ const silence = Buffer.alloc(CHUNK_BYTES);
 setInterval(() => {                                  // realtime pacing: one 100ms chunk per tick
   const chunk = micQueue.length ? micQueue.subarray(0, CHUNK_BYTES) : silence;
   if (micQueue.length) micQueue = micQueue.subarray(chunk.length);
-  mic.stdin.write(chunk.length === CHUNK_BYTES ? chunk : Buffer.concat([chunk, silence.subarray(chunk.length)]));
+  let out = chunk.length === CHUNK_BYTES ? chunk : Buffer.concat([chunk, silence.subarray(chunk.length)]);
+  if (echoBuf?.length >= 2) {                        // mix the delayed agent echo into this chunk
+    const take = echoBuf.subarray(0, Math.min(CHUNK_BYTES, echoBuf.length & ~1));
+    echoBuf = echoBuf.subarray(take.length);
+    out = Buffer.from(out);                          // never mutate micQueue/silence views
+    for (let i = 0; i + 1 < take.length; i += 2) {
+      const v = out.readInt16LE(i) + take.readInt16LE(i);
+      out.writeInt16LE(v > 32767 ? 32767 : v < -32768 ? -32768 : v, i);
+    }
+  }
+  mic.stdin.write(out);
 }, CHUNK_MS);
 
 // ── speaker side: record + live speech gate ────────────────────────────────────────────────────
@@ -68,14 +91,21 @@ const gate = new Gate({
   onSpeech: (tMs) => { agentSpeaking = true; lastAgentEdge = recAnchor + tMs; ev('clip_start', { t: Math.round(recAnchor + tMs - t0) }); },
   onSilence: (tMs) => { agentSpeaking = false; lastAgentEdge = recAnchor + tMs; ev('clip_end', { t: Math.round(recAnchor + tMs - t0) }); },
 });
-spk.stdout.on('data', (c) => { recAnchor ??= now(); rec.write(c); gate.feed(c); });
+spk.stdout.on('data', (c) => {
+  recAnchor ??= now(); rec.write(c); gate.feed(c);
+  if (echo) {                                        // speaker → mic coupling: append attenuated copy
+    const scaled = Buffer.alloc(c.length & ~1);
+    for (let i = 0; i + 1 < scaled.length; i += 2) scaled.writeInt16LE(Math.round(c.readInt16LE(i) * echoGain), i);
+    echoBuf = Buffer.concat([echoBuf, scaled]);
+  }
+});
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (cond, timeout) => { const end = now() + timeout; while (!cond() && now() < end) await sleep(20); return cond(); };
 
 // ── the conversation ───────────────────────────────────────────────────────────────────────────
 (async () => {
-  console.log(`driver: scenario=${scenario.name} turns=${scenario.turns.length} → speak into bench_mic, listen on bench_spk`);
+  console.log(`driver: scenario=${scenario.name} turns=${scenario.turns.length}${echo ? ` echo=${echo.gainDb ?? -15}dB/${echo.delayMs ?? 30}ms` : ''} → speak into bench_mic, listen on bench_spk`);
   console.log('driver: start your agent now — first line plays in', (scenario.startDelayMs ?? 5000) / 1000, 's');
   await sleep(scenario.startDelayMs ?? 5000);
   t0 = now();

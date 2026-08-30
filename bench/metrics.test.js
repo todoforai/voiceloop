@@ -147,6 +147,53 @@ test('content_word: first scripted word timing lands next to voice→voice', () 
   assert.equal(m.aggregate.contentWordMs.median, 1400);
 });
 
+test('echo words: response words in the user transcript counted, person words excluded', () => {
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1500, type: 'person_end', turn: 0 },
+    { t: 1905, type: 'stt_final', text: 'what is the weather today' },       // correct person turn → 0
+    { t: 2100, type: 'clip_start' },
+    { t: 3000, type: 'stt_final', text: 'sunny and warm outside' },          // echo leak → 4 ("today" is in the person line)
+    { t: 4000, type: 'clip_end' },
+  ];
+  const m = computeMetrics(events, { turns: [scenario.turns[0]] });
+  assert.equal(m.aggregate.echoWords, 4);
+});
+
+test('clean transcripts carry zero echo words', () => {
+  assert.equal(computeMetrics(timeline, scenario).aggregate.echoWords, 0);
+});
+
+test('self-interruption: a short reply with no one talking counts; scripted cuts do not', () => {
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1000, type: 'person_end', turn: 0 },
+    { t: 1800, type: 'clip_start' },
+    { t: 2600, type: 'barge_stop' },                          // person silent since 1000 (+800ms grace) → self
+    { t: 2600, type: 'clip_end' },
+    { t: 2610, type: 'reply_done', heardNw: 8, totalNw: 28 },
+  ];
+  const m = computeMetrics(events, { turns: [scenario.turns[0]] });
+  assert.equal(m.turns[0].selfInterrupted, true);
+  assert.equal(m.aggregate.selfInterruptions, 1);
+});
+
+test('self-interruption: full clean runs and scripted-interrupt cuts report zero', () => {
+  const m = computeMetrics(timeline, scenario);
+  assert.equal(m.aggregate.selfInterruptions, 0, 'turn 0 cut by the SCRIPTED interrupt, turn 1 fully voiced');
+});
+
+test('self-interruption: short spokenRatio alone (no barge_stop event) is caught — black-box view', () => {
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1000, type: 'person_end', turn: 0 },
+    { t: 1800, type: 'clip_start' }, { t: 2400, type: 'clip_end' },
+    { t: 2410, type: 'reply_done', heardNw: 10, totalNw: 28 },   // reply died at 36% with nobody speaking
+  ];
+  const m = computeMetrics(events, { turns: [scenario.turns[0]] });
+  assert.equal(m.turns[0].selfInterrupted, true);
+});
+
 test('a turn with no person audio in the timeline reports missing, not a crash', () => {
   const m = computeMetrics([], scenario);
   assert.equal(m.turns[0].missing, true);
