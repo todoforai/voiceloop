@@ -15,11 +15,11 @@ import { join, normalize } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = normalize(join(fileURLToPath(import.meta.url), '..', '..', '..'));
+const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
 const scenarioName = process.argv[2] || 'smalltalk';
 const voiceId = process.argv[3] || 'JBFqnCBsd6RMkjVDRZzb';   // "George" — neutral male
-const scenario = JSON.parse(readFileSync(join(ROOT, 'bench', 'scenarios', `${scenarioName}.json`), 'utf8'));
-const outDir = join(ROOT, 'bench', 'audio', scenarioName);
+const scenario = JSON.parse(readFileSync(join(BENCH, 'scenarios', `${scenarioName}.json`), 'utf8'));
+const outDir = join(BENCH, 'audio', scenarioName);
 if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
 
 function findKey() {

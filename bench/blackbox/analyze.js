@@ -18,11 +18,11 @@ import { execFileSync } from 'node:child_process';
 import { segments, RATE } from './energy.js';
 import { computeMetrics, formatReport, wer } from '../metrics.js';
 
-const ROOT = normalize(join(fileURLToPath(import.meta.url), '..', '..', '..'));
+const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
 const runFile = process.argv[2];
 if (!runFile) { console.error('usage: analyze.js <bb-run.json>'); process.exit(1); }
 const run = JSON.parse(readFileSync(runFile, 'utf8'));
-const scenario = JSON.parse(readFileSync(join(ROOT, 'bench', 'scenarios', `${run.scenario}.json`), 'utf8'));
+const scenario = JSON.parse(readFileSync(join(BENCH, 'scenarios', `${run.scenario}.json`), 'utf8'));
 const pcm = readFileSync(runFile.replace(/\.json$/, '.agent.raw'));
 
 // ── offline agent-speech segments (recAnchor: first person_start aligns driver time ↔ audio time) ──

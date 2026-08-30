@@ -17,10 +17,13 @@ import { join, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeMetrics, formatReport } from './metrics.js';
 
-const ROOT = normalize(join(fileURLToPath(import.meta.url), '..', '..'));
+const BENCH = normalize(join(fileURLToPath(import.meta.url), '..'));
+// Static root: the parent repo when nested inside voiceloop (so agent.html can import
+// ../../src/index.js), or the bench dir itself when the rig is checked out standalone.
+const ROOT = existsSync(join(BENCH, '..', 'src', 'index.js')) ? normalize(join(BENCH, '..')) : BENCH;
 const PORT = +(process.env.PORT || 7777);
 const scenarioName = process.argv[2] || 'smalltalk';
-const scenario = JSON.parse(readFileSync(join(ROOT, 'bench', 'scenarios', `${scenarioName}.json`), 'utf8'));
+const scenario = JSON.parse(readFileSync(join(BENCH, 'scenarios', `${scenarioName}.json`), 'utf8'));
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json',
                '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.css': 'text/css', '.wasm': 'application/wasm' };
@@ -48,7 +51,7 @@ function saveRun(body) {
   const { events, label = 'voiceloop' } = JSON.parse(body);
   const metrics = computeMetrics(events, scenario);
   const report = formatReport(metrics, `${label} / ${scenario.name}`);
-  const dir = join(ROOT, 'bench', 'results');
+  const dir = join(BENCH, 'results');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const file = join(dir, `${scenario.name}-${label}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
   writeFileSync(file, JSON.stringify({ scenario: scenario.name, label, events, metrics }, null, 2));
@@ -106,7 +109,10 @@ http.createServer(async (req, res) => {
   }
   if (url.pathname === '/bench/scenario.json') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(scenario)); }
   // static: repo files (import ../src/*.js from the harness page)
-  const path = normalize(join(ROOT, decodeURIComponent(url.pathname === '/' ? '/bench/run.html' : url.pathname)));
+  // Nested: /bench/* maps under the repo root. Standalone: strip the /bench prefix (same URLs work in both).
+  let pathname = decodeURIComponent(url.pathname === '/' ? '/bench/run.html' : url.pathname);
+  if (ROOT === BENCH) pathname = pathname.replace(/^\/bench(\/|$)/, '/');
+  const path = normalize(join(ROOT, pathname));
   if (!path.startsWith(ROOT)) { res.writeHead(403); return res.end(); }
   try {
     const data = readFileSync(path);

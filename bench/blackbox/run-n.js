@@ -11,7 +11,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = normalize(join(fileURLToPath(import.meta.url), '..', '..', '..'));
+const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
 const [scenario = 'smalltalk', label = 'sut', N = '5', port = '9223'] = process.argv.slice(2);
 
 // ── minimal CDP client ─────────────────────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ async function waitReady(timeoutMs = 30000) {
 
 function runDriver(runLabel) {
   return new Promise((res, rej) => {
-    const p = spawn('node', ['bench/blackbox/driver.js', scenario, runLabel], { cwd: ROOT });
+    const p = spawn('node', [join(BENCH, 'blackbox', 'driver.js'), scenario, runLabel]);
     let out = '';
     p.stdout.on('data', (c) => { out += c; process.stdout.write(c); });
     p.stderr.on('data', (c) => process.stderr.write(c));
@@ -55,7 +55,7 @@ function runDriver(runLabel) {
 
 function analyze(runFile) {
   return new Promise((res, rej) => {
-    const p = spawn('node', ['bench/blackbox/analyze.js', runFile], { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'] });
+    const p = spawn('node', [join(BENCH, 'blackbox', 'analyze.js'), runFile], { stdio: ['ignore', 'pipe', 'inherit'] });
     let out = ''; p.stdout.on('data', (c) => { out += c; });
     p.on('exit', (code) => (code === 0 ? res(out) : rej(new Error('analyze failed'))));
   });
@@ -81,9 +81,9 @@ const fmt = (s) => (s ? `${s.median} (p95 ${s.p95}, ${s.min}–${s.max}, n=${s.n
     await sleep(1000);
     const runFile = await runDriver(`${label}-r${i}`);
     const inside = await evalJs('JSON.stringify(window.__bench ?? [])');
-    const run = JSON.parse(readFileSync(join(ROOT, runFile.startsWith('/') ? runFile.slice(ROOT.length + 1) : runFile), 'utf8'));
+    const abs = runFile;   // driver prints absolute paths
+    const run = JSON.parse(readFileSync(abs, 'utf8'));
     run.browserEvents = JSON.parse(inside || '[]');
-    const abs = runFile.startsWith('/') ? runFile : join(ROOT, runFile);
     writeFileSync(abs, JSON.stringify(run, null, 2));
     await analyze(abs);
     reports.push(JSON.parse(readFileSync(abs.replace(/\.json$/, '.report.json'), 'utf8')));
@@ -106,7 +106,7 @@ const fmt = (s) => (s ? `${s.median} (p95 ${s.p95}, ${s.min}–${s.max}, n=${s.n
     `| per-run v→v medians | ${agg.map((a) => a.voiceToVoiceMs?.median ?? '—').join(', ')} |`,
     `| stalls / false barge-ins (total) | ${agg.reduce((s, a) => s + a.stalls, 0)} / ${agg.reduce((s, a) => s + a.falseBargeIns, 0)} |`,
   ].join('\n');
-  const out = join(ROOT, 'bench', 'results', `pooled-${scenario}-${label}-${new Date().toISOString().replace(/[:.]/g, '-')}.md`);
+  const out = join(BENCH, 'results', `pooled-${scenario}-${label}-${new Date().toISOString().replace(/[:.]/g, '-')}.md`);
   writeFileSync(out, md);
   console.log('\n' + md + `\n\nsaved → ${out}`);
 })();

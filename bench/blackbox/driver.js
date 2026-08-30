@@ -22,12 +22,12 @@ import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Gate, RATE } from './energy.js';
 
-const ROOT = normalize(join(fileURLToPath(import.meta.url), '..', '..', '..'));
+const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
 const scenarioName = process.argv[2] || 'smalltalk';
 const label = process.argv[3] || 'blackbox';
-const scenario = JSON.parse(readFileSync(join(ROOT, 'bench', 'scenarios', `${scenarioName}.json`), 'utf8'));
+const scenario = JSON.parse(readFileSync(join(BENCH, 'scenarios', `${scenarioName}.json`), 'utf8'));
 
-const AUDIO_DIR = join(ROOT, 'bench', 'audio', scenarioName);
+const AUDIO_DIR = join(BENCH, 'audio', scenarioName);
 const CHUNK_MS = 100, CHUNK_BYTES = (RATE * 2 * CHUNK_MS) / 1000;
 const SETTLE_MS = scenario.settleMs ?? 2500;   // agent silent this long after speaking = reply over (person's patience at a pause)
 const REPLY_TIMEOUT_MS = 20000;  // agent never answered → move on, metrics show the hole
@@ -57,7 +57,7 @@ const ev = (type, extra = {}) => events.push({ t: Math.round(now() - t0), epoch:
 const spk = spawn('pacat', ['--record', '-d', 'bench_spk.monitor', '--raw', `--rate=${RATE}`, '--channels=1', '--format=s16le', '--latency-msec=40']);
 spk.on('exit', (c) => { if (c && !done) { console.error('pacat spk exited', c); process.exit(1); } });
 
-const dir = join(ROOT, 'bench', 'results');
+const dir = join(BENCH, 'results');
 if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const base = join(dir, `bb-${scenarioName}-${label}-${stamp}`);
