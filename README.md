@@ -65,11 +65,16 @@ first audio ────────┘  next sentences pre-synthesized during p
 integration — that scores voiceloop and competing agent stacks on the same scripted
 conversation and the same fixed mock LLM. Pooled 5-run medians:
 
-| system | voice→voice |
-|---|---|
-| **voiceloop** (deepgram + ElevenLabs flash TTS) | **984ms** |
-| **voiceloop** (deepgram + Piper, free local TTS) | **~1050ms** |
-| ElevenLabs ConvAI (their full agent stack) | 1454ms |
+| system | voice→voice | p95 |
+|---|---|---|
+| OpenAI Realtime (speech-to-speech, own LLM — not comparable brain)* | 866ms | 1644 |
+| **voiceloop** (deepgram + ElevenLabs flash TTS) | **984ms** | **1169** |
+| **voiceloop** (deepgram + Piper, free local TTS) | **~1050ms** | 1306 |
+| Pipecat 1.8.1 (same deepgram + EL flash providers) | 1046ms | 3573 |
+| ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 |
+
+\* Realtime can't use the bench's fixed mock LLM (it *is* the LLM), and its per-run medians
+spanned 628–1368ms — fast but the noisiest of any system; voiceloop has the tightest p95.
 
 Full tables, method and reproduction steps: [`bench/results/RESULTS.md`](bench/results/RESULTS.md).
 
