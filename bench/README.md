@@ -22,6 +22,10 @@ there and is split to this repo), but the rig is agent-agnostic — SUT pages ex
 and ElevenLabs ConvAI, and adding one for Pipecat/Vapi/LiveKit/etc. is a page or script that
 talks to the virtual devices. PRs with new SUTs or scenarios welcome.
 
+**Add your agent:** the full contract (interface, fairness rules, cloud tunneling, PR
+checklist) is in [`ADDING_A_SUT.md`](ADDING_A_SUT.md) — integration is just "listen on
+`bench_mic`, speak on `bench_spk`".
+
 Two modes, one scorecard (`metrics.js`):
 
 - **Instrumented** (agents that emit milestone events): internal splits (EOT / TTFT / TTS-first-audio) merged into the audio timeline via epoch clock.

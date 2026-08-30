@@ -85,3 +85,6 @@ node bench/blackbox/run-n.js smalltalk mylabel 5 9223
 
 Raw per-run artifacts (`bb-*.json`, `*.agent.raw` recordings) are not tracked — every pooled
 summary in this directory was produced by `run-n.js` from 5 fresh runs.
+
+Want your agent in this table? See [`bench/ADDING_A_SUT.md`](../ADDING_A_SUT.md) for the SUT
+contract, fairness rules and PR checklist.
