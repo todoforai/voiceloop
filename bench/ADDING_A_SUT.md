@@ -9,7 +9,9 @@ Three working examples, in increasing integration depth — copy the one that ma
 | example | kind | shows |
 |---|---|---|
 | [`blackbox/fake-agent.js`](blackbox/fake-agent.js) | process SUT | pure audio contract, zero browser |
+| [`blackbox/sut-pipecat.py`](blackbox/sut-pipecat.py) | process SUT, real framework | Pipecat on the pulse devices, `SUT_READY` handshake |
 | [`blackbox/elevenlabs.html`](blackbox/elevenlabs.html) | browser SUT, closed box | minimal page wrapper around a cloud agent SDK |
+| [`blackbox/openai-realtime.html`](blackbox/openai-realtime.html) | browser SUT, speech-to-speech | the own-LLM caveat case done right |
 | [`blackbox/agent.html`](blackbox/agent.html) | browser SUT, instrumented | full milestone events for sub-metric splits |
 
 ## 1. The interface
@@ -50,8 +52,9 @@ const rec = (type, extra = {}) => window.__bench.push({ epoch: Date.now(), type,
 ```
 
 Event types the analyzer understands (see `metrics.js` header): `stt_partial` / `stt_final`
-(`{text}`), `turn_committed`, `llm_first_token`, `reply_done` (`{heardNw, totalNw}`), plus
-`vad`, `echo_drop`, `diag`. Emit whatever subset your agent can observe — `elevenlabs.html`
+(`{text}`), `turn_committed`, `llm_first_token`, `reply_done` (`{heardNw, totalNw}`), and
+`echo_drop`. (`vad` / `diag` are recorded but only kept as diagnostics for reading the raw
+run file.) Emit whatever subset your agent can observe — `elevenlabs.html`
 only gets transcript callbacks and that's still useful. All audio-truth metrics work with
 **zero** events; `run-n.js` pulls `window.__bench` after each run and merges it automatically.
 
@@ -66,19 +69,16 @@ PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk python your_agent.py
 (PyAudio/sounddevice: select the device named `pulse` — the env vars route it. Raw pacat works
 too, see `fake-agent.js`.)
 
-`run-n.js` reloads a browser page between runs; for a process SUT **restart the process between
-runs instead** — run `driver.js` directly N times:
+`run-n.js` reloads a browser page between runs; for a process SUT use **`run-proc.js`**, which
+spawns a **fresh process per run** and pools identically to `run-n.js` (so rows are comparable):
 
 ```sh
-for i in 1 2 3 4 5; do
-  PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk your-agent &  pid=$!
-  node bench/blackbox/driver.js smalltalk mylabel-r$i
-  kill $pid
-done
+PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk \
+  node bench/blackbox/run-proc.js smalltalk mylabel 5 -- python your_agent.py
 ```
 
-then pool the resulting `bb-*.json` reports (or adapt `run-n.js`'s pooling section — it's ~40
-lines).
+Contract: your process prints **`SUT_READY`** on stdout once the pipeline is live (see
+`sut-pipecat.py`); `run-proc.js` waits for it, runs the driver, SIGTERMs, repeats.
 
 ## 2. Fairness requirements
 
@@ -88,11 +88,14 @@ Results that don't follow these are not comparable and won't be merged as a RESU
   `/v1/chat/completions` on port 7777 with **fixed scripted responses, 300ms TTFT, 300 chars/s**.
   Point your agent's LLM base URL at it (`base_url: 'http://localhost:7777/v1'` works with any
   OpenAI client). This is what makes the numbers measure the *voice pipeline*, not the language
-  model. If your architecture genuinely cannot take an external LLM (speech-to-speech models
-  like GPT-4o realtime audio), you may run with the built-in brain, but your RESULTS.md caveat
-  must say so explicitly, e.g.: *"⟨SUT⟩ cannot use the bench mock LLM (speech-to-speech
-  architecture); its voice→voice numbers include real model inference time and are not directly
-  comparable to mock-LLM rows."*
+  model. If your architecture genuinely cannot take an external LLM (speech-to-speech models),
+  you may run with the built-in brain, but mark the row (`*`) and your RESULTS.md caveat must
+  say so explicitly, e.g.: *"⟨SUT⟩ does not use the shared mock LLM — it is speech-to-speech,
+  so its 'brain' is the model itself; every other row pays the mock's simulated 300ms TTFT +
+  300 chars/s streaming while ⟨SUT⟩ pays its internal model latency instead."* See the OpenAI
+  Realtime row in [`results/RESULTS.md`](results/RESULTS.md) for the precedent — including
+  pinning the model's answers to the scenario script via session instructions so transcripts
+  stay checkable.
 - **AEC off.** The virtual devices have no acoustic coupling (headset-equivalent), so there is
   no echo to cancel — but Chrome's AEC, given the TTS as far-end reference and nothing to find,
   suppresses the person's speech during playback and eats whole barge-ins. Force
@@ -145,10 +148,15 @@ Open a PR containing:
 
 ```sh
 bench/blackbox/audio-setup.sh up
-node bench/blackbox/gen-audio.js smalltalk           # once (ELEVENLABS_API_KEY, or espeak fallback)
+node bench/blackbox/gen-audio.js smalltalk           # no-op for committed scenarios (skips existing clips)
 node bench/server.js smalltalk &                     # mock LLM + SUT page host on :7777
-# start your SUT on bench_mic/bench_spk (browser or process, see §1)
-node bench/blackbox/run-n.js smalltalk your-label 5 9223   # → results/pooled-….md
+
+# browser SUT: launch Chrome on the devices (§1), then
+node bench/blackbox/run-n.js smalltalk your-label 5 9223         # → results/pooled-….md
+
+# process SUT: run-proc spawns a fresh process per run itself
+PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk \
+  node bench/blackbox/run-proc.js smalltalk your-label 5 -- python your_agent.py
 ```
 
 One benchmark at a time per machine — the audio devices are shared
