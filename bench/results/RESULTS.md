@@ -22,9 +22,9 @@ so the numbers measure the voice pipeline, not the language model.
 | **voiceloop** · deepgram + Piper (free, local) | **981–1101ms** | 1306 | 1452ms | 23 |
 | Pipecat 1.8.1 · deepgram + EL flash TTS | 1032ms | 3594 | 559ms | 9 |
 | ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1042ms | 8 |
-| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + Piper | _2414ms_ | _4771_ | _1406ms_ | _32_ |
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
+| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + Piper | _2414ms_ | _4771_ | _1406ms_ | _32_ |
 
 voice→voice = end of the person's speech → first audible agent audio (from the recording).
 barge-in stop = person starts interrupting → agent audio actually stops.
