@@ -60,6 +60,18 @@ first LLM tokens ───┤  first sentence boundary (~8+ chars)
 first audio ────────┘  next sentences pre-synthesized during playback → zero gaps
 ```
 
+**Measured, not claimed**: a black-box rig (audio in → audio out, zero integration — see
+[`bench/`](bench/)) scores voiceloop and competing agent stacks on the same scripted
+conversation and the same fixed mock LLM. Pooled 5-run medians:
+
+| system | voice→voice |
+|---|---|
+| **voiceloop** (deepgram + ElevenLabs flash TTS) | **984ms** |
+| **voiceloop** (deepgram + Piper, free local TTS) | **~1050ms** |
+| ElevenLabs ConvAI (their full agent stack) | 1538ms |
+
+Full tables, method and reproduction steps: [`bench/results/RESULTS.md`](bench/results/RESULTS.md).
+
 ## STT providers
 
 ```js
