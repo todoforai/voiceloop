@@ -439,6 +439,36 @@ test('SELF-ECHO: echo landing just AFTER playback ended is still dropped (grace 
     assert.ok(agent.history.length > hist, 'after the grace window the words count as the user');
   }));
 
+test('SELF-ECHO: a SHORT echo final ("Yes.") is still dropped — minHits scales with length', () =>
+  withSttAgent(async ({ agent, stt, finish }) => {
+    stt.onPartial('reply-to', 100);                         // echo tail latches (1/1 reply words)
+    assert.ok(agent._echoRef, 'short echo interim latched');
+    const hist = agent.history.length;
+    stt.onFinal('reply-to', 200);                           // 1-word final: minHits 3 would keep it as a user turn
+    await settle();
+    assert.equal(agent.history.length, hist, 'short echo final dropped, not answered');
+    await finish();
+  }));
+
+test('SELF-ECHO: previous reply still classifies echo after a new turn started (cross-turn scope)', () =>
+  withSttAgent(async ({ agent, tts, stt, finish }) => {
+    await finish();                                         // reply "reply-to make me a page" played out fully
+    assert.ok(agent._replyText, 'first reply left an audible reference');
+    // A new turn begins: _runTurn parks _replyText into _prevReplyText and clears it — but the OLD
+    // reply's speakers→mic echo tail is still in flight during this pre-audio window.
+    tts.gate = true;                                        // hold the new reply before its audio "plays"
+    agent.sendUserText('another request');
+    for (let i = 0; i < 10 && !agent._prevReplyText; i++) await settle();
+    assert.ok(agent._prevReplyText.includes('reply-to'), 'old audible text parked by the production turn path');
+    const hist = agent.history.length;
+    stt.onPartial(ECHO, 100);                               // old reply's echo arrives after the clear
+    assert.ok(agent._echoRef, 'echo of the PREVIOUS reply latched via _prevReplyText');
+    stt.onFinal(ECHO, 200);
+    await settle();
+    assert.equal(agent.history.length, hist, 'cross-turn echo final dropped');
+    await finish();
+  }));
+
 test('SELF-ECHO: a mixed final (echo latch but real user words) is KEPT as a user turn', () =>
   withSttAgent(async ({ agent, stt, finish }) => {
     stt.onPartial(ECHO, 100);                               // echo tail latches the turn

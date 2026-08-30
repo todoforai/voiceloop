@@ -268,12 +268,20 @@ export class VoiceAgent {
         //     and it must still be latched or its final becomes a user turn the agent then answers.
         //     Bounded so the user quoting the reply a while later can never be judged echo.
         const inEchoWindow = this.state === 'speaking' || Date.now() - this._replyDoneAt < ECHO_GRACE_MS;
-        if (text.trim() && inEchoWindow) this._echoRef = isSelfEcho(text, this._replyText) ? this._replyText : '';
+        // Echo scope: the CURRENT reply's audible prefix PLUS, within the grace window, the PREVIOUS
+        // reply's (see _prevReplyText). A new turn clears _replyText before its audio starts, but on
+        // speakers the OLD reply's echo tail is still in flight (acoustic delay + STT latency) — with
+        // only the cleared reference those words looked novel and barged in on the new reply,
+        // cascading self-interruptions. Word-set matching makes concatenating the two safe.
+        const cur = this._replyEcho || this._replyText;
+        const prevTail = Date.now() - this._replyDoneAt < ECHO_GRACE_MS ? this._prevReplyText : '';
+        const echoScope = prevTail && prevTail !== cur ? `${cur} ${prevTail}`.trim() : cur;
+        if (text.trim() && inEchoWindow) this._echoRef = isSelfEcho(text, echoScope) ? echoScope : '';
         // Barge-in on NOVEL characters only (not raw interim length): words fuzzily attributable to
         // the audible reply count as echo (misheard echo words land NEAR the reply's words — see
         // fuzzyHas) and contribute nothing, so echo that slipped past the ratio latch above still
         // can't cut the reply; real interruptions are novel words and fire exactly as before.
-        if (this.state === 'speaking' && !this._echoRef && novelChars(interim, this._replyText) >= this.bargeInMinChars) this._onBargeIn();
+        if (this.state === 'speaking' && !this._echoRef && novelChars(interim, echoScope) >= this.bargeInMinChars) this._onBargeIn();
         // SPECULATIVE PREFETCH: the turn's end-of-turn debounce is dead time — the LLM request only
         // fires after it elapses, so its TTFT lands ON TOP. Instead, once the interim has been
         // stable for PREFETCH_MS (no new words), start generating NOW with the probable final text;
@@ -296,10 +304,13 @@ export class VoiceAgent {
         // wedge waiting on a non-empty onFinal), but it's not a user turn — don't emit/reply.
         if (!text.trim()) { this._dropPrefetch(); return; }   // empty close (noise/echo force-end) — the speculation has no turn to serve
         // A turn latched as self-echo (see onPartial): drop it ONLY if the WHOLE final is a strong
-        // match (all words, ≥3 hits) against the reply it echoed — a mixed turn (real user words +
-        // echo tail) or a short quote of the reply is kept as a user turn. Surfaced as an 'echo'
-        // event for diagnostics.
-        if (echoRef && isSelfEcho(text, echoRef, { window: Infinity, minHits: 3 })) {
+        // match against the reply it echoed — a mixed turn (real user words + echo tail) is kept as
+        // a user turn. minHits scales with the final's own length (capped at 3): fast-endpointing
+        // STTs close echo as SHORT finals ("Yes.", "It is.") that could never reach 3 hits — kept as
+        // user turns they'd supersede and cut the playing reply (measured self-interruption cascade
+        // on the echo bench). Cost: a ≤2-word latched full-match quote of the reply is swallowed —
+        // under acoustic coupling that's overwhelmingly echo. Surfaced as 'echo' for diagnostics.
+        if (echoRef && isSelfEcho(text, echoRef, { window: Infinity, minHits: Math.min(3, wordsOf(text).length) })) {
           this._dropPrefetch();   // the speculation was fed by our own echo — never answer it
           this.onEvent({ type: 'echo', text }); return;
         }
@@ -337,7 +348,9 @@ export class VoiceAgent {
     this._muted = false;           // mic disabled → browser feeds silence to VAD+STT (nothing reaches the agent)
     this._ttsMuted = false;        // AI voice OUTPUT off → skip speaking, still stream the reply as text
     this._held = false;            // HOLD: keep transcribing into history, but don't run the LLM until released
-    this._replyText = '';          // AUDIBLE prefix of the reply being (or last) voiced — the self-echo reference (see onPartial)
+    this._replyText = '';          // AUDIBLE prefix of the reply being (or last) voiced — drives the host's spoken cursor
+    this._replyEcho = '';          // echo REFERENCE: prefix + the whole clip now playing (see _playBuf's scope) — the cursor lags real audio, so echo is judged against this upper bound, not _replyText
+    this._prevReplyText = '';      // audible text of the PREVIOUS reply — echo reference across a turn boundary (its echo tail outlives _replyText's clear)
     this._echoRef = '';            // echo latch: the _replyText the current STT turn was judged an echo OF ('' = not echo)
     this._replyDoneAt = 0;         // when playback last ended — bounds the post-playout echo grace window
     this._holdBarrier = null;      // resolves once the turn aborted on hold-entry has finalized; held STT orders after it
@@ -483,7 +496,7 @@ export class VoiceAgent {
 
   stop() {
     this._closed = true; this._abort?.abort(); this.tts.stop?.(); this._dropPrefetch();
-    clearTimeout(this._maxPause); this._turnText = ''; this._turnClosing = false; this._echoRef = '';
+    clearTimeout(this._maxPause); this._turnText = ''; this._turnClosing = false; this._echoRef = ''; this._prevReplyText = ''; this._replyEcho = '';
     // Clear the echo grace window: a resume within ECHO_GRACE_MS of the last reply must not judge
     // the user's fresh opening words against a reply that stopped playing before the pause.
     this._replyDoneAt = 0;
@@ -538,15 +551,17 @@ export class VoiceAgent {
     return (this._turn = (async () => {
       await prev?.catch(() => {});
       if (this._closed) return;
-      this._replyText = '';                 // stale previous reply must not classify pre-audio speech as echo
+      if (this._replyText) this._prevReplyText = this._replyEcho || this._replyText;   // keep as the cross-turn echo reference (grace-bounded)
+      this._replyText = ''; this._replyEcho = '';   // stale previous reply must not classify pre-audio speech as echo
       this._set('speaking');
       const signal = (this._abort = new AbortController()).signal;
       // TTS reports normalized spoken-so-far; map back to a raw prefix of `text` by non-whitespace count
       // so the host's cursor lands exactly (text keeps the model's original spacing). The audible
       // prefix doubles as the self-echo reference (see onPartial) — a replay leaks into the mic too.
-      this.tts.setOnProgress?.((spoken) => {
+      this.tts.setOnProgress?.((spoken, scope) => {
         if (signal.aborted) return;
         this._replyText = sliceNw(text, nw(spoken));
+        this._replyEcho = scope ? sliceNw(text, nw(scope)) : this._replyText;   // clip-bounded echo reference (cursor lags real audio)
         onProgress(this._replyText, false);
       });
       try {
@@ -818,9 +833,12 @@ export class VoiceAgent {
   // next user turn can await it. Never throws (errors surface via onEvent) so the await is safe.
   async _speakTurn(signal, prefetched = null) {
     // Fresh turn → drop the previous reply's audible text so user speech heard before THIS turn's
-    // first audio plays can't be misjudged as echo of the OLD reply. The TTS progress hook below
-    // repopulates it with the audible prefix as playback advances.
-    this._replyText = '';
+    // first audio plays can't be misjudged as echo of the OLD reply — but PARK it in _prevReplyText:
+    // its speakers→mic echo tail is still in flight for a moment (acoustic delay + STT latency), and
+    // the grace-bounded scope in onPartial must still recognize it. The TTS progress hook below
+    // repopulates _replyText with the audible prefix as playback advances.
+    if (this._replyText) this._prevReplyText = this._replyEcho || this._replyText;
+    this._replyText = ''; this._replyEcho = '';
     // Tap the LLM stream once: yield speech text to TTS, set aside the tool calls for after we
     // finish speaking. First delta flips us to 'speaking'; accumulate the full answer for the
     // heard-vs-unheard report. `this.llm(...)` is a lazy generator — its fetch fires only when
@@ -876,11 +894,12 @@ export class VoiceAgent {
       return answer.slice(0, i);
     };
     this._cursorLive = false;
-    this.tts.setOnProgress?.((spokenSoFar) => {
+    this.tts.setOnProgress?.((spokenSoFar, scope) => {
       if (signal.aborted) return;
       this._cursorLive = true;          // hook now drives the draft → LLM stream stops emitting full text
       const heard = rawPrefix(spokenSoFar);
-      this._replyText = heard;          // AUDIBLE prefix — the self-echo reference (echo can only be of what played)
+      this._replyText = heard;          // AUDIBLE prefix — drives the spoken cursor
+      this._replyEcho = scope ? rawPrefix(scope) : heard;   // clip-bounded echo reference (cursor lags real audio)
       this.onEvent({ type: 'assistant', text: heard, full: answer, final: false });
     });
     try {
@@ -1500,8 +1519,15 @@ export class StreamingTTS {
       // Proportional position in NON-WHITESPACE space (the same domain seek() uses) → slice `text` to that
       // many non-whitespace chars, so a seek to nw-index N lands the cursor exactly on N.
       const heard = () => sliceNw(text, Math.round(nw(text) * clip.currentTime / (dur || 1)));
+      // 2nd arg = the AUDIBLE-SCOPE bound: prefix + the WHOLE clip now playing. The proportional
+      // cursor above LAGS the real audio (linear time→text estimate, rAF granularity, mid-word
+      // slicing), so an STT echo partial can contain words just AHEAD of it — judged against the
+      // cursor alone those words look novel and un-latch the echo filter (measured self-interruption
+      // on the echo bench). Echo can never be ahead of the clip being played, so the clip's full text
+      // is a safe upper bound for the echo reference; the UI cursor keeps the precise estimate.
+      const scope = prefix + text;
       let settled = false, frame = 0;
-      const tick = () => { if (settled) return; this._onProgress?.(prefix + heard()); frame = raf(tick); };
+      const tick = () => { if (settled) return; this._onProgress?.(prefix + heard(), scope); frame = raf(tick); };
       const cleanup = () => { if (frame) caf(frame); signal?.removeEventListener('abort', onAbort); clip.onpause = clip.onended = null; };
       const finish = (reason) => { if (settled) return; settled = true; cleanup(); resolve({ reason, heard: prefix + heard() }); };
       const onAbort = () => { clip.pause(); finish('abort'); };           // barge-in wins over a pending seek
@@ -1514,7 +1540,7 @@ export class StreamingTTS {
       if (this._onProgress) frame = raf(tick);
       // Emit the spoken-so-far prefix the moment this clip starts, so the host's cursor takes over at
       // playback start — no window where the whole answer shows solid.
-      this._onProgress?.(prefix + sliceNw(text, startNw));
+      this._onProgress?.(prefix + sliceNw(text, startNw), scope);
     });
   }
 
