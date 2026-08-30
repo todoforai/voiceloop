@@ -1,13 +1,30 @@
-# voiceloop bench
+# voice-agent-bench
 
-Measures the REALTIME quality of a voice agent implementation — not the models inside it.
+A black-box latency benchmark for **any** voice agent: a scripted "person" (pre-generated
+speech, byte-identical every run) talks into a virtual mic, the agent's speaker output is
+recorded, and every score is derived from **audio alone** — voice→voice latency, barge-in stop
+time, stalls, false barge-ins, echo leakage. If it makes sound, it can be benchmarked: zero
+integration required.
+
+It measures the REALTIME quality of a voice agent *implementation* — not the models inside it.
 STT/TTS models have their own rigorous benchmarks (LibriSpeech, TTS Arena…); the WER/fidelity
-columns here only check that the *implementation* feeds the models properly (no truncated turns,
-no echo in transcripts, no clipped replies). Latency numbers are **median + p95** (ms), never mean-only.
+columns here only check that the implementation feeds the models properly (no truncated turns,
+no echo in transcripts, no clipped replies). Latency numbers are **median + p95** (ms), never
+mean-only, and single runs are never reported: `blackbox/run-n.js` pools N conversations
+(±300ms network/WASM jitter has flipped single-run conclusions).
+
+Fairness rules: every system under test gets the **same fixed mock LLM** (scripted responses,
+fixed TTFT and token rate — the numbers measure the voice pipeline, not the language model),
+the same audio devices, and the same scenario script. Results so far: [`results/RESULTS.md`](results/RESULTS.md).
+
+Developed alongside [voiceloop](https://github.com/todoforai/voiceloop) (it lives at `bench/`
+there and is split to this repo), but the rig is agent-agnostic — SUT pages exist for voiceloop
+and ElevenLabs ConvAI, and adding one for Pipecat/Vapi/LiveKit/etc. is a page or script that
+talks to the virtual devices. PRs with new SUTs or scenarios welcome.
 
 Two modes, one scorecard (`metrics.js`):
 
-- **Instrumented** (voiceloop only): `node bench/server.js` + `bench/run.html` — internal splits (EOT / TTFT / TTS-first-audio).
+- **Instrumented** (agents that emit milestone events): internal splits (EOT / TTFT / TTS-first-audio) merged into the audio timeline via epoch clock.
 - **Black-box** (any agent): audio in, audio out — zero integration. See `blackbox/`.
 
 Black-box quickstart:
