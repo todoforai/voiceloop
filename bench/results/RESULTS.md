@@ -50,6 +50,11 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
 
 ### Notes per configuration
 
+- **Post-echo-fix regression check** — after the echo-filter fixes in src/ (32a2e34, c5a3bca)
+  the clean smalltalk run was repeated on HEAD: 925ms pooled median (p95 1227, n=30, per-run
+  medians 925–1033), 0 echo drops / 0 self-interruptions on the silent rig. The fixes cost
+  nothing on the clean path; the table keeps the original 984ms as the conservative headline
+  (both are within run-to-run jitter).
 - **deepgram + EL flash** — best overall: human voice, lowest stall count of the fast configs,
   fastest barge-in of ours (mp3 clips need no un-cancellable local inference to drain).
 - **deepgram + Piper** — same latency, zero TTS cost, fully offline voice. Piper's WASM synth
