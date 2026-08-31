@@ -589,10 +589,12 @@ export function makeDeepgramSTT(opts) {
 //      result window). Blindly appending would double words ("hello there" + "there how" → "there there").
 //      Every final is de-overlapped against the turn-so-far before it's appended.
 export function makeWebSpeechSTT(opts) {
-  const { sttLang = 'en', micDeviceId = '', onPartial, onFinal, onFatal, onClose, isClosed } = opts;
+  const { sttLang = 'en', micDeviceId = '', onPartial, onFinal, onError, onFatal, onClose, isClosed } = opts;
   const Rec = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
   const EOT_MS = TUNING.WEBSPEECH_EOT_MS ?? 900;
   const TAIL_MAX_DEFERS = TUNING.WEBSPEECH_TAIL_MAX_DEFERS ?? 3;
+  const MAX_ERROR_RESTARTS = TUNING.WEBSPEECH_MAX_ERROR_RESTARTS ?? 5;
+  const ERROR_BACKOFF_MS = TUNING.WEBSPEECH_ERROR_BACKOFF_MS ?? 300;
   let rec = null;          // the live SpeechRecognition instance (null between restarts / when stopped)
   let sttStart = 0;        // performance.now() at the current turn's first activity (for onPartial/onFinal ms)
   let turn = '';           // committed (isFinal) text of the CURRENT turn, merged across recognizer restarts
@@ -603,6 +605,9 @@ export function makeWebSpeechSTT(opts) {
   let tailDefers = 0;      // consecutive closes deferred waiting on an un-promoted tail (bounded, reset on new text)
   let want = false;        // intent to listen — onend auto-restarts while true
   let muted = false;       // mic off — stop the recognizer and don't restart
+  let lastError = '';      // error of the recognizer currently ending (drives the backoff/give-up path)
+  let errorRestarts = 0;   // consecutive failed launches with no recognized text between them
+  let restartTimer = null; // pending backed-off relaunch
   // AEC'D CAPTURE (SpeechRecognition.start(audioTrack), spec'd + shipped in recent Chromium): by
   // default the engine opens its OWN mic, bypassing every protection the agent's pipeline has — the
   // browser AEC referenced against the WebRTC TTS loopback (voice-agent initAecLoopback) and noise
@@ -727,6 +732,7 @@ export function makeWebSpeechSTT(opts) {
       }
       final = final.trim(); interim = interim.trim();
       if (!turn && !interimTail && (final || interim)) sttStart = performance.now();   // first activity of a fresh turn
+      if (final || interim) errorRestarts = 0;   // the engine is demonstrably working — forget past failures
       commitFinal(final);   // de-overlaps the seam, then locks the newly-final words into the turn
       // Keep the live tail as its own state so a recognizer restart (which drops interim) can replay it
       // instead of blanking the draft. A frame that only finalized words (interim === '') clears it —
@@ -739,8 +745,11 @@ export function makeWebSpeechSTT(opts) {
     };
     r.onerror = (event) => {
       if (r !== rec) return;
-      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') { want = false; onFatal?.(`Speech recognition: ${event.error}`); }
-      // 'no-speech' / 'aborted' / 'network' are recoverable — onend restarts; don't surface.
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') { want = false; onFatal?.(`Speech recognition: ${event.error}`); return; }
+      // 'no-speech' / 'aborted' are the engine's normal idle churn — onend just relaunches, silently.
+      // Anything else ('network', 'audio-capture', …) is a FAILED launch: remembered here so onend
+      // backs off instead of hot-looping, and gives up out loud once the engine looks dead.
+      if (event.error !== 'no-speech' && event.error !== 'aborted') lastError = event.error;
     };
     r.onend = () => {
       if (r !== rec) return;   // superseded instance's late onend — ignore
@@ -756,8 +765,19 @@ export function makeWebSpeechSTT(opts) {
       // untouched — if this really was end-of-turn, that timer fires on its own EOT_MS after the last
       // word (recognizer alive or not); if the user is still talking, the new recognizer's text
       // re-arms it. No flush decision belongs here — that's what makes the boundary restart-immune.
-      if (want && !muted && !isClosed()) start();
-      else onClose?.();
+      const err = lastError; lastError = '';
+      if (!(want && !muted && !isClosed())) { onClose?.(); return; }
+      if (!err) { errorRestarts = 0; start(); return; }
+      // A launch that only produced an error and no text: the engine may be permanently unable to run
+      // here (speech service unreachable, unreadable capture device). Retry with backoff, then stop —
+      // an endless silent restart loop is indistinguishable from "listening" and never recovers.
+      if (++errorRestarts > MAX_ERROR_RESTARTS) {
+        want = false;
+        onFatal?.(`Speech recognition: ${err} (${MAX_ERROR_RESTARTS} restarts failed — the browser's speech service is unreachable)`);
+        return;
+      }
+      onError?.(`Speech recognition: ${err} — retrying (${errorRestarts}/${MAX_ERROR_RESTARTS})`);
+      restartTimer = setTimeout(() => { restartTimer = null; if (want && !muted && !isClosed()) start(); }, Math.min(ERROR_BACKOFF_MS * 2 ** (errorRestarts - 1), 4000));
     };
     rec = r;
     let ok = false;
@@ -771,7 +791,7 @@ export function makeWebSpeechSTT(opts) {
 
   // Stop the current recognizer and drop all in-progress state (mute/close). The stopped recognizer's
   // late onend is stale (rec nulled → r !== rec), so it can't auto-restart.
-  const teardown = () => { clearTimeout(eotTimer); eotTimer = null; clearTimeout(justClosedTimer); justClosedTimer = null; justClosed = ''; turn = ''; interimTail = ''; tailDefers = 0; if (rec) { const r = rec; rec = null; try { r.stop(); } catch { /* already stopped */ } } };
+  const teardown = () => { clearTimeout(eotTimer); eotTimer = null; clearTimeout(justClosedTimer); justClosedTimer = null; clearTimeout(restartTimer); restartTimer = null; justClosed = ''; turn = ''; interimTail = ''; tailDefers = 0; lastError = ''; if (rec) { const r = rec; rec = null; try { r.stop(); } catch { /* already stopped */ } } };
 
   return {
     selfCapture: true,   // owns its mic → the agent builds no capture pipeline
@@ -780,7 +800,7 @@ export function makeWebSpeechSTT(opts) {
       if (!Rec) { onFatal?.('Speech recognition not supported in this browser'); return; }
       // start() first, synchronously — Safari requires SpeechRecognition.start inside the click
       // gesture. The AEC'd track lands async right after and upgrades the recognizer at the seam.
-      want = true; start();
+      want = true; errorRestarts = 0; start();
       ensureTrack();
     },
     // Mute: Web Speech captures its OWN mic (independent of the agent), so mute must actually stop it.
@@ -789,7 +809,7 @@ export function makeWebSpeechSTT(opts) {
     setEnabled(on) {
       muted = !on;
       if (muted) { teardown(); dropMic(); onPartial('', 0, ''); }   // drop the draft AND the mic (privacy light off)
-      else if (want && !rec) { start(); ensureTrack(); }
+      else if (want && !rec) { errorRestarts = 0; start(); ensureTrack(); }
     },
     close() { want = false; teardown(); dropMic(); },
   };

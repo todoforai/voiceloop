@@ -579,11 +579,12 @@ function withWebSpeech(fn) {
 const EOT = TUNING.WEBSPEECH_EOT_MS;
 
 function makeWS() {
-  const events = { partials: [], finals: [], fatals: [], closes: 0 };
+  const events = { partials: [], finals: [], errors: [], fatals: [], closes: 0 };
   const stt = makeWebSpeechSTT({
     sttLang: 'en',
     onPartial: (text, ms, committed = '') => events.partials.push({ text, committed }),
     onFinal: (text) => events.finals.push(text),
+    onError: (m) => events.errors.push(m),
     onFatal: (m) => events.fatals.push(m), onClose: () => { events.closes++; }, isClosed: () => false,
   });
   return { stt, events, rec: () => FakeRec.last };
@@ -851,6 +852,53 @@ test('webspeech: word-boundary dedup keeps a genuine shorter suffix (no over-eag
   rec().emit([{ transcript: 'bye now', isFinal: true }]);
   mock.timers.tick(EOT);
   assert.deepEqual(events.finals, ['goodbye bye now'], 'shared letters ≠ seam — the real words are kept');
+}));
+
+// A recognizer that can never run (browser speech service unreachable, unreadable capture device)
+// errors and ends instantly, forever. Restarting it in a tight loop looks exactly like "listening"
+// while being deaf — so failures back off and eventually give up out loud.
+const failLaunch = (r, error = 'network') => { r.onerror?.({ error }); r.onend?.(); };
+const BACKOFF_MAX = TUNING.WEBSPEECH_ERROR_BACKOFF_MS * 2 ** TUNING.WEBSPEECH_MAX_ERROR_RESTARTS;
+
+test('webspeech: a permanently failing engine backs off and finally fatals (no silent hot loop)', () => withWebSpeech(async () => {
+  const { stt, events, rec } = makeWS();
+  stt.open();
+  for (let i = 0; i < TUNING.WEBSPEECH_MAX_ERROR_RESTARTS; i++) {
+    const r = rec();
+    failLaunch(r);
+    assert.equal(rec(), r, 'the relaunch is deferred, not immediate — no spin');
+    mock.timers.tick(BACKOFF_MAX);
+    assert.ok(rec() !== r && rec().started, 'retried after the backoff');
+  }
+  failLaunch(rec());
+  assert.equal(events.fatals.length, 1, 'gave up out loud instead of restarting forever');
+  assert.match(events.fatals[0], /network/, 'the fatal names the underlying engine error');
+  mock.timers.tick(BACKOFF_MAX * 4);
+  assert.equal(rec().started, false, 'and stays stopped');
+  assert.equal(events.errors.length, TUNING.WEBSPEECH_MAX_ERROR_RESTARTS, 'each retry was surfaced as recoverable');
+}));
+
+test('webspeech: recognized text clears the failure budget (a flaky engine is not a dead one)', () => withWebSpeech(async () => {
+  const { stt, events, rec } = makeWS();
+  stt.open();
+  for (let i = 0; i < TUNING.WEBSPEECH_MAX_ERROR_RESTARTS * 3; i++) {
+    failLaunch(rec());
+    mock.timers.tick(BACKOFF_MAX);
+    rec().emit([{ transcript: 'still here', isFinal: false }]);   // the engine DID work this time
+  }
+  assert.deepEqual(events.fatals, [], 'intermittent failures never exhaust the budget');
+}));
+
+test("webspeech: 'no-speech'/'aborted' are normal idle churn — restart immediately, never fatal", () => withWebSpeech(async () => {
+  const { stt, events, rec } = makeWS();
+  stt.open();
+  for (let i = 0; i < TUNING.WEBSPEECH_MAX_ERROR_RESTARTS * 3; i++) {
+    const r = rec();
+    failLaunch(r, i % 2 ? 'aborted' : 'no-speech');
+    assert.ok(rec() !== r && rec().started, 'relaunched at once — silence must not cost latency');
+  }
+  assert.deepEqual(events.fatals, [], 'silence is not a broken engine');
+  assert.deepEqual(events.errors, [], 'and is never surfaced to the user');
 }));
 
 test('webspeech: unsupported browser → open() reports fatal', () => withWebSpeech(async () => {

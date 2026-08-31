@@ -71,6 +71,17 @@ export const TUNING = {
   // Raise if slow engines still split turns; lower to bound the wait harder.
   WEBSPEECH_TAIL_MAX_DEFERS: 3,
 
+  // Web Speech errors that aren't auth ('network', 'audio-capture', …) are retried by relaunching the
+  // recognizer — but if the engine is genuinely broken (browser's speech service unreachable, a fake
+  // audio device it can't read) EVERY relaunch fails instantly and the old code hot-looped forever,
+  // silently, looking like "listening but deaf". So consecutive failures with no recognized text in
+  // between are counted: each one waits longer (backoff below), and this many gives up with onFatal
+  // instead of spinning. Reset by any result. 'no-speech'/'aborted' are normal and don't count.
+  WEBSPEECH_MAX_ERROR_RESTARTS: 5,
+  // First retry delay after a failing recognizer; doubles per consecutive failure (capped at 4s), so
+  // a dead speech service costs a handful of tries over a few seconds instead of a spin loop.
+  WEBSPEECH_ERROR_BACKOFF_MS: 300,
+
   // Speculative LLM prefetch: once the live interim has been STABLE this long (no new words), the
   // agent starts generating a reply for the probable final text — overlapping the LLM's first-token
   // latency with the rest of the end-of-turn debounce. Exact-match turns adopt the running stream
