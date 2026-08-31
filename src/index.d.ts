@@ -13,6 +13,9 @@ export type VoiceAgentEvent =
   | { type: 'echo'; text: string }                                        // dropped self-echo (the agent's own TTS leaked into the mic) — diagnostics only
   | { type: 'diag'; diag: 'aec-fallback'; message: string }               // once/session: AEC loopback failed → TTS plays un-cancelled (self-echo only text-filtered)
   | { type: 'diag'; diag: 'presynth'; text: string }                      // a reply's first clip was synthesized speculatively (latency diagnostics)
+  // Did that speculation pay off? hit = the real reply opened with the presynthesized text (clip
+  // reused, latency saved); miss = it didn't (clip discarded). `pre` is what we had guessed.
+  | { type: 'diag'; diag: 'presynth-hit' | 'presynth-miss'; text: string; pre: string }
   | { type: 'error'; error: string };
 
 export interface VoiceTool {
@@ -34,21 +37,31 @@ export type LLMChunk =
   | { text: string }
   | { tool: string; id?: string; args: Record<string, unknown>; result?: unknown; error?: string; running?: true };
 // Pluggable LLM: lazy async generator over the chat history (fetch fires on first pull).
-// The default (agent-llm.js, vendored Pi loop) accepts an optional 4th arg: `toolGate` is awaited
-// before ANY tool executes — speculative prefetch passes one that resolves on turn commit, so a
-// speculation streams text early but can never fire a side effect from uncommitted speech.
-// Custom LLMs are a low-level seam (tests, embedding hosts): their bare tool chunks are executed
-// by the agent, but the results are NOT fed back into that LLM mid-turn — such calls are terminal
-// for the turn. They may ignore toolGate.
-export type LLM = (
-  history: Array<{ role: string; content: string }>,
-  system: string,
-  signal: AbortSignal,
-  options?: { toolGate?: Promise<unknown> },
-) => AsyncIterable<LLMChunk>;
+// The default (makeOpenAILLM) yields bare tool chunks that the AGENT executes; the results are not
+// fed back into it mid-turn, so such calls are terminal for the turn. That is the low-level seam.
+// An agent LOOP that runs tools inside its own generator declares the two flags below.
+export interface LLM {
+  (
+    history: Array<{ role: string; content: string }>,
+    system: string,
+    signal: AbortSignal,
+    options?: { toolGate?: Promise<unknown> },
+  ): AsyncIterable<LLMChunk>;
+  /** This generator ran the tool itself: chunks carry `result`/`error` and the agent REPORTS them
+   *  instead of executing again. Without it, an outcome-bearing chunk is re-run. */
+  executesTools?: boolean;
+  /** This generator awaits `options.toolGate` before ANY tool executes. Required to keep
+   *  speculative prefetch on: prefetch starts from an uncommitted interim, and the gate is what
+   *  stops a speculation from firing a real side effect. `executesTools` without this silently
+   *  disables prefetch (see voice-agent.js:793). */
+  acceptsToolGate?: boolean;
+}
 
 // Pluggable TTS contract. `speak` resolves with the text actually HEARD (full on completion,
 // a prefix on barge-in). The optional members back the voice picker / switching.
+/** (spokenSoFar, scope) — see VoiceTTS.setOnProgress. */
+export type TtsProgress = (spokenText: string, scope: string) => void;
+
 export interface VoiceTTS {
   speak(input: AsyncIterable<string> | string, signal?: AbortSignal, fromNw?: number): Promise<string>;
   stop?(): void;
@@ -58,8 +71,10 @@ export interface VoiceTTS {
   setVoice?(voiceId: string): void;
   setSpeed?(speed: number): void;
   /** Register a callback fired while a clip plays with the chars spoken SO FAR across the whole
-   *  reply — drives the host's live spoken cursor. Pass null to clear. */
-  setOnProgress?(fn: ((spokenText: string) => void) | null): void;
+   *  reply — drives the host's live spoken cursor. Pass null to clear.
+   *  `scope` is that prefix PLUS the whole clip now playing: the cursor lags real audio, so echo
+   *  suppression judges against this upper bound rather than the spoken text. */
+  setOnProgress?(fn: TtsProgress | null): void;
 }
 
 export interface VoiceAgentOptions {
@@ -70,7 +85,8 @@ export interface VoiceAgentOptions {
   /** LLM model id sent to the backend `/llm` route; empty → the backend's VOICE_MODEL default. */
   model?: string;
   llm?: LLM;
-  /** Test seam for the agent-loop LLM transport; defaults to global fetch. */
+  /** Transport seam for the built-in LLM adapter; defaults to global fetch. For tests and hosts
+   *  that must wrap every request (auth refresh, tracing). Unused when you pass your own `llm`. */
   fetchFn?: typeof fetch;
   apiKey?: string;
   /** Full endpoint URLs, not a base: voiceloop composes no routes, so a host can point the LLM and
@@ -99,8 +115,15 @@ export interface VoiceAgentOptions {
   /** Mint a short-TTL STT token yourself, for auth that doesn't fit one POST route. Called with the
    *  provider actually RUNNING (post-downgrade), never the requested one. Wins over sttTokenUrl. */
   getSttToken?: (provider: SttProvider) => Promise<SttToken>;
+  /** POST route that receives metered STT seconds: `{ seconds, provider, ... }`, batched and
+   *  fire-and-forget (failures are swallowed — billing telemetry never breaks the pipeline).
+   *  Omit it and nothing is reported. Cloud providers only; the browser's own STT is free. */
   sttUsageUrl?: string;
+  /** Override the provider's realtime WS endpoint (self-hosted/regional gateways). Default: the
+   *  provider's public URL. */
   sttUrl?: string;
+  /** Provider STT model id (e.g. Deepgram's flux variants); empty → the provider's default.
+   *  Dropped when the provider downgrades, since a model id is meaningless across providers. */
   sttModel?: string;
   /** Deepgram Flux end-of-turn confidence (0.5–0.9) — its model closes the turn itself once its
    *  confidence the user is done exceeds this threshold. Lower = snappier turn ends, higher = more
@@ -109,8 +132,13 @@ export interface VoiceAgentOptions {
   /** Every tool the model may call. voiceloop ships NO built-in tools — a voice library has no
    *  business knowing what a "todo" is — so product tools (and their `run`) are supplied here. */
   tools?: Record<string, VoiceTool>;
+  /** Domain words to bias cloud STT towards ("Kubernetes", product names) — the fix for jargon
+   *  transcribed phonetically. Silently trimmed to 50 terms of ≤20 chars. Cloud providers only. */
   keyterms?: string[];
+  /** Audio chunks retained BEFORE the VAD fires, prepended to the utterance so the first syllable
+   *  isn't clipped (VAD confirms speech a beat after it starts). Default TUNING.PREROLL_CHUNKS. */
   preroll?: number;
+  /** Passed through to Silero VAD (thresholds, frame sizes) — see tuning.js for the defaults. */
   vadOptions?: Record<string, unknown>;
   /** Semantic end-of-turn hook run when VAD hears end-of-speech: return false to KEEP listening (the
    *  user only paused mid-thought), true (default, when omitted) to close the turn. Lets you swap the
@@ -279,14 +307,18 @@ export function resolveSttProvider(id: string): SttProvider;
 // ── TTS ──────────────────────────────────────────────────────────────────────────────────────
 /** Base class for streaming TTS engines: sentence-splits the incoming token stream, synthesizes
  *  the next clip while the current one plays, and reports the spoken cursor via setOnProgress.
- *  Subclass and implement `_synth(text)` to add an engine. */
+ *  Subclass and implement `_synth` to add an engine. */
 export class StreamingTTS implements VoiceTTS {
   constructor(voiceId?: string, speed?: number);
+  /** THE subclass contract: synthesize one sentence → audio Blob (null when aborted/empty).
+   *  Honour `signal` — a barge-in aborts mid-clip and the base class won't wait for you. */
+  protected _synth(text: string, signal?: AbortSignal): Promise<Blob | null>;
   speak(input: AsyncIterable<string> | string, signal?: AbortSignal, fromNw?: number): Promise<string>;
   stop(): void;
-  setOnProgress(fn: (spoken: string, scope: string) => void): void;
-  /** Jump playback to a word index within the current reply. Returns false when the seek can't be
-   *  honoured (nothing playing, or past the text streamed so far) — check it before moving a cursor. */
+  setOnProgress(fn: TtsProgress | null): void;
+  /** Jump playback to a position in the current reply (non-whitespace char count, as everywhere
+   *  else). Returns false when the seek can't be honoured (nothing playing, or past the text
+   *  streamed so far) — check it before moving a cursor. */
   seek(nwIndex: number): boolean;
 }
 /** Human-grade cloud voices. Pass `ttsUrl` (your backend proxy, key stays server-side); `apiKey`

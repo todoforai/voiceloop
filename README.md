@@ -147,6 +147,7 @@ The default adapter speaks OpenAI's streaming wire format (OpenAI, Groq, Cerebra
 
 ```js
 const agent = new VoiceAgent({
+  // TS: annotate as `LLM` (exported) and every parameter is inferred.
   llm: async function* (history, system, signal, { toolGate } = {}) {
     // history: [{ role: 'user'|'assistant', content }], system: composed persona+context
     // toolGate: only for adapters that run tools themselves — see below; ignore it otherwise
@@ -214,6 +215,26 @@ agent.replay(text, fromNw?, onProgress?)   // re-voice a past reply; onProgress(
 agent.dumpAudio()              // last 30s of mic audio as WAV + stall report (debugging)
 ```
 
+### Constructor options
+
+Full types (with per-option notes) in [`src/index.d.ts`](src/index.d.ts).
+
+| | |
+|---|---|
+| `persona`, `sysmsg` | identity (static) and live context (`setSysmsg()` mid-session) |
+| `llmUrl`, `model`, `apiKey`, `maxTokens` | built-in OpenAI-compatible adapter |
+| `llm` | your own adapter — replaces all of the above |
+| `tools` | what the model may call ([Tools](#tools)) |
+| `tts`, `speed` | TTS engine (default Piper) and Piper's speaking rate |
+| `sttProvider`, `sttLang`, `sttModel`, `sttUrl` | which recognizer, which language |
+| `sttTokenUrl` / `getSttToken`, `sttUsageUrl` | token minting ([STT providers](#stt-providers)); usage metering |
+| `keyterms` | domain words to bias STT towards (max 50, ≤20 chars) |
+| `micDeviceId` | input device; also `start(deviceId)` |
+| `turnDetector`, `maxPauseMs`, `sttEotThreshold` | when a user's turn is over |
+| `bargeInMinChars`, `vadOptions`, `preroll` | interruption sensitivity and mic gating |
+| `fetchFn` | transport seam for the built-in adapter (tests, request wrapping) |
+| `onEvent` | every event below |
+
 Events via `onEvent(e)`: `state`, `stt`, `assistant`, `tool`, `vad`, `echo`, `error`, `diag`.
 A `tool` event carries `{ name, id, args }` plus either `result` (settled) or `running: true` (an [adapter-announced](#adapters-that-run-tools-themselves) call still executing) — render the pair as one chip keyed by `id`.
 
@@ -247,7 +268,7 @@ Custom engines subclass `StreamingTTS` and implement one method:
 
 ```js
 class MyTTS extends StreamingTTS {
-  async _synth(text) { return wavBlob; }   // sentence in, audio Blob out
+  async _synth(text, signal) { return wavBlob; }   // sentence in, audio Blob out (null if aborted)
 }
 ```
 
@@ -256,7 +277,7 @@ Sentence chunking, the playback tape, tap-to-seek, barge-in and progress reporti
 ## Testing
 
 ```
-npm test        # 101 tests, no browser needed
+npm test        # no browser needed
 ```
 
 The suite locks in turn serialization, hold/release semantics, tool dedup, self-echo classification, prefetch adoption rules, tape seeking, and each STT provider's turn-boundary state machine.
