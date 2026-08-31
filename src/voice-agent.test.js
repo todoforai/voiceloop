@@ -971,20 +971,102 @@ test('GATE: an acceptsToolGate adapter IS speculated on, and tools wait for the 
   assert.equal(ran, true, 'committing the turn opens the gate');
 });
 
-test('GATE: a dropped speculation aborts instead of committing (side effect never fires)', async () => {
-  let ran = false;
-  const llm = async function* (_h, _s, signal, { toolGate } = {}) {
-    yield { text: 'work' };
-    await Promise.race([toolGate, new Promise((r) => signal.addEventListener('abort', r, { once: true }))]);
-    if (signal.aborted) return;           // the adapter turns a still-gated call into a no-op
-    ran = true;
+test('GATE: a dropped speculation rejects the gate — no side effect, and the generator unwinds', async () => {
+  let ran = false, unwound = false;
+  // Tool BEFORE any text, so the very first gen.next() genuinely PARKS on the gate — a text-first
+  // generator would be suspended at its yield instead and gen.return() alone would close it, which
+  // proves nothing about the gate.
+  const llm = async function* (_h, _s, _sig, { toolGate } = {}) {
+    try {
+      await toolGate;                     // the naive contract: no abort race
+      ran = true;
+      yield { tool: 'send_email', id: 'e1', args: {}, result: 'sent' };
+    } finally { unwound = true; }
   };
   llm.executesTools = true; llm.acceptsToolGate = true;
   const { agent } = makeAgent({ llm });
-  agent.state = 'listening'; agent._turnText = 'email bob';   // _startPrefetch revalidates the live transcript
+  agent.state = 'listening'; agent._turnText = 'email bob';
   agent._startPrefetch('email bob');
   for (let i = 0; i < 10; i++) await settle();
   agent._dropPrefetch();                  // user kept talking → the speculation is discarded
   for (let i = 0; i < 20; i++) await settle();
   assert.equal(ran, false, 'an abandoned speculation must never execute its tools');
+  assert.equal(unwound, true, 'the gate rejected, so the generator unwound — no leaked fetch/iterator');
+});
+
+test('GATE: an adapter that only awaits the gate is not left hanging when the turn is superseded', async () => {
+  let unwound = false;
+  const llm = async function* (_h, _s, _sig, { toolGate } = {}) {
+    try { await toolGate; yield { text: 'sent' }; } finally { unwound = true; }
+  };
+  llm.executesTools = true; llm.acceptsToolGate = true;
+  const { agent } = makeAgent({ llm });
+  agent.state = 'listening'; agent._turnText = 'a';
+  agent._startPrefetch('a');
+  for (let i = 0; i < 5; i++) await settle();
+  agent._turnText = 'a b';                // transcript moved on
+  agent._startPrefetch('a b');            // supersedes → drops the previous speculation
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(unwound, true, 'the superseded speculation unwound instead of parking forever');
+});
+
+test('RUNNING: a late announcement from a detached producer cannot open a stuck spinner', async () => {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const llm = async function* () {
+    yield { text: 'thinking.' };
+    await held;                                          // producer detached by the turn ending
+    yield { tool: 'run_shell', id: 'late', args: {}, running: true };
+  };
+  // Barge-in TTS: returns after the first chunk but leaves the pump DRAINING in the background —
+  // exactly what speak() detaches, a producer that wakes and keeps pushing after the turn is over.
+  const tts = {
+    setOnProgress() {},
+    async speak(stream) {
+      const it = stream[Symbol.asyncIterator]();
+      const { value } = await it.next();
+      (async () => { while (!(await it.next()).done); })().catch(() => {});   // detached pump
+      return value ?? '';
+    },
+    stop() {},
+  };
+  const { agent, events } = makeAgent({ llm, tts });
+  agent.sendUserText('go');
+  for (let i = 0; i < 40; i++) await settle();
+  const before = events.filter((e) => e.type === 'tool').length;
+  release();                                             // wakes AFTER the turn finalized its chips
+  for (let i = 0; i < 40; i++) await settle();
+  const after = events.filter((e) => e.type === 'tool');
+  assert.equal(after.length, before, 'no spinner opened after the turn finalized');
+  assert.ok(!after.some((e) => e.running), 'and certainly no unresolved running chip');
+});
+
+test('RUNNING: an id-less announcement is dropped (it could never be replaced or finalized)', async () => {
+  const llm = async function* () {
+    yield { tool: 'run_shell', args: { cmd: 'ls' }, running: true };   // no id
+    throw new Error('stream died');
+  };
+  const { agent, events } = makeAgent({ llm });
+  agent.sendUserText('go');
+  for (let i = 0; i < 40; i++) await settle();
+  assert.ok(!events.some((e) => e.type === 'tool' && e.running), 'never rendered as a chip');
+  assert.ok(!events.some((e) => e.type === 'tool' && e.result?.text?.includes('interrupted')),
+    'and so never needs an interrupted resolution');
+});
+
+test('RUNNING: a re-emitted running/outcome pair does not resurrect a settled chip', async () => {
+  const llm = async function* () {
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, running: true };
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' };
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, running: true };    // adapter re-emits
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' };
+    yield { text: 'one file.' };
+  };
+  const { agent, events } = makeAgent({ llm });
+  agent.sendUserText('go');
+  for (let i = 0; i < 40; i++) await settle();
+  const tools = events.filter((e) => e.type === 'tool');
+  assert.equal(tools.filter((e) => e.running).length, 1, 'the settled chip is not reopened');
+  assert.equal(tools.filter((e) => !e.running).length, 1, 'and its outcome is reported once');
+  assert.ok(!tools.some((e) => e.result?.text?.includes('interrupted')), 'never falsely interrupted');
 });

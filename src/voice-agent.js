@@ -788,12 +788,17 @@ export class VoiceAgent {
     this._dropPrefetch();
     const ctl = new AbortController();
     // COMMIT GATE: handed to tool-executing LLMs so every tool waits at the door until this turn
-    // commits (_takePrefetch resolves it) or the speculation is dropped (abort → the adapter turns
-    // the still-gated call into an error result instead of executing it).
-    let commit;
-    const committed = new Promise((r) => { commit = r; });
+    // COMMITS (_takePrefetch fulfills it) or the speculation is DROPPED (_dropPrefetch rejects it).
+    // It always settles, on both terminal paths — a gate that merely stayed pending on drop would
+    // park the adapter's `await toolGate` forever, so its finally never runs and the generator +
+    // fetch leak. Drop REJECTS rather than fulfilling so the safe reading is also the naive one: a
+    // plain `await toolGate` throws instead of silently authorizing a tool the user may have
+    // changed their mind about. Adapters need no abort race; awaiting the gate is enough.
+    let commit, cancel;
+    const committed = new Promise((res, rej) => { commit = res; cancel = rej; });
+    committed.catch(() => {});   // an adapter that ignores the gate must not raise an unhandled rejection
     const gen = this.llm([...this.history, { role: 'user', content: text }], this.sysmsg, ctl.signal, { toolGate: committed });
-    const p = { text, ctl, gen, commit, first: gen.next(), histLen: this.history.length };   // pull NOW → fetch fires during the debounce; histLen pins the base the speculation saw
+    const p = { text, ctl, gen, commit, cancel, first: gen.next(), histLen: this.history.length };   // pull NOW → fetch fires during the debounce; histLen pins the base the speculation saw
     p.first.catch(() => {});                           // aborted/failed speculation must not be an unhandled rejection
     this._prefetch = p;
     this._presynthFirstClip(p);                        // fire-and-forget: warm the first TTS clip off the same speculation
@@ -801,7 +806,14 @@ export class VoiceAgent {
   _dropPrefetch() {
     clearTimeout(this._prefetchTimer); this._prefetchTimer = null;
     const p = this._prefetch; this._prefetch = null;
-    if (p) { try { p.ctl.abort(); } catch {} p.first.then(() => p.gen.return?.()).catch(() => {}); }   // abort the fetch AND close the iterator (custom llm impls may clean up in finally)
+    if (p) {
+      try { p.ctl.abort(); } catch {}
+      // Reject the gate BEFORE touching the iterator: a generator parked on `await toolGate` is not
+      // woken by the abort signal alone, so without this its finally never runs and `first` never
+      // settles — leaking the generator and its fetch (and stranding the return() below forever).
+      p.cancel?.(new DOMException('speculation dropped', 'AbortError'));
+      p.first.then(() => p.gen.return?.()).catch(() => {});   // abort the fetch AND close the iterator (custom llm impls may clean up in finally)
+    }
   }
   // Claim the prefetch for a closing SPOKEN turn: exact text match AND unchanged history base (the
   // request was built on [...history, user]; if a raced turn appended anything since — e.g. the
@@ -900,7 +912,13 @@ export class VoiceAgent {
     // outcome arrives finalizes it as interrupted — DISPLAY truth only: an announcement never reaches
     // the ledger (`calls`), so the model treats it as never having happened.
     const announced = new Map();
+    // Latched once this turn has finalized its chips (finishInterrupted ran). A barge-in detaches the
+    // LLM producer from TTS, so it can wake AFTER we returned and keep pushing chunks: a late
+    // announcement would open a spinner nothing will ever close. Past the latch, announcements are
+    // dropped — outcomes still flow (a tool the adapter really ran is truth worth reporting).
+    let finalized = false;
     const finishInterrupted = () => {
+      finalized = true;
       for (const r of announced.values())
         this.onEvent({ type: 'tool', name: r.tool, id: r.id, args: r.args, result: { ok: false, text: 'interrupted — did not finish' } });
       announced.clear();
@@ -911,7 +929,14 @@ export class VoiceAgent {
         // act (a provider re-emitting its buffered call, or the model asking twice) — run it once.
         if (item.tool) {
           if (item.running) {   // display-only announcement; the outcome chunk below does the work
-            if (item.id) announced.set(item.id, item);
+            // An id-less announcement can never be replaced in place NOR finalized (both key on id),
+            // so it could only ever become a stuck spinner — drop it. The outcome chunk still lands.
+            if (finalized || !item.id) continue;
+            // Already settled this turn (adapter re-emitting its buffered pair): re-announcing would
+            // reopen a spinner over a finished chip, and the duplicate outcome is deduped below and
+            // never re-reported — so it would hang there, then finalize as falsely "interrupted".
+            if (calls.some((c) => c.id === item.id)) continue;
+            announced.set(item.id, item);
             self.onEvent({ type: 'tool', name: item.tool, id: item.id, args: item.args, running: true });
             continue;
           }
