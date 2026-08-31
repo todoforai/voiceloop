@@ -3,11 +3,17 @@
 //
 //   audio/noise/person-*.raw   copied BYTE-IDENTICAL from smalltalk (same lines → clean-vs-noise
 //                              is a controlled comparison; fairness rule: never regenerate)
-//   audio/noise/bed.raw        continuous café bed: a SECOND ElevenLabs voice chatting irrelevant
-//                              sentences + a brown-noise floor, pre-scaled to ~15dB SNR under the
-//                              person lines (speech-frame RMS, measured not guessed). driver.js
-//                              loops it into bench_mic for the whole conversation, agent turns
-//                              included — that's the point.
+//   audio/noise/bed.raw        continuous café BABBLE bed: the chatter lines are re-voiced into
+//                              BABBLE_LAYERS overlapping, pitch-shifted streams (+ a brown-noise
+//                              floor), pre-scaled to ~20dB SNR under the person lines (speech-frame
+//                              RMS, measured not guessed). driver.js loops it into bench_mic for the
+//                              whole conversation, agent turns included — that's the point.
+//                              WHY BABBLE: a single intelligible chatter voice does not test
+//                              barge-in, it jams endpointing — the first cut of this bed was
+//                              transcribed verbatim by Deepgram, turns never closed and the agent
+//                              replied on 6/30 turns (see pooled-noise-vl-el-noise-ns-*.md).
+//                              Overlapping layers leave café-shaped energy with no transcribable
+//                              stream, which is what the burst false-trigger test actually needs.
 //   audio/noise/burst-*.raw    two non-speech bursts (cough, door slam) via ElevenLabs
 //                              sound-generation, scaled to person-line loudness (someone in the
 //                              room, not at the next table). driver.js fires them mid-reply.
@@ -29,10 +35,11 @@ const key = process.env.ELEVENLABS_API_KEY;
 if (!key) { console.error('ELEVENLABS_API_KEY required (bed voice + sound effects)'); process.exit(1); }
 
 const BED_VOICE = '21m00Tcm4TlvDq8ikWAM';   // "Rachel" — distinct from the person's "George"
-const SNR_DB = 15;                          // bed sits this far under the person lines
+const SNR_DB = 20;                          // bed sits this far under the person lines
+const BABBLE_LAYERS = 6;                    // enough overlap that no single stream is transcribable
 
-// Irrelevant café chatter — real words on purpose: if they leak into a SUT's STT and trigger
-// word-based barge-in, that is a finding, not a bug in the bed.
+// Café chatter source lines. Individually intelligible, but they are only ever heard as
+// BABBLE_LAYERS overlapping copies — no layer is meant to survive as words.
 const CHATTER = [
   'So anyway, I told him we should just take the earlier train.',
   'Honestly the coffee here is better than the place around the corner.',
@@ -59,6 +66,14 @@ function speechRms(pcm) {
       const rms = frameRms(pcm, (t / FRAME_MS) * FRAME_SAMPLES * 2, FRAME_SAMPLES);
       sum += rms * rms; n++;
     }
+  return n ? Math.sqrt(sum / n) : 0;
+}
+
+// Plain RMS over every frame (no segment gating) — the right measure for continuous babble.
+function contRms(pcm) {
+  const n = Math.floor(pcm.length / 2 / FRAME_SAMPLES);
+  let sum = 0;
+  for (let f = 0; f < n; f++) sum += frameRms(pcm, f * FRAME_SAMPLES * 2, FRAME_SAMPLES) ** 2;
   return n ? Math.sqrt(sum / n) : 0;
 }
 
@@ -114,33 +129,57 @@ let personRms = 0;
 }
 console.log(`person speech RMS: ${Math.round(personRms)} → bed target ${Math.round(personRms / 10 ** (SNR_DB / 20))} (-${SNR_DB}dB)`);
 
-// ── café bed: chatter sentences joined with gaps, over a brown-noise floor ─────────────────────
+// ── café bed: BABBLE_LAYERS overlapping chatter streams over a brown-noise floor ───────────────
 const bedRaw = join(outDir, 'bed.raw');
 if (!existsSync(bedRaw)) {
-  const pieces = [];
+  // One "stream" = every chatter line back to back with small gaps. Each layer starts at a
+  // different offset, is pitch-shifted a few percent and re-ordered, so the layers never line up
+  // into a single readable voice — the classic babble-noise construction.
+  const lines = [];
   for (let i = 0; i < CHATTER.length; i++) {
     const mp3 = join(outDir, `bed-line-${i}.mp3`), raw = join(outDir, `bed-line-${i}.tmp.raw`);
     if (!existsSync(mp3)) await elTts(CHATTER[i], mp3);
     toRaw(mp3, raw, ['lowpass=f=4000']);                       // a table away, not in your ear
-    pieces.push(trimToSpeech(readFileSync(raw)));
-    pieces.push(Buffer.alloc(Math.round((0.4 + (i % 3) * 0.15) * RATE) * 2));   // 400–700ms gaps
+    lines.push(trimToSpeech(readFileSync(raw)));
   }
-  const speech = Buffer.concat(pieces);
-  // Brown-noise floor 10dB under the chatter: the bed never goes silent, so an energy VAD sees a
+  const layerLen = lines.reduce((n, l) => n + l.length, 0) + lines.length * Math.round(0.5 * RATE) * 2;
+  const speech = Buffer.alloc(layerLen);
+  for (let L = 0; L < BABBLE_LAYERS; L++) {
+    // Pitch/rate shift per layer (0.88–1.12) so no two layers share a voice; rotate the line order
+    // and start mid-stream so onsets never coincide.
+    const rate = (0.88 + L * (0.24 / (BABBLE_LAYERS - 1))).toFixed(3);
+    const src = join(outDir, `bed-layer-${L}.tmp.raw`), shifted = join(outDir, `bed-layer-${L}.sh.tmp.raw`);
+    const rotated = lines.map((_, i) => lines[(i + L * 3) % lines.length]);
+    const withGaps = rotated.flatMap((l) => [l, Buffer.alloc(Math.round((0.3 + ((L + 1) % 4) * 0.1) * RATE) * 2)]);
+    writeFileSync(src, Buffer.concat(withGaps));
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 's16le', '-ar', String(RATE), '-ac', '1', '-i', src,
+      '-af', `asetrate=${Math.round(RATE * rate)},aresample=${RATE},atempo=${(1 / rate).toFixed(3)}`,
+      '-ar', String(RATE), '-ac', '1', '-f', 's16le', shifted]);
+    const layer = readFileSync(shifted);
+    const start = Math.round((L / BABBLE_LAYERS) * (layer.length / 2)) * 2;   // stagger layer phase
+    for (let i = 0; i + 1 < speech.length; i += 2) {
+      const v = speech.readInt16LE(i) + layer.readInt16LE((start + i) % (layer.length - 1) & ~1);
+      speech.writeInt16LE(Math.max(-32768, Math.min(32767, v)), i);
+    }
+  }
+  // Brown-noise floor 10dB under the babble: the bed never goes silent, so an energy VAD sees a
   // continuous café, not convenient gaps. Mix first, THEN scale the combined bed to the SNR target.
   const floorRaw = join(outDir, 'bed-floor.tmp.raw');
   execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i',
     `anoisesrc=colour=brown:duration=${Math.ceil(speech.length / 2 / RATE) + 1}:amplitude=0.05`,
     '-ar', String(RATE), '-ac', '1', '-f', 's16le', floorRaw]);
   let floor = readFileSync(floorRaw).subarray(0, speech.length);
-  const floorRmsNow = Math.sqrt([...Array(Math.floor(floor.length / 2 / FRAME_SAMPLES))].reduce((a, _, f) => a + frameRms(floor, f * FRAME_SAMPLES * 2, FRAME_SAMPLES) ** 2, 0) / Math.floor(floor.length / 2 / FRAME_SAMPLES));
-  floor = scaled(floor, (speechRms(speech) / 10 ** (10 / 20)) / floorRmsNow);
+  floor = scaled(floor, (contRms(speech) / 10 ** (10 / 20)) / contRms(floor));
   let bed = Buffer.alloc(speech.length);   // driver loops per-sample (modulo) — no chunk padding, no silent seam
   for (let i = 0; i + 1 < speech.length; i += 2)
     bed.writeInt16LE(Math.max(-32768, Math.min(32767, speech.readInt16LE(i) + floor.readInt16LE(i))), i);
-  bed = scaled(bed, personRms / 10 ** (SNR_DB / 20) / speechRms(bed));
+  // Babble is continuous by construction, so measure it with a plain frame RMS: speechRms()'s
+  // segment detection finds no onsets in it — which is itself the point (checked below).
+  bed = scaled(bed, personRms / 10 ** (SNR_DB / 20) / contRms(bed));
   writeFileSync(bedRaw, bed);
-  console.log(`bed.raw: ${(bed.length / 2 / RATE).toFixed(1)}s, speech RMS ${Math.round(speechRms(bed))} (target ${Math.round(personRms / 10 ** (SNR_DB / 20))})`);
+  const bedSegs = segments(bed);
+  console.log(`bed.raw: ${(bed.length / 2 / RATE).toFixed(1)}s, RMS ${Math.round(contRms(bed))} (target ${Math.round(personRms / 10 ** (SNR_DB / 20))}), live-gate segments: ${bedSegs.length}`);
+  if (bedSegs.length) console.warn(`  ⚠ bed alone trips the energy gate ${bedSegs.length}× — it should read as floor, not speech`);
 } else console.log('bed.raw: exists, skipping');
 
 // ── bursts: cough + door slam at person-line loudness ──────────────────────────────────────────
