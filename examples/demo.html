@@ -39,12 +39,14 @@
   #orb { position:relative; width:230px; height:230px; display:grid; place-items:center;
          --a:#2b3d5c; --b:#39506e; --cc:#2a3550; --d:#334463; --spin:30s; --glow:.14; --lvl:0 }
 
-  /* Halo: the light this thing throws on the page. Outside the clipped orb, so it can bloom past
-     the rim — that bloom is most of the "alive" read at video scale. */
-  #orb::before { content:''; position:absolute; inset:-22%; border-radius:50%; pointer-events:none;
-                 background:radial-gradient(circle, var(--b) 0%, transparent 62%);
-                 opacity:calc(var(--glow) * (.34 + var(--lvl) * .66)); filter:blur(26px);
-                 transform:scale(calc(1 + var(--lvl) * .16));
+  /* Halo: the light this thing throws on the page. It sits OUTSIDE the clipped orb, so the glow
+     blooms past the rim — at video scale that bloom is most of the "alive" read.
+     The gradient must stay opaque out to the orb's own edge (~69% of this box) or the only visible
+     part is a thin ring: the orb itself paints over everything inside it. */
+  #orb::before { content:''; position:absolute; inset:-45%; border-radius:50%; pointer-events:none;
+                 background:radial-gradient(circle, var(--b) 0 34%, transparent 72%);
+                 opacity:calc(var(--glow) * (.34 + var(--lvl) * .66)); filter:blur(22px);
+                 transform:scale(calc(.92 + var(--lvl) * .14));
                  transition:opacity .12s linear, transform .12s ease-out }
 
   #mic { position:relative; width:100%; height:100%; border-radius:50%; border:0; padding:0;
@@ -306,16 +308,25 @@ function onSettingChanged() { showPipeline(); prewarmIfPipelined(); }
 //      would just measure the echo it works to suppress);
 //   3. a selfCapture STT (webspeech) emits no level at all — fall back to the VAD-style pulse.
 // Every source decays: a level that only ever rises reads as a stuck meter.
+// Sources are SPARSE (a level event every ~256ms capture chunk), so both the target's decay and the
+// displayed value are functions of ELAPSED TIME, not of frame count: a per-frame multiplier would
+// empty the meter between two events at 60fps and flicker, and would run at a different speed on a
+// 144Hz display.
 const orb = $('orb');
-let lvl = 0, lvlTarget = 0;
+const HALF_LIFE_MS = 260;                                        // target sags to half this long after its last source sample
+const ATTACK_MS = 60, RELEASE_MS = 320;                          // fast attack, slow release — how a meter reads as "alive"
+const decayed = (v, ms, halfLife) => v * Math.pow(0.5, ms / halfLife);
+let lvl = 0, lvlTarget = 0, lastFrame = 0;
 const setLevel = (v) => { lvlTarget = Math.max(lvlTarget, Math.min(1, v)); };
-const decay = () => {
-  lvlTarget *= 0.82;                                    // sources re-arm it every frame they have data
-  lvl += (lvlTarget - lvl) * (lvlTarget > lvl ? 0.5 : 0.12);   // fast attack, slow release — how meters read as "alive"
+const tickLevel = (now) => {
+  const dt = Math.min(100, now - (lastFrame || now)); lastFrame = now;   // clamp: a backgrounded tab resumes with a huge gap
+  lvlTarget = decayed(lvlTarget, dt, HALF_LIFE_MS);
+  // Exponential approach toward the target, converging at the same rate regardless of frame rate.
+  lvl += (lvlTarget - lvl) * (1 - Math.exp(-dt / (lvlTarget > lvl ? ATTACK_MS : RELEASE_MS)));
   orb.style.setProperty('--lvl', lvl.toFixed(3));
-  requestAnimationFrame(decay);
+  requestAnimationFrame(tickLevel);
 };
-requestAnimationFrame(decay);
+requestAnimationFrame(tickLevel);
 
 // One ring per turn boundary. Marks the two instants the transcript cannot show: your turn being
 // committed, and a barge-in cutting the reply.

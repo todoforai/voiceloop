@@ -59,9 +59,10 @@ npx serve .                     # from a clone
 npx serve node_modules/@todoforai/voiceloop    # from npm
 ```
 
-Open **`/examples/demo.html`** — the whole loop behind one orb, with the live
-interim transcript, click-to-interrupt, and the two numbers that decide whether
-it feels alive: **first token** and **first sound**. It starts in **echo mode**
+Open **`/examples/demo.html`** — the whole loop behind one orb that breathes with
+your voice (and with its own), the live interim transcript, click-to-interrupt with
+the unspoken remainder struck through where you cut it off, and the two numbers that
+decide whether it feels alive: **first token** and **first sound**. It starts in **echo mode**
 — browser-native Web Speech STT, local Piper TTS and a stand-in "LLM" that
 repeats you — so it runs with no keys, no backend and no cost. Open *settings*
 to point it at any OpenAI-compatible endpoint (Ollama, your proxy) and a cloud
@@ -237,6 +238,17 @@ Full types (with per-option notes) in [`src/index.d.ts`](src/index.d.ts).
 
 Events via `onEvent(e)`: `state`, `stt`, `assistant`, `tool`, `vad`, `level`, `echo`, `error`, `diag`.
 A `tool` event carries `{ name, id, args }` plus either `result` (settled) or `running: true` (an [adapter-announced](#adapters-that-run-tools-themselves) call still executing) — render the pair as one chip keyed by `id`.
+
+Two of them exist purely so a UI can look alive, and both cost you nothing to ignore:
+
+- **`level`** — `{ level }`, mic loudness 0..1 on a perceptual curve, ~every 256ms while capturing.
+  Measured off the frames the pipeline already has (no second mic tap, no `AnalyserNode`). Drive a
+  meter or a reacting orb with it; decay it over *elapsed time* rather than per frame, or it
+  flickers out between samples. Not emitted for a `selfCapture` provider (webspeech owns its mic).
+- **interruption** — there is no "cut short" event: the final `assistant` event carries both what
+  was heard (`text`) and what was written (`full`), so `full.slice(text.length)` non-empty *is* the
+  barge-in. Render that remainder struck through and the transcript shows exactly where your voice
+  cut it off (see `examples/demo.html`).
 
 ## Tuning
 
