@@ -123,7 +123,12 @@ new VoiceAgent({ sttProvider: 'speechmatics', sttTokenUrl: '/api/stt/token' })
 Cloud providers authenticate with a **short-TTL token minted by your backend** so the raw API key never reaches the page. Either:
 
 - `sttTokenUrl` — a POST route on your server that returns `{ token }` (mint it against the provider's temp-token API with your secret key), or
-- `getSttToken` — an async callback `() => ({ token })` when your auth doesn't fit a bare POST.
+- `getSttToken` — an async callback `(provider) => ({ token })` when your auth doesn't fit a bare POST, or when each provider mints a different credential. It is handed the provider actually running (after the fallback below), so you pick the route without re-deriving that rule:
+
+```js
+const ROUTE = { elevenlabs: '/api/stt/token', deepgram: '/api/stt/deepgram-token' };
+new VoiceAgent({ sttProvider, getSttToken: p => fetch(ROUTE[p], { method: 'POST' }).then(r => r.json()) })
+```
 
 On browsers without SpeechRecognition (Firefox, WebKitGTK) `webspeech` falls back to `elevenlabs` — which needs a token route configured, so pass `sttTokenUrl`/`getSttToken` if you want the fallback to work.
 

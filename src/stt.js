@@ -58,18 +58,20 @@ const USAGE_FLUSH_SECONDS = 30;   // report streamed seconds to the backend at l
 // state to clear on failure differs per provider, so that stays with the caller).
 async function mintSttToken(url, apiKey, onFatal, getToken) {
   if (getToken) {
+    // HOST code on the critical path: bound it exactly like the built-in fetch below, or a minter
+    // that never settles stalls voice start forever with no error. We can't cancel the host's
+    // promise — we just stop waiting on it (it may still resolve into the void, which is fine:
+    // a token is idempotent to mint).
+    let timer;
     try {
-      // HOST code on the critical path: bound it exactly like the built-in fetch below, or a minter
-      // that never settles stalls voice start forever with no error. We can't cancel the host's
-      // promise — we just stop waiting on it (it may still resolve into the void, which is fine:
-      // a token is idempotent to mint).
       const body = await Promise.race([
         getToken(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), TUNING.STT.tokenFetchTimeoutMs)),
+        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timed out')), TUNING.STT.tokenFetchTimeoutMs); }),
       ]);
       if (!body?.token) throw new Error('getToken returned no token');
       return body;
     } catch (e) { onFatal(`STT token: ${e.message}`); return null; }
+    finally { clearTimeout(timer); }   // a fast mint must not hold the timer (and Node's loop) open
   }
   if (!url) { onFatal('STT token: no sttTokenUrl/getToken configured — cloud STT needs a token route (see README)'); return null; }
   let res;
