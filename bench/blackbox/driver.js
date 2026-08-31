@@ -20,7 +20,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, createWriteStream } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Gate, RATE } from './energy.js';
+import { Gate, RATE, segments } from './energy.js';
 
 const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
 const scenarioName = process.argv[2] || 'smalltalk';
@@ -123,6 +123,14 @@ spk.stdout.on('data', (c) => {
 });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Silent gaps inside one person utterance (>300ms — sentence-internal breathing is shorter).
+const pauseGaps = (pcm) => {
+  const segs = segments(pcm);
+  return segs.slice(1)
+    .map((s, i) => ({ startMs: segs[i].endMs, endMs: s.startMs }))
+    .filter((g) => g.endMs - g.startMs > 300);
+};
 const waitFor = async (cond, timeout) => { const end = now() + timeout; while (!cond() && now() < end) await sleep(20); return cond(); };
 
 // Queue this turn's noiseBurst afterMs into THIS turn's reply. Fresh-onset semantics: right after
@@ -161,8 +169,15 @@ async function fireBurst(k, nb) {
     ev('person_start', { turn: k });
     micQueue = Buffer.concat([micQueue, utt[k]]);
     const durMs = (utt[k].length / 2 / RATE) * 1000;
+    // Mid-utterance pauses are ground truth (we built the audio): mark where the person goes
+    // quiet and where they resume, so "did the agent yield when I kept talking?" is measurable.
+    const t0 = now();
+    for (const g of pauseGaps(utt[k])) {
+      setTimeout(() => ev('person_pause', { turn: k }), g.startMs);
+      setTimeout(() => ev('person_resume', { turn: k }), g.endMs);
+    }
     await sleep(durMs);
-    ev('person_end', { turn: k });
+    ev('person_end', { turn: k, dur: Math.round(now() - t0) });
     console.log(`turn ${k}: "${turn.person}" (${Math.round(durMs)}ms${turn.interrupt ? `, interrupt @${turn.interrupt.afterMs}ms` : ''})`);
     if (turn.noiseBurst) fireBurst(k, turn.noiseBurst);   // fire-and-forget; the next turn's settle wait outlives it
   }

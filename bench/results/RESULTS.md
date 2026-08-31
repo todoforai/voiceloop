@@ -16,21 +16,25 @@ Three scenarios: **clean** (smalltalk), **hesitating user** (mid-sentence pauses
 (agent's own voice fed back into the mic, no AEC). Latency = voice→voice median; misbehavior =
 talked over the user (hesitation) / cut its own reply (echo), out of 30 turns.
 
-| system | clean | hesitation | talked over user | echo | cut itself |
+| system | clean | hesitation | overlap → talked through | echo | cut itself |
 |---|---|---|---|---|---|
-| OpenAI Realtime * | 870ms | 1290ms | 12/30 | 790ms | **17/30** |
-| **voiceloop** · deepgram + EL flash | 980ms | 1400ms | **2/30** | 930ms | **0** |
-| **voiceloop** · deepgram + Piper (free, local) | 970ms | 1400ms | **0/30** | — | — |
-| Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 12/30 | 1320ms | **20/30** |
-| ElevenLabs ConvAI | 1450ms | 1810ms | 2/30 | 1410ms | 0 |
+| OpenAI Realtime * | 870ms | 1290ms | 12/30 → **0** (yields in 130ms) | 790ms | **17/30** |
+| **voiceloop** · deepgram + EL flash | 980ms | 1400ms | 2/30 → **0** (420ms) | 930ms | **0** |
+| **voiceloop** · deepgram + Piper (free, local) | 970ms | 1400ms | 0/30 → **0** | — | — |
+| Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 12/30 → **2** (200ms) | 1320ms | **20/30** |
+| ElevenLabs ConvAI | 1450ms | 1810ms | 2/30 → **0** (490ms) | 1410ms | 0 |
 
-"Talked over user" counts turns where agent audio started while the user was mid-turn
-(Pipecat additionally re-entered some of those turns twice: 16 premature starts on its 12
-turns). Speed rankings barely move across scenarios — **what changes is who misbehaves**. The
-two fastest rows keep their speed by talking over a hesitating user on 40% of turns and by
-cutting their own replies under echo. voiceloop is the only system in both the fastest and
-the well-behaved group. Fast is table stakes; not talking over the user — or yourself — is
-the actual test. Full per-scenario tables below.
+**Overlapping the user is not a failure** — people do it constantly, and an agent that jumps in
+during a pause and backs off the moment you keep talking is behaving correctly. So we score the
+recovery, not the entry: *overlap* = turns the agent started speaking while the user still had
+the floor, *talked through* = it kept going anyway, and the yield time is how fast it stopped
+once the user resumed. Realtime enters early on 12 of 30 turns and yields every single time in
+130ms — eager, but polite. Pipecat enters as often and rides over the user on 2 turns.
+
+Speed rankings barely move across scenarios — **what changes is who recovers**. The remaining
+hard failure is echo: two of the fast stacks hear their own voice as the user and cut their own
+replies. Fast is table stakes; yielding when the user keeps talking — and not interrupting
+yourself — is the actual test. Full per-scenario tables below.
 
 \* speech-to-speech, its own LLM — every cascade system shares the fixed mock LLM; Realtime
 is the disclosed exception (see caveats).
@@ -171,26 +175,33 @@ synthesized segments — gap durations verified against the script within ±30ms
 false-completion phrasings that *sound* finished but aren't: "I'd like to book … umm … a table
 for four", "Send the confirmation to my email. … Actually, make that a text message."
 
-Two new columns (policy: fast-and-eager is *allowed* — these make its cost visible):
+Eagerness is *allowed*: entering a pause is a legitimate strategy, and humans overlap each
+other constantly. What separates a natural overlap from steamrolling is whether the agent
+**yields once the user keeps talking**. Three columns make that visible:
 
-- **user-interrupted** = turns where agent audio started inside the person's still-open turn
-  (a pause is an open turn); premature-start events shown in parentheses when a turn was
-  entered more than once. The inverse of barge-in: the agent talking over the user.
+- **overlap** = turns where agent audio started while the person still had the floor (a
+  mid-utterance pause is still their floor). Not a failure by itself.
+- **talked through** = of those, the turns where the agent kept speaking over the resuming
+  user instead of backing off. This is the failure.
+- **yield** = person resumes → agent audio stops. How fast it takes the hint.
 - **first content word** = first agent word matching the scripted response (whisper word
   timestamps on the recorded audio), so a filler head start reads as "fast audio, slower
   content" instead of silently winning voice→voice.
 
-| configuration | voice→voice | first content word | user-interrupted | vs smalltalk v→v |
-|---|---|---|---|---|
-| OpenAI Realtime (gpt-realtime) * | 1285ms (p95 1686) | 1325ms | **12** / 30 turns | +419ms |
-| Pipecat 1.8.1 · deepgram + EL flash | 1288ms (p95 1860) | 1815ms | **12** / 30 turns (16 starts) | +242ms |
-| **voiceloop** · deepgram + EL flash | 1396ms (p95 1709) | 1457ms | **2** / 30 turns | +412ms |
-| **voiceloop** · deepgram + Piper | 1400ms (p95 2006) | 1400ms | **0** / 30 turns | +~350ms |
-| ElevenLabs ConvAI | 1807ms (p95 2069) | 1838ms | **2** / 30 turns | +353ms |
+| configuration | voice→voice | first content word | overlap | talked through | yield | vs smalltalk v→v |
+|---|---|---|---|---|---|---|
+| OpenAI Realtime (gpt-realtime) * | 1285ms (p95 1686) | 1325ms | 12 / 30 | **0** | 130ms | +419ms |
+| Pipecat 1.8.1 · deepgram + EL flash | 1288ms (p95 1860) | 1815ms | 12 / 30 | **2** | 200ms | +242ms |
+| **voiceloop** · deepgram + EL flash | 1396ms (p95 1709) | 1457ms | 2 / 30 | **0** | 420ms | +412ms |
+| **voiceloop** · deepgram + Piper | 1400ms (p95 2006) | 1400ms | 0 / 30 | **0** | — | +~350ms |
+| ElevenLabs ConvAI | 1807ms (p95 2069) | 1838ms | 2 / 30 | **0** | 490ms | +353ms |
 
-The headline column inverts against the interruption column: the two fastest rows talk over
-the hesitating user on **40% of turns**, the three slowest on 0–7%. That's the tradeoff
-this scenario exists to price — neither number alone ranks these systems.
+The eager stacks buy their ~110ms speed edge by entering the user's pauses on 40% of turns —
+and mostly get away with it, because they yield fast (Realtime in 130ms, every single time).
+Only Pipecat actually rides over the user, on 2 of 30 turns. The honest reading is not "fast =
+rude": it's that eager endpointing is only safe if the recovery reflex is intact, and the two
+columns must be read together. voiceloop trades ~110ms for rarely needing the reflex at all;
+Realtime keeps the speed and leans on the reflex. Both are defensible designs.
 
 ### Notes per configuration
 
@@ -198,15 +209,15 @@ this scenario exists to price — neither number alone ranks these systems.
   premature entries in 30 turns each. The price is honest and visible: EOT delay grows from
   366ms (smalltalk) to ~1210ms — flux waits out the hesitation before committing. First
   content word ≈ voice→voice (no filler strategy in play).
-- **Pipecat** — `LocalSmartTurnAnalyzerV3` commits mid-pause on 12 of 30 turns (16 premature
-  starts), and 23 audio-truth self-cut events — the typical shape is: agent enters
-  the pause, user resumes, VAD cuts the nascent reply, the reply re-fires after the real end
-  of turn. v→v 1288ms looks fast, but first content word is 1815ms — the early entries mostly
-  delivered audio that then got cut, not content.
-- **OpenAI Realtime** — default `server_vad` (200ms silence) treats most scripted pauses as
-  end of turn: 12 user-interruptions and 29 false barge-ins (its own premature replies being
-  cut when the person resumes — same reflex as its fast barge-in stop). Like Pipecat, quick
-  first audio, then re-starts: content word p95 3352ms.
+- **Pipecat** — `LocalSmartTurnAnalyzerV3` commits mid-pause on 12 of 30 turns; it yields in
+  200ms when the person resumes, but on 2 turns it talked through them. The typical shape is:
+  agent enters the pause, user resumes, VAD cuts the nascent reply, the reply re-fires after
+  the real end of turn. v→v 1288ms looks fast, but first content word is 1815ms — the early
+  entries mostly delivered audio that then got cut, not content.
+- **OpenAI Realtime** — default `server_vad` (200ms silence) treats most scripted pauses as end
+  of turn: it entered early on 12 of 30 turns, and **yielded on all 12, median 130ms** — the
+  fastest recovery in the field (same reflex as its fast barge-in stop). Eager but polite; the
+  cost is that the premature audio gets cut and re-started, so content word p95 is 3352ms.
 - **ConvAI** — `turn_v3` (normal eagerness) behaves like voiceloop: 2 premature entries,
   pauses absorbed. It pays with the highest v→v (1807ms; +353 vs its smalltalk 1454). One
   quirk required a rig fix, disclosed below.

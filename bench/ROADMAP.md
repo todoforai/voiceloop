@@ -9,7 +9,7 @@ be free to answer fast and eagerly; the table should simply also show what that 
 
 | lever | what it buys | hidden cost today | metric that will expose it |
 |---|---|---|---|
-| Aggressive endpointing (EOT window ↓) | v→v ↓ hundreds of ms | answers the user's half-sentence mid-hesitation | *user-interrupted count* on the hesitation scenario |
+| Aggressive endpointing (EOT window ↓) | v→v ↓ hundreds of ms | answers the user's half-sentence mid-hesitation — harmless if it yields, steamrolling if it doesn't | *overlap* + *talked through* + *yield time* on the hesitation scenario |
 | Filler-word head start ("Hmm," at EOT) | v→v ↓ to ~400ms | audio is instant, content isn't | *time-to-first-content-word* next to time-to-first-audio |
 | Energy-VAD barge-in | stop time ↓ (~430–540ms measured) | any noise cuts the agent off | *false barge-ins* on the noise scenario (today the rig is silent between lines — every 0 in that column is untested) |
 | TTS speedup (e.g. 1.3×) | more info per second | none — and **no latency advantage either**: every latency column keys on audio *onsets* (first sample, stop instant), never playback duration; if anything faster playback risks more stalls (less presynth cover). Listed here only because voice *quality* is unmeasured, so a worse/faster voice costs nothing | *words-per-second* makes the rate visible; quality itself stays human-judged (committed voice samples per SUT) |
@@ -19,11 +19,13 @@ be free to answer fast and eagerly; the table should simply also show what that 
 
 1. ~~**hesitation**~~ — DONE (`scenarios/hesitation.json`, results in RESULTS.md). Person lines
    with 450–900ms mid-utterance pauses and false-completion phrasings, rendered as per-segment
-   TTS + exact silence (gaps verified ±30ms). Metrics landed: **user-interrupted** (agent audio
-   starting inside a still-open person turn) + **time-to-first-content-word** (whisper word
-   timestamps vs the scripted response). The bill got paid as predicted: Pipecat smart-turn 16/30
-   and Realtime server_vad 12/30 premature entries vs 0–2/30 for flux/turn_v3 — while the eager
-   two hold the fastest v→v. Both numbers now sit side by side in the table.
+   TTS + exact silence (gaps verified ±30ms). Metrics landed: **overlap / talked-through /
+   yield time** (driver emits ground-truth `person_pause`/`person_resume`; overlapping is
+   allowed, failing to back off is the failure) + **time-to-first-content-word** (whisper word
+   timestamps vs the scripted response). The result was more interesting than the prediction:
+   Pipecat and Realtime enter pauses on 12/30 turns vs 0–2/30 for flux/turn_v3, but they yield
+   fast (Realtime 130ms, all 12) — only Pipecat actually talked through the user, on 2 turns.
+   Eager endpointing is safe *if* the recovery reflex is intact; the columns now show both.
 2. **noise** — SHELVED after a 5-run voiceloop probe (assets kept: `scenarios/noise.json`,
    `gen-noise.js`, driver mixing, burst metrics). The probe showed the scenario as cut doesn't
    measure what it targets: the café bed is *intelligible* English at 15dB SNR, so STT
@@ -46,8 +48,8 @@ be free to answer fast and eagerly; the table should simply also show what that 
 - ~~**time-to-first-content-word**~~ — DONE (analyze.js word timestamps → `content_word` events;
   per-turn `cw` column + pooled row).
 - **words-per-second (agent)** — makes TTS speed a visible, legitimate dimension.
-- ~~**user-interrupted count**~~ — DONE (`userInterruptions` per turn, scripted interrupts
-  excluded; pooled total).
+- ~~**overlap / talked-through / yield time**~~ — DONE (`userInterruptions` per turn as a
+  turn-count, `talkedThrough`, `yieldMs`; scripted interrupts excluded; pooled totals).
 - **cold/warm split** — report turn-0 separately instead of letting model download / first-synth
   pollute p95 (e.g. shared-voice's 4.8s turn-0 outlier; ConvAI/Realtime have no cold cost —
   that difference deserves its own column, not a footnote).

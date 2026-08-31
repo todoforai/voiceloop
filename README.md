@@ -67,18 +67,20 @@ and the same fixed mock LLM. Reply latency (voice→voice median), and how often
 misbehaves — talks over a hesitating user, or cuts its own reply when its voice echoes back
 into the mic (no AEC):
 
-| system | latency (clean) | talked over user | cut itself under echo |
+| system | latency (clean) | talked through user | cut itself under echo |
 |---|---|---|---|
-| OpenAI Realtime (own LLM)* | 870ms | 12/30 | **17/30** |
-| **voiceloop** (deepgram + ElevenLabs flash) | **980ms** | **2/30** | **0/30** |
+| OpenAI Realtime (own LLM)* | 870ms | **0/30** | **17/30** |
+| **voiceloop** (deepgram + ElevenLabs flash) | **980ms** | **0/30** | **0/30** |
 | **voiceloop** (deepgram + Piper, free local TTS) | **970ms** | **0/30** | — |
-| Pipecat 1.8.1 (same providers) | 1050ms | 12/30 | **20/30** |
-| ElevenLabs ConvAI | 1450ms | 2/30 | 0/30 |
+| Pipecat 1.8.1 (same providers) | 1050ms | 2/30 | **20/30** |
+| ElevenLabs ConvAI | 1450ms | **0/30** | 0/30 |
 
-The fast rows and the well-behaved rows are different rows — except voiceloop: the other fast
-stacks buy their speed by answering the user's half-sentence and by hearing their own echo as
-the user. voiceloop's word-level echo filter runs echo-coupled turns at full speed (930ms,
-parity with clean).
+Overlapping a hesitating user is fine — people do it, and every stack here except Pipecat backs
+off the moment the user keeps talking (voiceloop yields in 420ms, and only enters 2 of 30 turns
+at all). The failure that still separates them is echo: fed its own voice through the mic with
+no AEC, the other fast stacks hear themselves as the user and cut their own replies.
+voiceloop's word-level echo filter runs echo-coupled turns at full speed (930ms, parity with
+clean).
 
 \* Realtime is speech-to-speech — it can't use the bench's fixed mock LLM, so its row isn't
 fully apples-to-apples.

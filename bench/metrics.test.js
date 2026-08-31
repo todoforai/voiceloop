@@ -104,27 +104,74 @@ test('stalls: a >250ms silent gap between clips with text remaining is counted',
   assert.equal(m.turns[0].stalls, 1);
 });
 
-test('user-interrupted: clip_start inside an open person turn counts; scripted interrupts do not', () => {
-  const hesitation = {
-    turns: [
-      { person: 'i would like to book umm a table for four', response: 'A table for four, wonderful.' },
-      { person: 'stop wait', response: 'Okay.', interrupt: { afterMs: 500 } },
-    ],
-  };
+const hesitation = {
+  turns: [
+    { person: 'i would like to book umm a table for four', response: 'A table for four, wonderful.' },
+    { person: 'stop wait', response: 'Okay.', interrupt: { afterMs: 500 } },
+  ],
+};
+
+test('overlap that YIELDS when the user resumes is not a failure — it is scored by yield time', () => {
   const events = [
-    { t: 0, type: 'person_start', turn: 0 },                  // line contains an 800ms pause…
-    { t: 1200, type: 'clip_start' },                          // …agent answers the half-sentence mid-pause
-    { t: 1900, type: 'clip_end' },
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1000, type: 'person_pause', turn: 0 },
+    { t: 1200, type: 'clip_start' },                          // agent enters the pause — allowed
+    { t: 1800, type: 'person_resume', turn: 0 },              // user keeps going…
+    { t: 2050, type: 'clip_end' },                            // …agent backs off after 250ms
     { t: 3000, type: 'person_end', turn: 0 },
-    { t: 3600, type: 'clip_start' },                          // real reply after the turn closed — fine
+    { t: 3600, type: 'clip_start' }, { t: 4500, type: 'clip_end' },
     { t: 5000, type: 'person_start', turn: 1 },               // scripted barge-in over that reply
     { t: 5300, type: 'barge_stop' }, { t: 5300, type: 'clip_end' },
     { t: 5800, type: 'person_end', turn: 1 },
     { t: 6300, type: 'clip_start' }, { t: 6800, type: 'clip_end' },
   ];
   const m = computeMetrics(events, hesitation);
-  assert.equal(m.turns[0].userInterruptions, 1, 'the mid-pause clip counts');
+  assert.equal(m.turns[0].yieldMs, 250, 'yield time measured from the resume');
+  assert.equal(m.turns[0].talkedThrough, false, 'backing off is not a failure');
   assert.equal(m.turns[1].userInterruptions, undefined, 'scripted interrupt turn excluded');
+  assert.equal(m.aggregate.talkedThrough, 0);
+  assert.equal(m.aggregate.yieldMs.median, 250);
+});
+
+test('talking THROUGH the resuming user is the failure', () => {
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1000, type: 'person_pause', turn: 0 },
+    { t: 1200, type: 'clip_start' },                          // agent enters the pause…
+    { t: 1800, type: 'person_resume', turn: 0 },              // …user resumes, agent keeps talking
+    { t: 3000, type: 'person_end', turn: 0 },
+    { t: 4500, type: 'clip_end' },                            // only stops long after the user finished
+  ];
+  const m = computeMetrics(events, hesitation);
+  assert.equal(m.turns[0].yieldMs, null, 'never yielded');
+  assert.equal(m.turns[0].talkedThrough, true);
+  assert.equal(m.aggregate.talkedThrough, 1);
+});
+
+test('re-entering right after a token yield still counts as talking through', () => {
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1000, type: 'person_pause', turn: 0 },
+    { t: 1200, type: 'clip_start' },
+    { t: 1800, type: 'person_resume', turn: 0 },
+    { t: 1900, type: 'clip_end' },                            // brief stop…
+    { t: 2100, type: 'clip_start' },                          // …then straight back over the user
+    { t: 3000, type: 'person_end', turn: 0 },
+    { t: 4000, type: 'clip_end' },
+  ];
+  const m = computeMetrics(events, hesitation);
+  assert.equal(m.turns[0].talkedThrough, true, 'a stop that immediately resumes is not a yield');
+});
+
+test('overlap counted per turn, not per clip_start', () => {
+  const events = [
+    { t: 0, type: 'person_start', turn: 0 },
+    { t: 1200, type: 'clip_start' }, { t: 1400, type: 'clip_end' },
+    { t: 1600, type: 'clip_start' }, { t: 1800, type: 'clip_end' },   // two entries, one turn
+    { t: 3000, type: 'person_end', turn: 0 },
+  ];
+  const m = computeMetrics(events, hesitation);
+  assert.equal(m.turns[0].userInterruptions, 1);
   assert.equal(m.aggregate.userInterrupted, 1);
 });
 

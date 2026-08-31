@@ -47,7 +47,9 @@ audio) only exist for instrumented SUTs and explain the audio-truth numbers, nev
 
 | number | meaning |
 |---|---|
-| **user-interrupted** | turns where the agent started talking while the user was mid-turn (e.g. during a pause). |
+| **overlap** | turns where the agent started talking while the user still had the floor. Allowed — people overlap too. |
+| **talked through** | of those, turns where it kept going instead of backing off when the user resumed. The failure. |
+| **yield** | user resumes → agent audio stops (a latency number, listed with the behavior it belongs to). |
 | **self-interruptions** | agent cut its own reply with nobody talking, or delivered <80% of it (hearing itself as the user). |
 | false barge-ins | agent stopped for something that wasn't the user interrupting. |
 | stalls | >250ms silent gap inside one reply. |

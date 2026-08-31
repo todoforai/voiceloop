@@ -62,6 +62,8 @@ export function deriveNoiseStops({ segs, bursts, personEvents, bargeStops = [] }
 
 // ── per-turn + aggregate metrics ────────────────────────────────────────────────────────────────
 const STALL_MS = 250;   // a silent gap inside a reply longer than this counts as a stall
+const YIELD_WINDOW_MS = 2500;   // how long we wait for the agent to back off after the user resumes
+const YIELD_GRACE_MS = 500;     // backing off just past the person's last word still counts as yielding
 
 const between = (events, type, from, to = Infinity) =>
   events.filter((e) => e.type === type && e.t >= from && e.t < to);
@@ -139,10 +141,36 @@ export function computeMetrics(events, scenario) {
       .map((s) => ({ start: s.t, end: firstAfter(events, 'clip_end', s.t)?.t ?? s.t }));
     t.stalls = clips.slice(1).filter((c, i) => c.start - clips[i].end > STALL_MS).length;
 
-    // User-interrupted: agent audio STARTING inside the person's still-open turn (a mid-utterance
-    // pause is an open turn — this is where aggressive endpointing pays its bill). Scripted
-    // interrupt turns are excluded: there the agent is SUPPOSED to be audible while the person talks.
-    if (!script.interrupt) t.userInterruptions = between(events, 'clip_start', start.t, end.t).length;
+    // Talking over the user is ALLOWED — people do it constantly. What matters is whether the
+    // agent YIELDS once the user keeps going. On a turn with mid-utterance pauses we look at each
+    // time the agent entered the pause and the person then resumed:
+    //   overlapStartMs  — how many turns the agent entered early at all (informational)
+    //   yieldMs         — person resumes → agent audio stops (null = never yielded: it talked through)
+    //   talkedThrough   — the failure: the agent kept speaking over the resuming user
+    // Scripted interrupt turns are excluded: there the agent is SUPPOSED to be audible.
+    if (!script.interrupt) {
+      const entries = between(events, 'clip_start', start.t, end.t);
+      t.userInterruptions = entries.length ? 1 : 0;                                // turns, not events
+      // For each overlap, find the moment the person is demonstrably still talking over it:
+      // an entry made during a pause is judged from the resume that ends the pause; an entry
+      // made while the person is already speaking is judged from the entry itself.
+      const resumes = between(events, 'person_resume', start.t, end.t);
+      const pauses = between(events, 'person_pause', start.t, end.t);
+      const inPause = (t) => pauses.some((p) => p.t <= t && (resumes.find((r) => r.t > p.t)?.t ?? end.t) > t);
+      const yields = [];
+      for (const e of entries) {
+        const from = inPause(e.t) ? resumes.find((r) => r.t > e.t)?.t : e.t;
+        if (from == null) continue;                       // pause never ended — nothing to yield to
+        // Yielding only counts while the person is still speaking (+grace); the reply that
+        // follows a properly closed turn is not "talking over" anyone.
+        const until = Math.min(from + YIELD_WINDOW_MS, end.t + YIELD_GRACE_MS);
+        const stop = firstAfter(events, 'clip_end', from, until);
+        const resumedAgain = stop && firstAfter(events, 'clip_start', stop.t, until);
+        yields.push(stop && !resumedAgain ? Math.round(stop.t - from) : null);
+      }
+      t.yieldMs = yields.find((y) => y !== null) ?? null;
+      t.talkedThrough = yields.length > 0 && yields.every((y) => y === null);
+    }
 
     // First CONTENT word: analyze.js transcribes the reply with word timestamps and emits a
     // turn-tagged content_word at the first word matching the scripted response — a filler head
@@ -206,6 +234,8 @@ export function computeMetrics(events, scenario) {
       })(),
       stalls: nums('stalls').reduce((a, b) => a + b, 0),
       userInterrupted: nums('userInterruptions').reduce((a, b) => a + b, 0),
+      talkedThrough: turns.filter((t) => t.talkedThrough).length,
+      yieldMs: stats('yieldMs'),
       falseBargeIns,
       agentStalledByNoise: noiseStops.filter((e) => e.resumedMs != null).length,   // subset of `stalls` (a ≥600ms resume gap is also a >250ms stall)
       echoDrops: events.filter((e) => e.type === 'echo_drop').length,
@@ -232,7 +262,8 @@ export function formatReport(m, label = '') {
     `| barge-in stop overlap | ${f(a.interruptStopMs)} |`,
     `| STT word error rate | ${a.wer == null ? '—' : (a.wer * 100).toFixed(1) + '%'} |`,
     `| spoken ratio (uninterrupted) | ${a.spokenRatioUninterrupted ?? '—'} |`,
-    `| user-interrupted (agent spoke into open turn) | ${a.userInterrupted} |`,
+    `| overlap starts / talked through (never yielded) | ${a.userInterrupted} / ${a.talkedThrough} |`,
+    `| yield time (user resumes → agent stops) | ${f(a.yieldMs)} |`,
     `| stalls / false barge-ins / echo drops | ${a.stalls} / ${a.falseBargeIns} / ${a.echoDrops} |`,
     `| agent-stalled-by-noise (halt + resume, subset of stalls) | ${a.agentStalledByNoise} |`,
     `| echo words / self-interruptions | ${a.echoWords} / ${a.selfInterruptions} |`,
