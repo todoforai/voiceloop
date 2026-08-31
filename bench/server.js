@@ -32,7 +32,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function mockLLM(req, res, body) {
   const { messages = [] } = JSON.parse(body);
-  const turn = messages.filter((m) => m.role === 'user').length - 1;
+  // Phantom-turn guard: ConvAI's turn_timeout (7s default) can commit an EMPTY user turn ('...')
+  // during pre-conversation silence; counting it would shift the whole script by one. Ignore
+  // meaningless user messages, and serve turn 0 to a request that carries none (the phantom
+  // itself) so the first REAL turn still gets the right line.
+  const meaningful = messages.filter((m) => m.role === 'user' && m.content?.trim() && m.content.trim() !== '...');
+  const turn = Math.max(0, meaningful.length - 1);
   console.log(`[llm] turn ${turn} request @ ${Date.now()}`);   // epoch-clocked: lets us quantify SUT→mock-LLM network RTT (tunneled SUTs pay extra)
   const text = scenario.turns[turn]?.response ?? "I have nothing scripted for this turn.";
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });

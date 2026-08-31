@@ -17,10 +17,13 @@ be free to answer fast and eagerly; the table should simply also show what that 
 
 ## Next scenarios (priority order)
 
-1. **hesitation** — person lines with 400–900ms mid-utterance pauses and false-completion
-   phrasings ("I'd like to book… umm… a table for four"). New metric: **user-interrupted**
-   (agent audio starting inside a person's still-open turn — the inverse of barge-in).
-   This is where aggressive endpointing pays its bill.
+1. ~~**hesitation**~~ — DONE (`scenarios/hesitation.json`, results in RESULTS.md). Person lines
+   with 450–900ms mid-utterance pauses and false-completion phrasings, rendered as per-segment
+   TTS + exact silence (gaps verified ±30ms). Metrics landed: **user-interrupted** (agent audio
+   starting inside a still-open person turn) + **time-to-first-content-word** (whisper word
+   timestamps vs the scripted response). The bill got paid as predicted: Pipecat smart-turn 16/30
+   and Realtime server_vad 12/30 premature entries vs 0–2/30 for flux/turn_v3 — while the eager
+   two hold the fastest v→v. Both numbers now sit side by side in the table.
 2. **noise** — café/TV speech bed mixed into bench_mic at realistic SNR + a non-speech burst
    (cough/door slam) during agent speech. This is where energy-VAD barge-in pays its bill,
    and where word-based barge-in should visibly win.
@@ -34,12 +37,11 @@ be free to answer fast and eagerly; the table should simply also show what that 
 
 ## New metrics
 
-- **time-to-first-content-word** — first agent word matching the scripted response (we already
-  record + transcribe agent audio for WER; add word-level timestamps). Reported *next to*
-  time-to-first-audio: filler-led strategies then read as "fast audio, slower content"
-  instead of silently winning v→v.
+- ~~**time-to-first-content-word**~~ — DONE (analyze.js word timestamps → `content_word` events;
+  per-turn `cw` column + pooled row).
 - **words-per-second (agent)** — makes TTS speed a visible, legitimate dimension.
-- **user-interrupted count** — agent speech starting during an open person turn.
+- ~~**user-interrupted count**~~ — DONE (`userInterruptions` per turn, scripted interrupts
+  excluded; pooled total).
 - **cold/warm split** — report turn-0 separately instead of letting model download / first-synth
   pollute p95 (e.g. shared-voice's 4.8s turn-0 outlier; ConvAI/Realtime have no cold cost —
   that difference deserves its own column, not a footnote).

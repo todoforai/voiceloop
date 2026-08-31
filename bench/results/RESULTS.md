@@ -160,6 +160,69 @@ in 60 turns across both configs. A stack could buy the 400ms back by endpointing
 user-interrupted column is where that would show. Competitor rows (ConvAI / Pipecat / Realtime)
 pending rig time.
 
+## Scenario: hesitation (6 turns, 400–900ms mid-utterance pauses, fixed mock LLM)
+
+The scenario where **aggressive endpointing pays its bill**. Every person line contains
+scripted mid-utterance pauses (450–900ms, rendered as exact silence between separately
+synthesized segments — gap durations verified against the script within ±30ms) and
+false-completion phrasings that *sound* finished but aren't: "I'd like to book … umm … a table
+for four", "Send the confirmation to my email. … Actually, make that a text message."
+
+Two new columns (policy: fast-and-eager is *allowed* — these make its cost visible):
+
+- **user-interrupted** = agent audio starting inside a person's still-open turn (a pause is an
+  open turn). The inverse of barge-in: the agent talking over the user.
+- **first content word** = first agent word matching the scripted response (whisper word
+  timestamps on the recorded audio), so a filler head start reads as "fast audio, slower
+  content" instead of silently winning voice→voice.
+
+| configuration | voice→voice | first content word | user-interrupted | vs smalltalk v→v |
+|---|---|---|---|---|
+| OpenAI Realtime (gpt-realtime) * | 1285ms (p95 1686) | 1325ms | **12** / 30 turns | +419ms |
+| Pipecat 1.8.1 · deepgram + EL flash | 1288ms (p95 1860) | 1815ms | **16** / 30 turns | +242ms |
+| **voiceloop** · deepgram + EL flash | 1396ms (p95 1709) | 1457ms | **2** / 30 turns | +412ms |
+| **voiceloop** · deepgram + Piper | 1400ms (p95 2006) | 1400ms | **0** / 30 turns | +~350ms |
+| ElevenLabs ConvAI | 1807ms (p95 2069) | 1838ms | **2** / 30 turns | +353ms |
+
+The headline column inverts against the interruption column: the two fastest rows talk over
+the hesitating user on **40–53% of turns**, the three slowest on 0–7%. That's the tradeoff
+this scenario exists to price — neither number alone ranks these systems.
+
+### Notes per configuration
+
+- **voiceloop (both TTS)** — Deepgram flux's turn model holds through the pauses: 2 and 0
+  premature entries in 30 turns each. The price is honest and visible: EOT delay grows from
+  366ms (smalltalk) to ~1210ms — flux waits out the hesitation before committing. First
+  content word ≈ voice→voice (no filler strategy in play).
+- **Pipecat** — `LocalSmartTurnAnalyzerV3` commits mid-pause on over half the turns: 16
+  user-interruptions, and 23 audio-truth self-cut events — the typical shape is: agent enters
+  the pause, user resumes, VAD cuts the nascent reply, the reply re-fires after the real end
+  of turn. v→v 1288ms looks fast, but first content word is 1815ms — the early entries mostly
+  delivered audio that then got cut, not content.
+- **OpenAI Realtime** — default `server_vad` (200ms silence) treats most scripted pauses as
+  end of turn: 12 user-interruptions and 29 false barge-ins (its own premature replies being
+  cut when the person resumes — same reflex as its fast barge-in stop). Like Pipecat, quick
+  first audio, then re-starts: content word p95 3352ms.
+- **ConvAI** — `turn_v3` (normal eagerness) behaves like voiceloop: 2 premature entries,
+  pauses absorbed. It pays with the highest v→v (1807ms; +353 vs its smalltalk 1454). One
+  quirk required a rig fix, disclosed below.
+
+### Caveats
+
+- **Mock-LLM phantom-turn guard (affects ConvAI only)**: ConvAI's `turn_timeout` (7s default)
+  can commit an *empty* user turn (`"…"`) during pre-conversation silence; counting it shifted
+  the script by one for the whole run (the agent then answers turn k with response k+1 — and
+  turn-final "I have nothing scripted"). The mock LLM now ignores empty/`...` user messages
+  when selecting the scripted response (`bench/server.js`), a request-normalization change
+  identical in spirit to the Pipecat merge fix; no timing behavior changed. The other SUTs
+  never produce phantom turns, so their rows are unaffected.
+- Sub-metric columns (EOT, STT partial, TTS first audio) exist only for voiceloop
+  (instrumented); ConvAI/Realtime/Pipecat rows are audio-truth only, as in smalltalk.
+- Realtime brain caveat as in smalltalk (own model, script pinned via instructions). On this
+  scenario it stayed on script; its premature entries usually restart with the correct
+  scripted line after the person finishes.
+- No scripted barge-ins in this scenario, so the barge-in stop column doesn't apply.
+
 ## Scenario: echo (smalltalk + speaker→mic coupling, −15dB / 30ms)
 
 The driver mixes the agent's own speaker output back into the mic (software tap on
