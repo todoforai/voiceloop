@@ -164,7 +164,7 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
 - **TODOforAI shared-voice** — NOT a competitor: our own product's shipped voice agent
   (`todoforai/packages/shared-voice`), benchmarked via a thin SUT page + `/llm` wire shim
   (`packages/shared-voice/bench/`). It no longer carries a fork of this library: it consumes
-  published voiceloop 0.1.7 and adds only the JARVIS persona, LLM adapter and todo tools, so
+  published voiceloop 0.1.8 and adds only the JARVIS persona, LLM adapter and todo tools, so
   these rows now measure *integration overhead*, not a second implementation.
 
   **All four rows re-measured on 0.1.6.** The previous 2241/1801ms pair was taken on 0.1.5,
@@ -197,10 +197,17 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   wait inside. Flux ends turns semantically, a median **21ms** behind its own last interim
   (webspeech leaves ~1.2s), so the timer never fired and every flux turn paid full LLM TTFT.
   Providers now declare their own `prefetchMs` (flux: 0). Prefetch adoption goes 9/12 → 30/30
-  and deepgram + EL flash drops **1006 → 840ms** (three runs: 827/814/861), now *below*
-  voiceloop's own 984ms because the fix ships in 0.1.7 and lifts that row too when re-measured.
+  and deepgram + EL flash drops **1006 → ~820ms** (four runs: 827/814/861/808), now *below*
+  voiceloop's own 984ms because the fix ships in 0.1.8 and lifts that row too when re-measured.
   Webspeech is unchanged (1808ms, within jitter of 1945) — it keeps the 200ms wait, since
   speculating on its every interim tick would burn requests for no gain.
+
+  Speculating on the interim tick costs requests, so we counted them at the bench server rather
+  than reasoning about it: **7.7 LLM requests per turn, against 7.25 before the change** (2 runs,
+  12 turns). Flux revises its interim often and each revision already replaced the running
+  speculation; removing the wait adds ~6%, not a new order of magnitude. Only one request is ever
+  live (each revision aborts its predecessor), but they are billed for the prompt they sent, so a
+  metered LLM pays roughly turn-count × revisions in input tokens either way.
 
   Caveat on the per-stage column: the `TTS first audio` metric is measured from the LLM's
   first token, so it absorbs LLM streaming time and reads high (1294ms) for webspeech+EL even
