@@ -181,7 +181,7 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   | webspeech + EL flash | 1561 | 179 | 1749 |
   | deepgram + Piper | 416 | 801 | 1246 |
   | deepgram + EL flash | 346 | 693 | 1006 |
-  | deepgram + EL flash, 0.1.7 | 408 | 431 | **840** |
+  | deepgram + EL flash, 0.1.8 | 292 | 419 | **808** |
 
   Deepgram buys the EOT (~1.2s: Chrome's endpointer, not our code — voiceloop measures the
   same 1565ms on the same browser STT). EL flash buys the synthesis. Only both together reach
