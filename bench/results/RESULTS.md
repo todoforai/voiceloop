@@ -10,6 +10,14 @@ Method details: [`bench/README.md`](../README.md) · harness: [`bench/blackbox/`
 **Single runs lie** (±300ms network/WASM jitter — we watched it flip conclusions), so every
 configuration is 5 conversations × 6 turns, pooled (n=30 turns; barge-in n=10).
 
+**Headline**: three scenarios so far — clean ([smalltalk](#scenario-smalltalk-6-turns-2-barge-ins-fixed-mock-llm)),
+hesitating user ([hesitation](#scenario-hesitation-pauses-and-false-completions-mid-utterance)), and acoustic echo
+([echo](#scenario-echo-smalltalk--speakermic-coupling-15db--30ms)). Speed rankings barely move
+between clean and echo — **what changes is who survives**: with the agent's own voice fed back
+into the mic, Pipecat and OpenAI Realtime cut their own replies mid-sentence on 17–20 of 30
+turns, while voiceloop runs clean at 931ms. Fast is table stakes; not talking over yourself —
+or the user's mid-sentence pause — is the actual test.
+
 ## Scenario: smalltalk (6 turns, 2 barge-ins, fixed mock LLM)
 
 All systems get the **same brain**: a mock LLM with fixed responses, 300ms TTFT, 300 chars/s —
@@ -131,6 +139,26 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
   layer. Directionally: no external LLM hop helps it; producing tokens with a real model
   instead of a 300ms mock hurts it. Treat its numbers as "the product as shipped", not as a
   pipeline comparison.
+
+## Scenario: hesitation (pauses and false completions mid-utterance)
+
+Same rig, harder user: 6 booking turns where the "person" pauses 450–900ms **mid-sentence**
+("I'd like a table for… …four people") and uses false-completion phrasings that sound finished
+but aren't. This prices the aggressive-endpointing lever: a stack tuned for minimum EOT delay
+answers the half-sentence and talks over the user. Two metrics expose it — **user-interrupted**
+(agent starts a reply inside a still-open user turn) and **first content word** (filler-word
+head starts don't count).
+
+| config | voice→voice | p95 | user-interrupted | stalls |
+|---|---|---|---|---|
+| voiceloop deepgram + EL flash | 1396ms | 1709 | 2 / 30 | 33 |
+| voiceloop deepgram + Piper | 1400ms | 2006 | 0 / 30 | 43 |
+
+Read against smalltalk (984ms): hesitation costs voiceloop ~400ms of v→v — that's the price of
+waiting out the pause instead of answering the fragment. It only interrupted the user 2 times
+in 60 turns across both configs. A stack could buy the 400ms back by endpointing harder; the
+user-interrupted column is where that would show. Competitor rows (ConvAI / Pipecat / Realtime)
+pending rig time.
 
 ## Scenario: echo (smalltalk + speaker→mic coupling, −15dB / 30ms)
 

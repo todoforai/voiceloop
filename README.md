@@ -5,7 +5,7 @@
 A zero-dependency JavaScript library that runs the full voice loop — **VAD → STT → LLM → TTS** — with the hard parts already solved:
 
 - **Real barge-in** — interrupt the agent mid-sentence. Triggers on *transcribed novel words*, not raw mic energy, so the agent's own voice leaking into the mic never cuts it off.
-- **Self-echo filtering** — a word-match filter compares what the mic hears against what the agent is currently saying. Works even when browser echo cancellation is weak.
+- **Self-echo filtering** — a word-match filter compares what the mic hears against what the agent is currently saying. Benchmarked under real speaker→mic coupling with echo cancellation fully off: 0 self-interruptions in 30 turns, at full speed — while Pipecat (default config) cut its own reply on 20/30 turns and OpenAI Realtime on 17/30 ([echo results](bench/results/RESULTS.md#scenario-echo-smalltalk--speakermic-coupling-15db--30ms)).
 - **First-sentence streaming TTS** — the LLM streams text, TTS synthesizes the first sentence *while the rest is still generating*, then stays one sentence ahead. First audio in well under a second.
 - **Speculative prefetch** — the LLM call starts while you're still finishing your sentence, overlapping model latency with the end-of-turn pause. Replies feel instant.
 - **Tap-to-seek** — playback keeps a tape of synthesized clips; tap anywhere in the transcript to jump the voice there, backward or forward.
@@ -65,13 +65,19 @@ first audio ────────┘  next sentences pre-synthesized during p
 integration — that scores voiceloop and competing agent stacks on the same scripted
 conversation and the same fixed mock LLM. Pooled 5-run medians:
 
-| system | voice→voice | p95 |
-|---|---|---|
-| OpenAI Realtime (speech-to-speech, own LLM — not comparable brain)* | 866ms | 1644 |
-| **voiceloop** (deepgram + ElevenLabs flash TTS) | **984ms** | **1169** |
-| **voiceloop** (deepgram + Piper, free local TTS) | **~1050ms** | 1306 |
-| Pipecat 1.8.1 (same deepgram + EL flash providers) | 1046ms | 3573 |
-| ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 |
+| system | voice→voice | p95 | with speaker→mic echo: v→v / self-interruptions |
+|---|---|---|---|
+| OpenAI Realtime (speech-to-speech, own LLM — not comparable brain)* | 866ms | 1644 | 793ms / **17**·30 turns, 289 echo words in transcript |
+| **voiceloop** (deepgram + ElevenLabs flash TTS) | **984ms** | **1169** | **931ms / 0** |
+| **voiceloop** (deepgram + Piper, free local TTS) | **~1050ms** | 1306 | — |
+| Pipecat 1.8.1 (same deepgram + EL flash providers) | 1046ms | 3573 | 1317ms / **20**·30 turns |
+| ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1408ms / 0 |
+
+The echo column is the differentiator: mix the agent's own voice back into the mic (laptop
+speaker/mic, no echo cancellation) and the energy-VAD stacks audibly cut their own replies
+mid-sentence — only voiceloop's word-level echo filter and ConvAI's server-side suppression
+survive, and **voiceloop is the only survivor under 1.2s**, running at full speed with echo
+present (931 vs 984ms clean: echo defense costs nothing).
 
 \* Realtime can't use the bench's fixed mock LLM (it *is* the LLM), and its per-run medians
 spanned 628–1368ms — fast but the noisiest of any system; voiceloop has the tightest p95.
