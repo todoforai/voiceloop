@@ -96,6 +96,8 @@ export const TUNING = {
   // (instant first token); a changed text just aborts it (cost: a few prompt tokens). Must be
   // comfortably below WEBSPEECH_EOT_MS for the overlap to pay. 0 = prefetch on every interim tick
   // (most aggressive, most wasted calls).
+  // Providers whose end-of-turn leaves no room for this wait override it with their own
+  // `prefetchMs` (deepgram flux: 0 — see stt.js).
   PREFETCH_MS: 200,
 
   // Audio chunks (~256ms each at 16kHz/4096-sample frames; ~1s total at 4) kept BEFORE VAD fires and

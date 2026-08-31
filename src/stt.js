@@ -568,6 +568,10 @@ export function makeDeepgramSTT(opts) {
   return {
     continuous: true,   // agent feeds the full mic stream (Flux needs real silences for its EOT model)
     nativeEOT: true,    // agent skips VAD-commit; EndOfTurn → unsolicited onFinal closes the turn
+    // Flux ends turns SEMANTICALLY, right behind its own last interim (21ms median, measured) —
+    // there is no trailing-silence debounce to hide a stability wait in, so the default 200ms timer
+    // never fires and every turn pays full LLM TTFT. Speculate on the interim tick instead.
+    prefetchMs: 0,
     open() { if (!isClosed() && (!ws || ws.readyState >= 2)) open(); },
     feed(i16) {
       if (!isClosed() && (!ws || ws.readyState >= 2)) open();

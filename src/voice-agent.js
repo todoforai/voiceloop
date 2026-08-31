@@ -314,10 +314,18 @@ export class VoiceAgent {
         // stable for PREFETCH_MS (no new words), start generating NOW with the probable final text;
         // if the turn closes with that exact text the reply streams instantly (see _takePrefetch),
         // if the user kept talking the stale request is aborted (cost: a few prompt tokens).
+        // The stability wait must fit INSIDE the gap between the last interim and the commit, or the
+        // timer never fires and the turn pays the LLM's full TTFT — silently, since a speculation
+        // that never STARTED looks identical to one that was never worth starting. Providers that
+        // debounce leave room for it (webspeech: ~1.2s of trailing silence, measured); a model that
+        // decides end-of-turn semantically does not (deepgram flux: 21ms median, measured) and must
+        // speculate on the interim tick instead. Providers set `prefetchMs` when 200ms won't land.
         clearTimeout(this._prefetchTimer); this._prefetchTimer = null;
         if (this._prefetch && interim && this._prefetch.text !== interim) this._dropPrefetch();   // transcript moved on → the running speculation is stale, stop paying for it
-        if (interim && this.state === 'listening' && !this._held && !this._echoRef)
-          this._prefetchTimer = setTimeout(() => this._startPrefetch(interim), TUNING.PREFETCH_MS ?? 200);
+        if (interim && this.state === 'listening' && !this._held && !this._echoRef) {
+          const delay = this.stt.prefetchMs ?? TUNING.PREFETCH_MS ?? 200;
+          this._prefetchTimer = setTimeout(() => this._startPrefetch(interim), delay);
+        }
       },
       onFinal:   (text, ms) => {
         clearTimeout(this._prefetchTimer); this._prefetchTimer = null;   // the turn is closing — no new speculation may start behind it
@@ -835,7 +843,16 @@ export class VoiceAgent {
   _takePrefetch(text) {
     const p = this._prefetch;
     // histLen is checked BEFORE _runTurn pushes this turn's own user message (see call site).
-    if (!p || p.text !== text || p.ctl.signal.aborted || p.histLen !== this.history.length) { this._dropPrefetch(); return null; }
+    if (!p || p.text !== text || p.ctl.signal.aborted || p.histLen !== this.history.length) {
+      // Which guard rejected: adoption is worth ~600ms (the whole LLM TTFT lands on the critical
+      // path without it), so a silent miss is invisible latency. `text` mismatch is the expected
+      // one (the user kept talking); the others mean the speculation was raced or aborted.
+      this.onEvent?.({ type: 'diag', diag: 'prefetch-miss',
+        why: !p ? 'none' : p.text !== text ? 'text' : p.ctl.signal.aborted ? 'aborted' : 'histLen',
+        text, pre: p?.text });
+      this._dropPrefetch(); return null;
+    }
+    this.onEvent?.({ type: 'diag', diag: 'prefetch-hit', text });
     this._prefetch = null;   // timer already cleared: successful adoption is only reached from a spoken onFinal
     p.commit();              // turn committed → open the tool gate; held-back tool calls execute now
     return { ctl: p.ctl, gen: (async function* () { const f = await p.first; if (!f.done) { yield f.value; yield* p.gen; } })() };

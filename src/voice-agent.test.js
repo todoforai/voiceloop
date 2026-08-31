@@ -667,6 +667,55 @@ test('PREFETCH: stop() aborts an in-flight speculation', () =>
     assert.equal(agent._prefetch, null);
   }));
 
+// Deepgram flux commits a median 21ms after its own last interim (semantic end-of-turn, no trailing
+// silence to wait through), so the default 200ms stability timer never fired before the turn closed
+// and every turn paid the LLM's full TTFT (~600ms measured on the black-box rig) — silently, since a
+// speculation that never STARTED is indistinguishable from one that was never worth starting.
+// The provider opts out of the wait via `prefetchMs: 0`; webspeech keeps the default (it has a
+// ~1.2s debounce, and speculating on its every interim tick would just burn requests).
+test('PREFETCH: a provider with prefetchMs:0 speculates on the interim tick', async () => {
+  const { STT_PROVIDERS } = await import('./stt.js');
+  const orig = STT_PROVIDERS.elevenlabs;
+  let cbs;
+  STT_PROVIDERS.elevenlabs = (opts) => { cbs = opts; return { open() {}, feed() {}, commit() {}, close() {}, reset() {}, nativeEOT: true, prefetchMs: 0 }; };
+  try {
+    const { llm, calls } = makeTrackedLLM();
+    const { agent } = makeAgent({ llm, opts: { sttProvider: 'elevenlabs' } });
+    agent._set('listening');
+    cbs.onPartial('what is the weather', 100);
+    await new Promise((r) => setTimeout(r, 0));          // one macrotask: a 0ms timer, not 200ms
+    assert.equal(calls.length, 1, 'speculation started on the interim tick');
+    cbs.onFinal('what is the weather', 120);             // flux commits right behind its last interim
+    for (let i = 0; i < 20; i++) await settle();
+    assert.equal(calls.length, 1, 'adopted the running speculation — no second llm call');
+    assert.ok(!calls[0].signal.aborted);
+    agent.destroy?.();
+  } finally { STT_PROVIDERS.elevenlabs = orig; }
+});
+
+// The counterpart guard: webspeech is ALSO nativeEOT, so keying the 0ms wait off that flag silently
+// moved the shipped default to speculating on every interim tick. It has a ~1.2s debounce and must
+// keep waiting for the transcript to settle — otherwise each turn fires (and aborts) a request per
+// interim, for no latency gain.
+test('PREFETCH: a provider without prefetchMs keeps the default stability wait', async () => {
+  const { STT_PROVIDERS } = await import('./stt.js');
+  const orig = STT_PROVIDERS.elevenlabs;
+  let cbs;
+  STT_PROVIDERS.elevenlabs = (opts) => { cbs = opts; return { open() {}, feed() {}, commit() {}, close() {}, reset() {}, nativeEOT: true }; };
+  try {
+    const { llm, calls } = makeTrackedLLM();
+    const { agent } = makeAgent({ llm, opts: { sttProvider: 'elevenlabs' } });
+    agent._set('listening');
+    cbs.onPartial('what is the', 100);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(calls.length, 0, 'still waiting for the interim to go stable');
+    cbs.onPartial('what is the weather', 150);           // kept talking → the wait restarts
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(calls.length, 0, 'no request burned per interim tick');
+    agent.destroy?.();
+  } finally { STT_PROVIDERS.elevenlabs = orig; }
+});
+
 // ── [TOOL CALL] mimicry filter ──────────────────────────────────────────────────────────────────
 // The model sometimes TYPES a `[TOOL CALL name] {...}` ledger line into its reply instead of
 // calling the tool natively (it learned the format from its own history). The stream filter must
