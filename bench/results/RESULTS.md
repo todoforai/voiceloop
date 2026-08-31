@@ -21,21 +21,25 @@ talked over the user (hesitation) / cut its own reply (echo), out of 30 turns.
 | OpenAI Realtime * | 870ms | 1290ms | 12/30 | 790ms | **17/30** |
 | **voiceloop** · deepgram + EL flash | 980ms | 1400ms | **2/30** | 930ms | **0** |
 | **voiceloop** · deepgram + Piper (free, local) | 970ms | 1400ms | **0/30** | — | — |
-| Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 16/30 | 1320ms | **20/30** |
+| Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 12/30 | 1320ms | **20/30** |
 | ElevenLabs ConvAI | 1450ms | 1810ms | 2/30 | 1410ms | 0 |
 
-Speed rankings barely move across scenarios — **what changes is who misbehaves**. The two
-fastest rows keep their speed by talking over a hesitating user on 40–53% of turns and by
+"Talked over user" counts turns where agent audio started while the user was mid-turn
+(Pipecat additionally re-entered some of those turns twice: 16 premature starts on its 12
+turns). Speed rankings barely move across scenarios — **what changes is who misbehaves**. The
+two fastest rows keep their speed by talking over a hesitating user on 40% of turns and by
 cutting their own replies under echo. voiceloop is the only system in both the fastest and
 the well-behaved group. Fast is table stakes; not talking over the user — or yourself — is
 the actual test. Full per-scenario tables below.
 
-\* speech-to-speech, its own LLM — the others share a fixed mock LLM (see caveats).
+\* speech-to-speech, its own LLM — every cascade system shares the fixed mock LLM; Realtime
+is the disclosed exception (see caveats).
 
 ## Scenario: smalltalk (6 turns, 2 barge-ins, fixed mock LLM)
 
-All systems get the **same brain**: a mock LLM with fixed responses, 300ms TTFT, 300 chars/s —
-so the numbers measure the voice pipeline, not the language model.
+Every cascade system gets the **same brain**: a mock LLM with fixed responses, 300ms TTFT,
+300 chars/s — so the numbers measure the voice pipeline, not the language model. OpenAI
+Realtime is the disclosed exception (speech-to-speech, its own model).
 
 | configuration | voice→voice median | p95 | barge-in stop | stalls |
 |---|---|---|---|---|
@@ -169,8 +173,9 @@ for four", "Send the confirmation to my email. … Actually, make that a text me
 
 Two new columns (policy: fast-and-eager is *allowed* — these make its cost visible):
 
-- **user-interrupted** = agent audio starting inside a person's still-open turn (a pause is an
-  open turn). The inverse of barge-in: the agent talking over the user.
+- **user-interrupted** = turns where agent audio started inside the person's still-open turn
+  (a pause is an open turn); premature-start events shown in parentheses when a turn was
+  entered more than once. The inverse of barge-in: the agent talking over the user.
 - **first content word** = first agent word matching the scripted response (whisper word
   timestamps on the recorded audio), so a filler head start reads as "fast audio, slower
   content" instead of silently winning voice→voice.
@@ -178,13 +183,13 @@ Two new columns (policy: fast-and-eager is *allowed* — these make its cost vis
 | configuration | voice→voice | first content word | user-interrupted | vs smalltalk v→v |
 |---|---|---|---|---|
 | OpenAI Realtime (gpt-realtime) * | 1285ms (p95 1686) | 1325ms | **12** / 30 turns | +419ms |
-| Pipecat 1.8.1 · deepgram + EL flash | 1288ms (p95 1860) | 1815ms | **16** / 30 turns | +242ms |
+| Pipecat 1.8.1 · deepgram + EL flash | 1288ms (p95 1860) | 1815ms | **12** / 30 turns (16 starts) | +242ms |
 | **voiceloop** · deepgram + EL flash | 1396ms (p95 1709) | 1457ms | **2** / 30 turns | +412ms |
 | **voiceloop** · deepgram + Piper | 1400ms (p95 2006) | 1400ms | **0** / 30 turns | +~350ms |
 | ElevenLabs ConvAI | 1807ms (p95 2069) | 1838ms | **2** / 30 turns | +353ms |
 
 The headline column inverts against the interruption column: the two fastest rows talk over
-the hesitating user on **40–53% of turns**, the three slowest on 0–7%. That's the tradeoff
+the hesitating user on **40% of turns**, the three slowest on 0–7%. That's the tradeoff
 this scenario exists to price — neither number alone ranks these systems.
 
 ### Notes per configuration
@@ -193,8 +198,8 @@ this scenario exists to price — neither number alone ranks these systems.
   premature entries in 30 turns each. The price is honest and visible: EOT delay grows from
   366ms (smalltalk) to ~1210ms — flux waits out the hesitation before committing. First
   content word ≈ voice→voice (no filler strategy in play).
-- **Pipecat** — `LocalSmartTurnAnalyzerV3` commits mid-pause on over half the turns: 16
-  user-interruptions, and 23 audio-truth self-cut events — the typical shape is: agent enters
+- **Pipecat** — `LocalSmartTurnAnalyzerV3` commits mid-pause on 12 of 30 turns (16 premature
+  starts), and 23 audio-truth self-cut events — the typical shape is: agent enters
   the pause, user resumes, VAD cuts the nascent reply, the reply re-fires after the real end
   of turn. v→v 1288ms looks fast, but first content word is 1815ms — the early entries mostly
   delivered audio that then got cut, not content.
@@ -245,9 +250,10 @@ window). echo words = response-script words appearing in the SUT's *user* transc
   (STT text fuzzy-matched against the audible reply prefix) had never faced real coupling.
   It initially failed in three ways, all fixed in `src/voice-agent.js` (see notes below):
   final result **0 self-interruptions, 0 false barge-ins, v→v at parity with clean smalltalk**
-  (931 vs 984ms — echo handling costs no latency once the filter classifies correctly). The 14
-  residual echo words are *dropped* turns correctly classified as echo (30 echo drops), not
-  answered.
+  (931 vs 984ms — echo handling costs no latency once the filter classifies correctly). The
+  filter's 30 echo drops caught the echoed replies; 14 stray reply words still reached
+  committed user-side transcripts (~3 per run) without consequence — no false turn, no
+  self-interruption resulted.
 - **Pipecat** — default config self-interrupts on 20 of 30 turns: its energy-VAD
   `interrupt_response` hears the agent's own voice as the user and cuts the reply; with the
   reply swallowed the script shifts and parts of runs derail. No echo filtering in the default

@@ -28,8 +28,9 @@ checklist) is in [`ADDING_A_SUT.md`](ADDING_A_SUT.md) — integration is just "l
 
 ## What we measure
 
-One scripted conversation, five times, all turns pooled (median + p95, n=30). Every number
-comes from the recorded audio; a row only gets internal sub-metrics if the SUT is instrumented.
+One scripted conversation, five times, all turns pooled (median + p95, n=30). Headline timing
+and behavior come from the recorded audio; the internal splits (EOT, STT partial, TTS first
+audio) only exist for instrumented SUTs and explain the audio-truth numbers, never replace them.
 
 **Latency** (ms, lower is better)
 
@@ -46,12 +47,12 @@ comes from the recorded audio; a row only gets internal sub-metrics if the SUT i
 
 | number | meaning |
 |---|---|
-| **user-interrupted** | agent started talking while the user was mid-turn (e.g. during a pause). |
-| **self-interruptions** | agent cut its own reply with nobody talking (hearing itself as the user). |
+| **user-interrupted** | turns where the agent started talking while the user was mid-turn (e.g. during a pause). |
+| **self-interruptions** | agent cut its own reply with nobody talking, or delivered <80% of it (hearing itself as the user). |
 | false barge-ins | agent stopped for something that wasn't the user interrupting. |
-| stalls | ≥250ms silent gap inside one reply. |
+| stalls | >250ms silent gap inside one reply. |
 | echo words | agent's own words leaking into its *user* transcript. |
-| WER / spoken ratio | transcript accuracy / fraction of the reply actually delivered. |
+| WER / spoken ratio | transcript error rate / fraction of the reply actually delivered (uninterrupted replies only). |
 
 Latency and behavior must be read together: several stacks buy their speed by talking over
 users (hesitation scenario) or cutting themselves (echo scenario). Neither column alone ranks
