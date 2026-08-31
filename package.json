@@ -1,6 +1,6 @@
 {
   "name": "@todoforai/voiceloop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Fast, interruptible browser voice agent: VAD → STT → LLM → TTS with real barge-in, echo filtering, streaming first-sentence TTS and tap-to-seek. Zero runtime dependencies.",
   "type": "module",
   "main": "src/index.js",
@@ -37,6 +37,10 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/todoforai/voiceloop.git"
+  },
+  "homepage": "https://github.com/todoforai/voiceloop#readme",
+  "bugs": {
+    "url": "https://github.com/todoforai/voiceloop/issues"
   },
   "license": "MIT",
   "engines": {

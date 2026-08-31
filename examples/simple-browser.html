@@ -1,7 +1,9 @@
 <!doctype html>
 <!-- voiceloop minimal example: mic → agent → speaker. No bundler, no framework.
-     Serve the repo root (e.g. `npx serve` or `python3 -m http.server`) and open
-     /examples/simple-browser.html — file:// won't work (mic + module imports need http). -->
+     Serve the package root and open /examples/simple-browser.html:
+       from a clone:  npx serve .
+       from npm:      npx serve node_modules/@todoforai/voiceloop
+     file:// won't work — mic + module imports need http://localhost or https. -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />

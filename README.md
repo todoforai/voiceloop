@@ -65,7 +65,7 @@ first audio ────────┘  next sentences pre-synthesized during p
 ```
 
 **Measured, not claimed**: [voice-agent-bench](https://github.com/todoforai/voice-agent-bench)
-(developed here at [`bench/`](bench/)) is a black-box rig — audio in → audio out, zero
+(developed here at `bench/`, split to its own repo) is a black-box rig — audio in → audio out, zero
 integration — that scores voiceloop and competing stacks on the same scripted conversations
 and the same fixed mock LLM. Reply latency (voice→voice median), and how often the system
 misbehaves — talks over a hesitating user, or cuts its own reply when its voice echoes back
@@ -89,7 +89,7 @@ clean).
 \* Realtime is speech-to-speech — it can't use the bench's fixed mock LLM, so its row isn't
 fully apples-to-apples.
 
-Full tables, method and reproduction steps: [`bench/results/RESULTS.md`](bench/results/RESULTS.md).
+Full tables, method and reproduction steps: [`results/RESULTS.md`](https://github.com/todoforai/voice-agent-bench/blob/master/results/RESULTS.md).
 
 ## STT providers
 
