@@ -24,6 +24,11 @@
 //                      pipeline for it — start() just opens the provider. Implies nativeEOT (the
 //                      provider closes its own turns via unsolicited onFinal). It exposes open()/
 //                      close() + setEnabled() (mute), and drives barge-in the normal way via onPartial.
+//   prefetchMs: <ms>   how long the agent waits for this provider's interim to go STABLE before
+//                      speculating on the LLM (default TUNING.PREFETCH_MS, 200). It only pays if
+//                      the provider leaves that much room between its last interim and the turn
+//                      close; set 0 when it doesn't (Flux ends turns semantically, ~21ms behind).
+//                      Lower = fewer missed speculations, more started-then-aborted requests.
 //
 // Adding a provider = write a factory + register it in STT_PROVIDERS below. The VoiceAgent owns
 // the mic + VAD and just forwards feed/commit/close, so providers never touch audio capture.

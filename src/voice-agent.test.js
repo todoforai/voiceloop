@@ -693,6 +693,30 @@ test('PREFETCH: a provider with prefetchMs:0 speculates on the interim tick', as
   } finally { STT_PROVIDERS.elevenlabs = orig; }
 });
 
+// Zero-delay speculation replaces rather than accumulates: each changed interim must abort the one
+// it supersedes, so a turn holds at most ONE live request no matter how many revisions arrive. A
+// retraction to '' counts as a change (an `interim &&` guard here used to leave that one running).
+test('PREFETCH: churn at prefetchMs:0 keeps exactly one live speculation', async () => {
+  const { STT_PROVIDERS } = await import('./stt.js');
+  const orig = STT_PROVIDERS.elevenlabs;
+  let cbs;
+  STT_PROVIDERS.elevenlabs = (opts) => { cbs = opts; return { open() {}, feed() {}, commit() {}, close() {}, reset() {}, nativeEOT: true, prefetchMs: 0 }; };
+  try {
+    const { llm, calls } = makeTrackedLLM();
+    const { agent } = makeAgent({ llm, opts: { sttProvider: 'elevenlabs' } });
+    agent._set('listening');
+    for (const t of ['what', 'what is', 'what is the', 'what is the weather']) { cbs.onPartial(t, 100); await settle(); }
+    assert.equal(calls.length, 4, 'one speculation per revision');
+    assert.deepEqual(calls.slice(0, 3).map((c) => c.signal.aborted), [true, true, true], 'each superseded request was aborted');
+    assert.equal(calls[3].signal.aborted, false, 'exactly one still live');
+    cbs.onPartial('', 150);                              // retraction: the speculation is now stale too
+    await settle();
+    assert.equal(calls[3].signal.aborted, true, 'retraction to empty drops the running speculation');
+    assert.equal(agent._prefetch, null);
+    agent.destroy?.();
+  } finally { STT_PROVIDERS.elevenlabs = orig; }
+});
+
 // The counterpart guard: webspeech is ALSO nativeEOT, so keying the 0ms wait off that flag silently
 // moved the shipped default to speculating on every interim tick. It has a ~1.2s debounce and must
 // keep waiting for the transcript to settle — otherwise each turn fires (and aborts) a request per

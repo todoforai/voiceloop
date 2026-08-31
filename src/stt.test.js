@@ -504,6 +504,9 @@ test('deepgram: declares continuous + nativeEOT and authenticates via bearer sub
   const { stt, ws } = await makeDG();
   assert.equal(stt.continuous, true);
   assert.equal(stt.nativeEOT, true);
+  // Flux commits ~21ms behind its own last interim, so the agent's default 200ms stability wait
+  // would never fire and every turn would pay full LLM TTFT (measured ~170ms of v→v).
+  assert.equal(stt.prefetchMs, 0, 'no trailing silence to wait inside → speculate on the interim tick');
   assert.ok(ws().url.includes('model=flux-general-en'), 'model in URL');
   assert.deepEqual(ws().protocols, ['bearer', 'tok'], 'short-TTL token via subprotocol');
 }));
@@ -594,6 +597,9 @@ test('webspeech: is selfCapture + nativeEOT (agent builds no pipeline, runs no V
   const { stt } = makeWS();
   assert.equal(stt.selfCapture, true, 'owns its mic → the agent forwards no PCM');
   assert.equal(stt.nativeEOT, true, 'owns its end-of-turn → the agent runs no VAD-commit');
+  // nativeEOT does NOT imply flux's tight commit: webspeech leaves ~1.2s of trailing silence, so it
+  // keeps the default stability wait rather than speculating on every interim tick.
+  assert.equal(stt.prefetchMs, undefined, 'keeps TUNING.PREFETCH_MS');
   assert.equal(typeof stt.feed, 'undefined', 'no feed(): the agent never hands it audio');
   assert.equal(typeof stt.commit, 'undefined', 'no commit(): the agent never closes its turns');
 }));

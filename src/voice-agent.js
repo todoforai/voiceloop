@@ -321,10 +321,13 @@ export class VoiceAgent {
         // decides end-of-turn semantically does not (deepgram flux: 21ms median, measured) and must
         // speculate on the interim tick instead. Providers set `prefetchMs` when 200ms won't land.
         clearTimeout(this._prefetchTimer); this._prefetchTimer = null;
-        if (this._prefetch && interim && this._prefetch.text !== interim) this._dropPrefetch();   // transcript moved on → the running speculation is stale, stop paying for it
+        if (this._prefetch && this._prefetch.text !== interim) this._dropPrefetch();   // transcript moved on (a RETRACTION to '' included) → the running speculation is stale, stop paying for it
         if (interim && this.state === 'listening' && !this._held && !this._echoRef) {
           const delay = this.stt.prefetchMs ?? TUNING.PREFETCH_MS ?? 200;
-          this._prefetchTimer = setTimeout(() => this._startPrefetch(interim), delay);
+          // 0 means "this tick": a timer would hand the turn's own onFinal a chance to land first
+          // (it clears the timer), which is exactly the miss this flag exists to avoid.
+          if (delay > 0) this._prefetchTimer = setTimeout(() => this._startPrefetch(interim), delay);
+          else this._startPrefetch(interim);
         }
       },
       onFinal:   (text, ms) => {
@@ -845,14 +848,16 @@ export class VoiceAgent {
     // histLen is checked BEFORE _runTurn pushes this turn's own user message (see call site).
     if (!p || p.text !== text || p.ctl.signal.aborted || p.histLen !== this.history.length) {
       // Which guard rejected: adoption is worth ~600ms (the whole LLM TTFT lands on the critical
-      // path without it), so a silent miss is invisible latency. `text` mismatch is the expected
-      // one (the user kept talking); the others mean the speculation was raced or aborted.
+      // path without it), so a silent miss is invisible latency. `none` = no speculation was even
+      // running (it never started, or the turn beat it); `text` = the user kept talking, the
+      // expected one; `aborted`/`histLen` = it was raced. Lengths, not transcripts: diag is a
+      // telemetry channel and tends to get logged and kept, so it carries no speech content.
       this.onEvent?.({ type: 'diag', diag: 'prefetch-miss',
         why: !p ? 'none' : p.text !== text ? 'text' : p.ctl.signal.aborted ? 'aborted' : 'histLen',
-        text, pre: p?.text });
+        len: text.length, preLen: p?.text.length });
       this._dropPrefetch(); return null;
     }
-    this.onEvent?.({ type: 'diag', diag: 'prefetch-hit', text });
+    this.onEvent?.({ type: 'diag', diag: 'prefetch-hit', len: text.length });
     this._prefetch = null;   // timer already cleared: successful adoption is only reached from a spoken onFinal
     p.commit();              // turn committed → open the tool gate; held-back tool calls execute now
     return { ctl: p.ctl, gen: (async function* () { const f = await p.first; if (!f.done) { yield f.value; yield* p.gen; } })() };
