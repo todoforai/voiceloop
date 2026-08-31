@@ -116,8 +116,9 @@ The default adapter speaks OpenAI's streaming wire format (OpenAI, Groq, Cerebra
 
 ```js
 const agent = new VoiceAgent({
-  llm: async function* (history, system, signal) {
+  llm: async function* (history, system, signal, { toolGate } = {}) {
     // history: [{ role: 'user'|'assistant', content }], system: composed persona+context
+    // toolGate: only for adapters that run tools themselves — see below; ignore it otherwise
     for await (const delta of myProvider.stream({ history, system, signal })) {
       yield { text: delta };                        // speech text → streamed into TTS
       // yield { tool: 'name', args: {...} };       // tool call → fired during playback
@@ -143,6 +144,27 @@ const agent = new VoiceAgent({
 
 Tool calls execute while the agent is still talking. Results are recorded in a per-turn ledger so the model never re-fires the same call, and `agent.notify('[TOOL RESULT get_weather] 22°C sunny')` relays an async outcome back for a spoken follow-up — bursts of results collapse into one reply instead of three interrupting monologues.
 
+Tools are **dispatched, not awaited**: the turn completes when the agent stops speaking, whatever the tool is still doing. A slow or hung tool can never stall the conversation, and a tool is free to `await agent.notify(...)` with its own result. Long work belongs in a tool that returns promptly ("checking that now") and delivers the outcome later via `notify()`.
+
+### Adapters that run tools themselves
+
+Some adapters (agent loops) execute tools **inside** the generator, feeding results back to the model so it keeps talking with the answer in hand — all within one turn. Declare two flags so voiceloop adapts:
+
+```js
+async function* myAgentLoop(history, system, signal, { toolGate } = {}) {
+  for await (const ev of loop({ history, system, signal, beforeToolCall: () => toolGate })) {
+    if (ev.type === 'text')       yield { text: ev.delta };
+    if (ev.type === 'tool_start') yield { tool: ev.name, id: ev.id, args: ev.args, running: true };
+    if (ev.type === 'tool_end')   yield { tool: ev.name, id: ev.id, args: ev.args, result: ev.result };
+  }
+}
+myAgentLoop.executesTools  = true;   // chunks carry the outcome — voiceloop reports, never re-runs
+myAgentLoop.acceptsToolGate = true;  // the loop awaits `toolGate` before ANY tool executes
+```
+
+- **`executesTools`** — a tool chunk carrying `result` (or `error`) is *reported*, not executed again. Emitting a `running: true` chunk first opens a live spinner chip that the outcome chunk replaces in place (matched by `id`); if the turn dies before the outcome arrives, voiceloop resolves the chip as `interrupted — did not finish` so a spinner is never left stuck.
+- **`acceptsToolGate`** — required to keep [speculative prefetch](#how-the-latency-adds-up) enabled. Prefetch starts the LLM on a *stable interim*, before the user has finished the sentence — so a tool firing there could send an email the user was still amending, and abort cannot undo it. The gate is a promise voiceloop resolves only when the turn **commits**: text streams speculatively, tools wait at the door, and a discarded speculation aborts instead. Without the flag, voiceloop refuses to speculate on that adapter at all (correct, but slower).
+
 ## API surface
 
 ```js
@@ -162,10 +184,13 @@ agent.dumpAudio()              // last 30s of mic audio as WAV + stall report (d
 ```
 
 Events via `onEvent(e)`: `state`, `stt`, `assistant`, `tool`, `vad`, `echo`, `error`, `diag`.
+A `tool` event carries `{ name, id, args }` plus either `result` (settled) or `running: true` (an [adapter-announced](#adapters-that-run-tools-themselves) call still executing) — render the pair as one chip keyed by `id`.
 
 ## Tuning
 
 Every latency/sensitivity knob lives in [`src/tuning.js`](src/tuning.js) — VAD thresholds, barge-in minimum characters, sentence-break aggressiveness, prefetch stability window, echo-match threshold. Constructor options (`bargeInMinChars`, `vadOptions`, `turnDetector`, `maxPauseMs`) override per-agent.
+
+Liveness: the turn loop is strictly serialized, so host code it awaits could stall it. Tools are dispatched and never joined (a hung tool costs its own result, nothing more), an aborted LLM stream is detached rather than drained (a generator that ignores its `AbortSignal` can't wedge the next turn), and `maxPauseMs` is a single wall-clock deadline bounding how long a `turnDetector` holds a turn open — including one that never returns. Synthesis is the exception: a custom `_synth()` that never settles does block the reply that needs it, since there's nothing to speak without it.
 
 ## TTS
 

@@ -40,6 +40,15 @@ export const TUNING = {
   // ── LLM ───────────────────────────────────────────────────────────────────────────────────────
   MAX_TOKENS: 1024,   // cap on the spoken reply length
 
+  // ── Liveness backstop (host code that never returns) ──────────────────────────────────────────
+  // The turn loop is strictly serialized, so anything it AWAITS can wedge it. Host hooks are kept
+  // off that path structurally rather than by deadline: tools are dispatched and never joined, and
+  // an aborted LLM stream is detached instead of drained. The one hook whose verdict is genuinely
+  // REQUIRED to proceed is the turnDetector (it decides whether the turn closes) — bounded by
+  // MAX_PAUSE_MS above, as ONE absolute deadline from end-of-speech.
+  // Not covered, by design: a custom TTS _synth() that never settles (there is no reply without it),
+  // and a muted-TTS turn draining a generator that ignores its abort signal.
+
   // ── Turn boundary (when is the user done talking?) ────────────────────────────────────────────
   // Hard cap (ms) a turnDetector may hold a turn open across a pause before it's force-committed —
   // so a user who trails off mid-sentence can't hang the turn forever. Only used when a turnDetector

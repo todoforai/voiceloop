@@ -389,3 +389,80 @@ test('barge-in: speak() resolves with the HEARD prefix, not the scope upper boun
   assert.ok(scopes.some((s) => s.includes('Hello')), 'scope reached the full clip before the cut');
   assert.ok(!out.includes('Second'), 'heard prefix excludes never-played text');
 });
+
+// ── Liveness: a custom llm generator that ignores its AbortSignal ────────────────────────────────
+// speak()'s producer parks in it.next() on HOST code. If that generator never yields again after a
+// barge-in, awaiting it in the cleanup path would never return from speak() — wedging _speakTurn and
+// every turn queued behind it. The aborted stream is DETACHED instead. These lock in that speak()
+// settles, that the next reply works, that synths stay serialized (one ONNX predict at a time), and
+// that the abandoned producer can't corrupt the newer turn's state when it finally wakes up.
+
+// Counts overlapping _synth calls — a single ONNX session cannot run two predict()s at once.
+class ConcurrencyTTS extends StreamingTTS {
+  constructor(v) { super(v); this.live = 0; this.maxLive = 0; this.synthed = []; }
+  async _synth(text) {
+    if (!text) return null;
+    this.live++; this.maxLive = Math.max(this.maxLive, this.live);
+    await new Promise((r) => setTimeout(r, 5));
+    this.live--; this.synthed.push(text);
+    return blob(text);
+  }
+}
+
+// Yields one sentence, then hangs forever — ignoring `signal` entirely, as a broken host llm would.
+const deafStream = (first) => {
+  let release;
+  const gen = (async function* () { yield first; await new Promise((r) => { release = r; }); yield 'Never reached.'; })();
+  return { gen, wake: () => release?.() };
+};
+
+test('LIVENESS: barge-in on an llm stream that ignores its signal still resolves speak()', async () => {
+  const tts = new ConcurrencyTTS('v');
+  const ctl = new AbortController();
+  const { gen } = deafStream('First sentence.');
+
+  let out = null;
+  const p = tts.speak(gen, ctl.signal).then((r) => { out = r; });
+  // Play out everything the stream gave us; the producer then parks in the deaf next().
+  for (let i = 0; i < 60; i++) { await settle(); liveClip(tts)?.end(); }
+  ctl.abort();                                            // barge-in; the generator never reacts
+
+  await Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('speak() never returned — the turn loop is wedged')), 2000))]);
+  assert.equal(out, 'First sentence.', 'resolves with what was actually heard');
+});
+
+test('LIVENESS: the turn AFTER an abandoned stream plays normally, with synths still serialized', async () => {
+  const tts = new ConcurrencyTTS('v');
+  const ctl = new AbortController();
+  const { gen, wake } = deafStream('First sentence.');
+
+  const p = tts.speak(gen, ctl.signal);
+  for (let i = 0; i < 50 && !liveClip(tts); i++) await settle();
+  ctl.abort();
+  await p;
+
+  const out = await play(tts, 'Brand new reply. Second part.');
+  assert.equal(out, 'Brand new reply. Second part.', 'the next turn is unaffected');
+  wake();                                                 // the abandoned producer finally wakes up
+  for (let i = 0; i < 30; i++) await settle();
+  assert.equal(tts.maxLive, 1, 'never two concurrent synths — _synthQ still serializes across turns');
+  assert.ok(!tts.synthed.includes('Never reached.'), 'the detached producer did not enqueue stale work');
+});
+
+test('LIVENESS: an abandoned producer waking late does not clear a newer reply presynth clip', async () => {
+  const tts = new ConcurrencyTTS('v');
+  const ctl = new AbortController();
+  const { gen, wake } = deafStream('First sentence.');
+
+  const p = tts.speak(gen, ctl.signal);
+  for (let i = 0; i < 50 && !liveClip(tts); i++) await settle();
+  ctl.abort();
+  await p;
+
+  tts.presynth('Next reply opener.');                     // speculation for the NEXT turn
+  const pre = tts._preClip;
+  assert.ok(pre, 'speculation is parked');
+  wake();                                                 // stale producer resumes, mid-pull, generation behind
+  for (let i = 0; i < 30; i++) await settle();
+  assert.equal(tts._preClip, pre, 'the stale producer must not consume the newer turn speculation');
+});

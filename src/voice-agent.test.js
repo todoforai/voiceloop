@@ -769,3 +769,222 @@ test('MIMICRY: a truncated/unparseable typed call is dropped silently', async ()
   const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
   assert.ok(!said.includes('[TOOL CALL'), 'the broken markup did not leak');
 });
+
+// ── Liveness: host code that never returns must not wedge the turn loop ─────────────────────────
+// The turn loop is strictly serialized, so anything it awaits can wedge it permanently. Three hooks
+// are host-supplied; these lock in that none of them can. Each test races a deadline so a
+// REGRESSION FAILS the suite instead of hanging it forever.
+
+const before = (ms, p, what) => Promise.race([
+  p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} did not settle in ${ms}ms`)), ms)),
+]);
+
+test('LIVENESS: a turnDetector that never returns still force-closes the turn at maxPauseMs', async () => {
+  const { agent, events } = makeAgent({ opts: { turnDetector: () => new Promise(() => {}), maxPauseMs: 30 } });
+  const committed = [];
+  agent.stt = { commit: () => committed.push(1), reset() {}, feed() {} };
+  agent._turnText = 'is anyone there';
+  agent._speaking = false;
+  await before(2000, agent._endOfSpeech(), 'end-of-speech with a hung turnDetector');
+  assert.equal(committed.length, 1, 'the hung detector did not hold the turn open forever');
+  assert.ok(events.some((e) => e.type === 'error' && /no verdict/.test(e.error)), 'the hang is reported, not silent');
+});
+
+test('LIVENESS: maxPauseMs is ONE deadline — a slow "not yet" verdict does not buy a fresh window', async () => {
+  const MAX = 300;   // generous budget: the old two-window bug lands at ~1.6x, well clear of the 1.45x bar
+  const { agent } = makeAgent({ opts: { maxPauseMs: MAX, turnDetector: () => new Promise((r) => setTimeout(() => r(false), MAX * 0.6)) } });
+  let closedAt = 0;
+  const started = Date.now();
+  agent.stt = { commit: () => { closedAt = Date.now(); }, reset() {}, feed() {} };
+  agent._turnText = 'i was saying';
+  agent._speaking = false;
+  await agent._endOfSpeech();
+  await new Promise((r) => setTimeout(r, MAX));
+  assert.ok(closedAt, 'the turn still closes at the deadline');
+  const held = closedAt - started;
+  assert.ok(held < MAX * 1.45, `turn held ${held}ms — must stay within the documented ${MAX}ms cap, not ~2x it`);
+});
+
+test('LIVENESS: a live turnDetector verdict is still honored (no timeout regression)', async () => {
+  const { agent } = makeAgent({ opts: { turnDetector: async () => false, maxPauseMs: 10_000 } });
+  const committed = [];
+  agent.stt = { commit: () => committed.push(1), reset() {}, feed() {} };
+  agent._turnText = 'wait i am still';
+  agent._speaking = false;
+  await agent._endOfSpeech();
+  assert.equal(committed.length, 0, 'false verdict keeps listening — the cap must not pre-empt a real answer');
+  clearTimeout(agent._maxPause);
+});
+
+test('LIVENESS: a turnDetector abandoned because the user resumed reports no error', async () => {
+  const { agent, events } = makeAgent({ opts: { turnDetector: () => new Promise(() => {}), maxPauseMs: 30 } });
+  agent.stt = { commit() {}, reset() {}, feed() {} };
+  agent._turnText = 'hold on';
+  agent._speaking = false;
+  const p = agent._endOfSpeech();
+  agent._onSpeechStart();                                  // user resumed while the detector deliberated
+  await before(2000, p, 'end-of-speech');
+  assert.ok(!events.some((e) => e.type === 'error'), 'a verdict nobody needed anymore is not an error');
+});
+
+test('LIVENESS: a hung tool does not block the turn (tools are dispatched, never joined)', async () => {
+  const llm = async function* () { yield { tool: 'stuck', args: {} }; yield { text: 'On it.' }; };
+  const { agent } = makeAgent({ llm, opts: { tools: { stuck: { description: '', params: {}, run: () => new Promise(() => {}) } } } });
+  agent.sendUserText('go');
+  await before(2000, agent._turn, 'the turn');             // the bug was this never resolving
+  assert.equal(agent.state, 'listening', 'the agent is ready for the next turn');
+  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
+  assert.ok(said.includes('[TOOL CALL stuck]'), 'the dispatch is recorded even though the tool never returned');
+});
+
+test('LIVENESS: a hung tool is not re-called by the next turn (the ledger stands in for its result)', async () => {
+  let runs = 0;
+  // Re-calls the tool unless the history already shows it was dispatched.
+  const llm = async function* (history) {
+    if (history.some((m) => m.content?.includes('[TOOL CALL stuck]'))) { yield { text: 'Still waiting.' }; return; }
+    yield { tool: 'stuck', args: {} }; yield { text: 'On it.' };
+  };
+  const { agent } = makeAgent({ llm, opts: { tools: { stuck: { description: '', params: {}, run: () => { runs++; return new Promise(() => {}); } } } } });
+  agent.sendUserText('go');
+  await before(2000, agent._turn, 'the first turn');
+  agent.sendUserText('and now?');
+  await before(2000, agent._turn, 'the second turn');
+  assert.equal(runs, 1, 'the still-running tool was not dispatched a second time');
+});
+
+test('LIVENESS: a hung tool does not block the turn on the TTS-ERROR exit path either', async () => {
+  const llm = async function* () { yield { tool: 'stuck', args: {} }; yield { text: 'On it.' }; };
+  // A TTS that drains the stream (so the tool dispatches) and then fails the reply.
+  const tts = { async speak(stream) { for await (const _ of stream) { /* drain */ } throw new Error('synth exploded'); }, stop() {} };
+  const { agent, events } = makeAgent({ llm, tts, opts: { tools: { stuck: { description: '', params: {}, run: () => new Promise(() => {}) } } } });
+  agent.sendUserText('go');
+  await before(2000, agent._turn, 'the turn whose TTS failed');
+  assert.ok(events.some((e) => e.type === 'error' && /synth exploded/.test(e.error)), 'the TTS failure is surfaced');
+  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
+  assert.ok(said.includes('[TOOL CALL stuck]'), 'the dispatch is still ledgered on the error path');
+});
+
+test('LIVENESS: a tool that awaits notify() completes instead of deadlocking against its own turn', async () => {
+  const llm = async function* (history) {
+    if (history.some((m) => m.content?.includes('[TOOL RESULT'))) { yield { text: 'It is sunny.' }; return; }
+    yield { tool: 'weather', args: {} }; yield { text: 'Checking.' };
+  };
+  let settled = false;
+  const { agent } = makeAgent({ llm, opts: {} });
+  agent.tools = { weather: { description: '', params: {}, run: async () => {
+    await agent.notify('[TOOL RESULT weather] sunny');     // queues behind the turn that dispatched us
+    settled = true; return 'sunny';
+  } } };
+  agent.sendUserText('weather?');
+  await before(2000, agent._turn, 'the dispatching turn');
+  for (let i = 0; i < 60; i++) await settle();
+  assert.ok(settled, 'the tool ran to completion — joining it at turn end would deadlock here');
+});
+
+test('LIVENESS: a normal tool still reports its real result', async () => {
+  const llm = async function* () { yield { tool: 'fast', args: { x: 1 } }; yield { text: 'Done.' }; };
+  const { agent, events } = makeAgent({ llm, opts: { tools: { fast: { description: '', params: {}, run: async () => 'ok' } } } });
+  agent.sendUserText('go');
+  await before(2000, agent._turn, 'the turn');
+  for (let i = 0; i < 20; i++) await settle();
+  const tool = events.find((e) => e.type === 'tool');
+  assert.equal(tool.result, 'ok', 'the real result is reported');
+  assert.ok(!events.some((e) => e.type === 'error'), 'no spurious failure');
+});
+
+// ── Tool-executing adapters: running markers + the commit gate ───────────────────────────────────
+// An adapter that runs tools inside its own generator (llm.executesTools) may announce a call with
+// `running: true` before executing, so the host shows a live spinner chip the outcome replaces in
+// place (same id). A turn dying mid-execution must resolve every announced call — a spinner may
+// never be left stuck. Speculative prefetch stays OFF for such an adapter unless it also honors the
+// commit gate (llm.acceptsToolGate), which holds tools at the door until the turn commits.
+
+test('RUNNING: announcement is reported, replaced by the outcome, and never executed by the agent', async () => {
+  const runs = [];
+  const llm = async function* () {
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, running: true };    // adapter: executing now
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' };  // adapter: outcome attached
+    yield { text: 'one file.' };
+  };
+  const { agent, events } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: (a) => { runs.push(a); return 'never'; } } } } });
+  agent.sendUserText('go');
+  for (let i = 0; i < 40; i++) await settle();
+  assert.equal(runs.length, 0, 'both chunks belong to the adapter-executed call — the agent runs nothing');
+  const tools = events.filter((e) => e.type === 'tool');
+  assert.deepEqual(tools[0], { type: 'tool', name: 'run_shell', id: 'c1', args: { cmd: 'ls' }, running: true });
+  assert.deepEqual(tools[1], { type: 'tool', name: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' });
+  // Ledger records the call ONCE, with its outcome (the running marker adds nothing).
+  const said = agent.history[agent.history.length - 1].content;
+  assert.equal((said.match(/\[TOOL CALL run_shell\]/g) || []).length, 1);
+  assert.match(said, /→ file1/);
+});
+
+test('RUNNING: a turn dying mid-execution finalizes the announced call as interrupted', async () => {
+  const llm = async function* () {
+    yield { tool: 'run_shell', id: 'c9', args: { cmd: 'sleep 99' }, running: true };
+    throw new Error('stream died');   // outcome never arrives
+  };
+  const { agent, events } = makeAgent({ llm });
+  agent.sendUserText('go');
+  for (let i = 0; i < 40; i++) await settle();
+  const final = events.filter((e) => e.type === 'tool' && !e.running).pop();
+  assert.ok(final, 'the announced call got a resolving event');
+  assert.deepEqual(final.result, { ok: false, text: 'interrupted — did not finish' });
+  assert.equal(final.id, 'c9', 'resolves the SAME chip the announcement opened');
+  // Never executed and never observed → not in the ledger; the next turn may call it fresh.
+  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
+  assert.ok(!said.includes('[TOOL CALL run_shell]'));
+});
+
+test('GATE: an executesTools adapter without acceptsToolGate is never speculated on', async () => {
+  let started = 0;
+  const llm = async function* () { started++; yield { text: 'hi' }; };
+  llm.executesTools = true;
+  const { agent } = makeAgent({ llm });
+  agent.state = 'listening'; agent._turnText = 'are you there';   // _startPrefetch revalidates the live transcript
+  agent._startPrefetch('are you there');
+  for (let i = 0; i < 10; i++) await settle();
+  assert.equal(started, 0, 'no speculation: an ungated tool run could fire a side effect');
+  assert.equal(agent._prefetch, null);
+});
+
+test('GATE: an acceptsToolGate adapter IS speculated on, and tools wait for the commit', async () => {
+  let gate = null, ran = false;
+  const llm = async function* (_h, _s, _sig, { toolGate } = {}) {
+    gate = toolGate;
+    yield { text: 'work' };
+    await toolGate;                       // the adapter's beforeToolCall hook, in miniature
+    ran = true;
+    yield { tool: 'send_email', id: 'e1', args: {}, result: 'sent' };
+  };
+  llm.executesTools = true; llm.acceptsToolGate = true;
+  const { agent } = makeAgent({ llm });
+  agent.state = 'listening'; agent._turnText = 'email bob';   // _startPrefetch revalidates the live transcript
+  agent._startPrefetch('email bob');
+  for (let i = 0; i < 10; i++) await settle();
+  assert.ok(agent._prefetch, 'speculation started — text streams ahead');
+  assert.ok(gate instanceof Promise, 'the adapter was handed a commit gate');
+  assert.equal(ran, false, 'the side effect is held at the door while the user may still change the turn');
+  const pf = agent._takePrefetch('email bob');
+  assert.ok(pf, 'the speculation is adopted by the matching spoken final');
+  for await (const _ of pf.gen) { /* drain */ }
+  assert.equal(ran, true, 'committing the turn opens the gate');
+});
+
+test('GATE: a dropped speculation aborts instead of committing (side effect never fires)', async () => {
+  let ran = false;
+  const llm = async function* (_h, _s, signal, { toolGate } = {}) {
+    yield { text: 'work' };
+    await Promise.race([toolGate, new Promise((r) => signal.addEventListener('abort', r, { once: true }))]);
+    if (signal.aborted) return;           // the adapter turns a still-gated call into a no-op
+    ran = true;
+  };
+  llm.executesTools = true; llm.acceptsToolGate = true;
+  const { agent } = makeAgent({ llm });
+  agent.state = 'listening'; agent._turnText = 'email bob';   // _startPrefetch revalidates the live transcript
+  agent._startPrefetch('email bob');
+  for (let i = 0; i < 10; i++) await settle();
+  agent._dropPrefetch();                  // user kept talking → the speculation is discarded
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(ran, false, 'an abandoned speculation must never execute its tools');
+});

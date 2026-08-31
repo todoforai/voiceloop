@@ -64,6 +64,18 @@ const langRule = (lang) => {
 // Identity: the provider call id when present (two calls with identical args are DISTINCT acts,
 // e.g. a legit retry after an error result); name+args otherwise (an id-less identical repeat is a
 // provider re-emitting its buffered call).
+// Stop WAITING on a host promise after `ms` (resolve to `fallback` instead). Used only where a
+// verdict is required to make progress — see _endOfSpeech. It cannot cancel the host's work, so
+// it must never be used to declare an operation failed: elsewhere the fix for host code that
+// hangs is to not await it at all (tools) or to detach it (StreamingTTS.speak).
+const withTimeout = (p, ms, fallback) => {
+  let t;
+  return Promise.race([
+    Promise.resolve(p).finally(() => clearTimeout(t)),
+    new Promise((res) => { t = setTimeout(() => res(fallback), ms); }),
+  ]);
+};
+
 const callArgs = (c) => JSON.stringify(c.args ?? {}, Object.keys(c.args ?? {}).sort());
 const callKey = (c) => c.id ? `id:${c.id}` : `${c.tool} ${callArgs(c)}`;
 // Render a host tool's return value as model-facing text (used in the history ledger, and by LLM
@@ -194,10 +206,21 @@ export function warmVad() {
 
 export class VoiceAgent {
   // Core options:
-  //   `llm` — async generator (history, system, signal) → { text } | { tool, args } chunks. Bring
-  //     your own, or omit it and pass `llmUrl` (+ `apiKey`, `model`) to talk to any OpenAI-compatible
-  //     /chat/completions endpoint via the built-in makeOpenAILLM (see llm-openai.js). NEVER put a
-  //     provider secret key in a public page — point llmUrl at your own proxy route in production.
+  //   `llm` — async generator (history, system, signal, { toolGate }) → { text } | { tool, args }
+  //     chunks. Bring your own, or omit it and pass `llmUrl` (+ `apiKey`, `model`) to talk to any
+  //     OpenAI-compatible /chat/completions endpoint via the built-in makeOpenAILLM (see
+  //     llm-openai.js). NEVER put a provider secret key in a public page — point llmUrl at your own
+  //     proxy route in production.
+  //
+  //     An adapter that RUNS the tools itself (inside the generator, feeding results back to the
+  //     model for an informed follow-up in the same turn) declares two flags on the function:
+  //       • `llm.executesTools = true` — chunks arrive with the outcome attached (`result`/`error`),
+  //         so _runTool reports without executing again. Optionally emit `{ tool, id, args,
+  //         running: true }` first for a live spinner chip the outcome replaces in place.
+  //       • `llm.acceptsToolGate = true` — the generator awaits the 4th arg's `toolGate` promise
+  //         before ANY tool executes. Without this, speculative prefetch is DISABLED for that
+  //         adapter (a speculation could fire a side effect on speech the user may still change);
+  //         with it, text streams speculatively and tools wait for the turn to commit.
   //   `tts` — a StreamingTTS subclass; default PiperTTS (free, local WASM).
   //   `sttProvider` — 'webspeech' (default; free, browser-native) | 'elevenlabs' | 'speechmatics' |
   //     'deepgram'. Cloud providers authenticate via a short-TTL token minted by YOUR backend
@@ -214,7 +237,8 @@ export class VoiceAgent {
   //   `maxTokens`, `preroll` (chunks kept before VAD fires), `vadOptions` (Silero overrides).
   //   `turnDetector(text)` — async/sync predicate run when VAD hears end-of-speech: return false to
   //     KEEP listening (the user only paused mid-thought), true (default) to close the turn.
-  //   `maxPauseMs` — hard cap (default 4000) a turnDetector may hold a turn open before force-commit.
+  //   `maxPauseMs` — hard cap (default 4000) a turnDetector may hold a turn open before force-commit;
+  //     also bounds a turnDetector that never returns at all.
   //   `bargeInMinChars` — min transcribed NOVEL chars heard while speaking to count as a real
   //     barge-in; higher ignores short backchannels ("mhm","yeah"). Defaults live in tuning.js.
   //   `onEvent(e)` — the event tap: { type: 'state'|'stt'|'assistant'|'tool'|'vad'|'echo'|'error'|'diag', … }.
@@ -749,11 +773,13 @@ export class VoiceAgent {
   }
 
   _startPrefetch(text) {
-    // NEVER speculate when the LLM executes tools INSIDE its generator (llm.executesTools): pulling
-    // the first chunk of a speculation could fire real side effects on a transcript the user is
-    // still speaking and may yet change — and aborting the stream cannot undo them. The default
-    // chunks are inert (tools run later, in _speakTurn), which is what makes this safe at all.
-    if (this.llm.executesTools) return;
+    // Speculating is only safe if pulling the first chunk cannot fire a real side effect on a
+    // transcript the user is still speaking and may yet change — abort cannot undo a sent email.
+    // The default LLM's chunks are inert (tools run later, in _speakTurn). An LLM that executes
+    // tools INSIDE its generator (llm.executesTools) is safe only if it also honors `toolGate`
+    // (llm.acceptsToolGate): we hand it a promise it must await before ANY tool runs, so text
+    // streams speculatively while tools wait for the turn to commit. Neither → don't speculate.
+    if (this.llm.executesTools && !this.llm.acceptsToolGate) return;
     // The 200ms timer raced real events — revalidate EVERYTHING now, not at scheduling time: the
     // agent must still be listening to this exact live transcript (a final/typed turn/replay/hold
     // in the gap cleared or changed _turnText; speculating past that would answer a stale turn).
@@ -761,8 +787,13 @@ export class VoiceAgent {
     if (this._prefetch?.text === text) return;         // same speculation already in flight
     this._dropPrefetch();
     const ctl = new AbortController();
-    const gen = this.llm([...this.history, { role: 'user', content: text }], this.sysmsg, ctl.signal);
-    const p = { text, ctl, gen, first: gen.next(), histLen: this.history.length };   // pull NOW → fetch fires during the debounce; histLen pins the base the speculation saw
+    // COMMIT GATE: handed to tool-executing LLMs so every tool waits at the door until this turn
+    // commits (_takePrefetch resolves it) or the speculation is dropped (abort → the adapter turns
+    // the still-gated call into an error result instead of executing it).
+    let commit;
+    const committed = new Promise((r) => { commit = r; });
+    const gen = this.llm([...this.history, { role: 'user', content: text }], this.sysmsg, ctl.signal, { toolGate: committed });
+    const p = { text, ctl, gen, commit, first: gen.next(), histLen: this.history.length };   // pull NOW → fetch fires during the debounce; histLen pins the base the speculation saw
     p.first.catch(() => {});                           // aborted/failed speculation must not be an unhandled rejection
     this._prefetch = p;
     this._presynthFirstClip(p);                        // fire-and-forget: warm the first TTS clip off the same speculation
@@ -782,6 +813,7 @@ export class VoiceAgent {
     // histLen is checked BEFORE _runTurn pushes this turn's own user message (see call site).
     if (!p || p.text !== text || p.ctl.signal.aborted || p.histLen !== this.history.length) { this._dropPrefetch(); return null; }
     this._prefetch = null;   // timer already cleared: successful adoption is only reached from a spoken onFinal
+    p.commit();              // turn committed → open the tool gate; held-back tool calls execute now
     return { ctl: p.ctl, gen: (async function* () { const f = await p.first; if (!f.done) { yield f.value; yield* p.gen; } })() };
   }
 
@@ -836,8 +868,9 @@ export class VoiceAgent {
   }
 
   // One assistant turn: stream the LLM → TTS, then record what was actually HEARD (the barge-in
-  // prefix, not the full generated answer) and run any tools it chose. Stored as `this._turn` so the
-  // next user turn can await it. Never throws (errors surface via onEvent) so the await is safe.
+  // prefix, not the full generated answer) plus a ledger of the tools it dispatched. Stored as
+  // `this._turn` so the next user turn can await it. Never throws (errors surface via onEvent) so
+  // the await is safe — and never awaits a tool, so a hung one can't hold the next turn hostage.
   async _speakTurn(signal, prefetched = null) {
     // Fresh turn → drop the previous reply's audible text so user speech heard before THIS turn's
     // first audio plays can't be misjudged as echo of the OLD reply — but PARK it in _prevReplyText:
@@ -846,8 +879,8 @@ export class VoiceAgent {
     // repopulates _replyText with the audible prefix as playback advances.
     if (this._replyText) this._prevReplyText = this._replyEcho || this._replyText;
     this._replyText = ''; this._replyEcho = '';
-    // Tap the LLM stream once: yield speech text to TTS, set aside the tool calls for after we
-    // finish speaking. First delta flips us to 'speaking'; accumulate the full answer for the
+    // Tap the LLM stream once: yield speech text to TTS, and record the tool calls it makes (they
+    // fire on arrival; `calls` is the ledger). First delta flips us to 'speaking'; accumulate for the
     // heard-vs-unheard report. `this.llm(...)` is a lazy generator — its fetch fires only when
     // tts.speak first pulls, by which point any prior turn is aborted; keeps LLM streams serial.
     let answer = '', calls = [];
@@ -861,11 +894,28 @@ export class VoiceAgent {
     // the model learned (a barge-in cuts the spoken follow-up but not the fact). Read late (the
     // stream may still be appending) and on EVERY exit path, including a failed reply.
     const toolNote = () => calls.map((c) => `[TOOL CALL ${c.tool}] ${callArgs(c)}${ledgerOutcome(c)}`).join('\n');
+    // Pre-execution markers: an LLM that runs tools inside its own generator (executesTools) can
+    // announce a call with `running: true` BEFORE it executes, so the host shows a live spinner chip
+    // that the outcome chunk replaces in place (same id). A turn that dies before an announced call's
+    // outcome arrives finalizes it as interrupted — DISPLAY truth only: an announcement never reaches
+    // the ledger (`calls`), so the model treats it as never having happened.
+    const announced = new Map();
+    const finishInterrupted = () => {
+      for (const r of announced.values())
+        this.onEvent({ type: 'tool', name: r.tool, id: r.id, args: r.args, result: { ok: false, text: 'interrupted — did not finish' } });
+      announced.clear();
+    };
     const tapped = (async function* (self, src) {
       for await (const item of src) {
         // tool_use → fire NOW, in parallel with TTS. Identical repeats within one turn are the SAME
         // act (a provider re-emitting its buffered call, or the model asking twice) — run it once.
         if (item.tool) {
+          if (item.running) {   // display-only announcement; the outcome chunk below does the work
+            if (item.id) announced.set(item.id, item);
+            self.onEvent({ type: 'tool', name: item.tool, id: item.id, args: item.args, running: true });
+            continue;
+          }
+          if (item.id) announced.delete(item.id);
           // Same key = same act (provider re-emit / model asking twice). A MIMIC chunk carries no id,
           // so also match by name+args across the id boundary — a typed echo of an id-carrying native
           // call (llm.executesTools mode) must collapse too, or it would execute the tool a second time.
@@ -923,10 +973,10 @@ export class VoiceAgent {
         this.tts.setOnProgress?.(null); this._cursorLive = false;
         this.onEvent({ type: 'error', error: e.message });
         // Tools fire DURING streaming, so a reply that dies here may already have dispatched one.
-        // Record + join them anyway: the ledger is about what was DONE, not about what got spoken —
-        // dropping it would let the next turn call the same tool again.
+        // Record it anyway: the ledger is about what was DONE, not about what got spoken — dropping
+        // it would let the next turn call the same tool again.
         if (toolNote()) this.history.push({ role: 'assistant', content: toolNote() });
-        await Promise.all(calls.map((c) => this._runTool(c)));
+        finishInterrupted();                     // announced-but-unfinished → failed chip, not a stuck spinner
         if (this.state !== 'idle') this._set('listening');
         return;
       }
@@ -960,14 +1010,22 @@ export class VoiceAgent {
       // transcript doesn't keep a dangling unfinished bubble. Empty text → host clears the draft.
       this.onEvent({ type: 'assistant', text: '', final: false });
     }
-    await Promise.all(calls.map((c) => this._runTool(c)));             // ensure they finished (already fired during streaming)
+    // Tools are NOT joined here. They were dispatched during streaming (in parallel with TTS) and
+    // _runTool reports its own outcome via onEvent, so waiting adds nothing — while a tool that
+    // never settles would wedge the turn serializer, and every turn queued behind it, for good. It
+    // also breaks a real deadlock: a tool whose run() awaits agent.notify() (delivering its result
+    // as a turn) would wait on the turn that waits on it. Slow work belongs in a tool that returns
+    // promptly and reports the outcome later via notify().
+    finishInterrupted();                                 // announced-but-unfinished → failed chip, not a stuck spinner
     if (!signal.aborted && this.state !== 'idle') this._set('listening');   // superseded turns don't touch state
   }
 
-  // Run one chosen tool call and report it. Fired as soon as its tool_use arrives in the stream
-  // (parallel with TTS) and awaited again at turn end — memoizing the promise on `call`
-  // makes the second await join the same run instead of double-executing. Never rejects (errors
-  // surface via onEvent): the streaming-time fire is unawaited, so a rejection there would be unhandled.
+  // Run one chosen tool call and report it. Fired as soon as its tool_use arrives in the stream, in
+  // parallel with TTS, and NEVER joined: the turn records the dispatch in its ledger and finishes
+  // when the speaking does (see _speakTurn), so a tool that hangs costs its own result and nothing
+  // else. Its outcome reaches the host via onEvent; the model learns it via notify(). Must not
+  // reject — nothing awaits it, so a rejection here would be unhandled (hence the catch-all).
+  // `call.ran` memoizes: the same call object reaching _runTool twice must not execute twice.
   _runTool(call) {
     if (!call) return;
     return (call.ran ??= (async () => {
@@ -977,13 +1035,19 @@ export class VoiceAgent {
         // is_error tool_result and the model narrates it — here it surfaces as ONE failed tool
         // event (the transcript's failed chip). No extra 'error' event: that channel is for
         // runtime/transport failures, not a handled domain-level tool miss.
+        // `id` rides along on every tool event so a host can replace THIS call's running chip in
+        // place, and two same-args calls (a legit retry) stay distinct acts in the transcript.
         if ('result' in call || 'error' in call) {
           const result = call.error ? { text: call.error, ok: false } : call.result;
-          this.onEvent({ type: 'tool', name: call.tool, args: call.args, result });
+          this.onEvent({ type: 'tool', name: call.tool, id: call.id, args: call.args, result });
           return;
         }
+        // Host tool code. Deliberately NOT bounded by a timeout: we cannot cancel a host promise, so
+        // a deadline could only stop WAITING — reporting "failed" for an operation still on its way
+        // to committing its side effect, inviting a duplicate retry. Nothing awaits this call
+        // (see _speakTurn), so a hung tool costs its own result, never the turn loop.
         const result = await this.tools[call.tool]?.run?.(call.args);
-        this.onEvent({ type: 'tool', name: call.tool, args: call.args, result });
+        this.onEvent({ type: 'tool', name: call.tool, id: call.id, args: call.args, result });
       } catch (e) {
         this.onEvent({ type: 'error', error: `tool ${call.tool}: ${e.message}` });
       }
@@ -1016,14 +1080,26 @@ export class VoiceAgent {
     if (!this.turnDetector || !this._turnText) { close(); return; }
     const gen = this._turnGen;                   // snapshot; a new onSpeechStart bumps it → our verdict goes stale
     let done = true;
-    try { done = await this.turnDetector(this._turnText); }
+    // maxPauseMs is ONE absolute deadline from end-of-speech — the wall-clock cap on how long a
+    // detector may hold this turn open, whether it answers "not yet" or never answers at all. Both
+    // legs below draw from the same budget, so a detector that deliberates 3.9s can't then buy a
+    // fresh 4s failsafe on top (which would blow the documented cap to nearly 2×).
+    // The verdict leg needs a deadline of its own because it's HOST code on the only path that can
+    // close the turn: a hang there never reaches the failsafe, and the turn stays open forever.
+    const deadline = Date.now() + this.maxPauseMs;
+    const left = () => Math.max(0, deadline - Date.now());
+    const HUNG = Symbol('hung');
+    try { done = await withTimeout(this.turnDetector(this._turnText), left(), HUNG); }
     catch (e) { this.onEvent({ type: 'error', error: `turnDetector: ${e.message}` }); }
     if (gen !== this._turnGen) return;          // user resumed speaking while we judged → verdict is stale
     if (this._speaking) return;                 // already talking again → let the next end-of-speech decide
+    // Report the hang only once it's established the verdict still MATTERED (stale checks above):
+    // a detector abandoned because the user resumed isn't an error worth surfacing.
+    if (done === HUNG) { this.onEvent({ type: 'error', error: `turnDetector: no verdict in ${this.maxPauseMs}ms — closing turn` }); done = true; }
     if (done) { close(); return; }
     // Keep listening: the pause was mid-thought. Failsafe so a turn the detector never closes (user
-    // walked away mid-sentence) can't hang forever — commit anyway after a hard max-pause.
-    this._maxPause = setTimeout(() => { if (gen === this._turnGen && !this._speaking && this._turnText) close(); }, this.maxPauseMs);
+    // walked away mid-sentence) can't hang forever — commit anyway at the deadline.
+    this._maxPause = setTimeout(() => { if (gen === this._turnGen && !this._speaking && this._turnText) close(); }, left());
   }
 
   // ── VAD ───────────────────────────────────────────────────────────────
@@ -1602,6 +1678,12 @@ export class StreamingTTS {
     const it = this._sentences(src, signal)[Symbol.asyncIterator]();
 
     const tape = this._tape = [];     // { text, blobP, nwStart } — nwStart = non-whitespace chars before it
+    // Generation token: an aborted speak() DETACHES its producer (see the finally block) rather than
+    // waiting for a host stream that may never yield again. The detached producer stays parked in
+    // it.next() and can wake up long after a NEWER speak() owns this instance — so every step that
+    // touches shared state re-checks that it's still the current generation.
+    const gen = this._speakGen = (this._speakGen || 0) + 1;
+    const current = () => gen === this._speakGen && !signal?.aborted;
     let nwTotal = 0, streamErr = null, streamDone = false, wake = null;
     // Single waiter slot; woken when the tape grows, the stream ends, OR we abort — so a consumer
     // parked in awaitEntry() never hangs past an abort/barge-in even if the LLM stream is slow to react.
@@ -1613,7 +1695,9 @@ export class StreamingTTS {
     // decoupled from both synth pace AND playback pace: generation never stalls sentence-by-sentence.
     const pull = async () => {
       const r = await it.next();
-      if (r.done) return null;
+      // Host code just returned. If we were abandoned while parked in it.next(), stop HERE — before
+      // touching _preClip (which now belongs to a newer reply), the synth queue or the event tap.
+      if (!current() || r.done) return null;
       const entry = { text: r.value, nwStart: nwTotal };
       // Speculative hit: the first chunk was already rendered during the end-of-turn debounce
       // (presynth) with EXACTLY this text — reuse the clip instead of predicting again. Single-shot:
@@ -1689,12 +1773,21 @@ export class StreamingTTS {
       }
     } finally {
       signal?.removeEventListener('abort', bump);
-      // Wait out any synth still in flight (an ahead-of-playback clip mid-predict when we abort). Piper's
-      // predict() isn't cancellable and a single ONNX session can't run two at once, so we must not
-      // return while one is running — the next turn would start a second predict() on the same session.
-      // Await the producer first (it may queue one last synth after the abort check), then the tail.
-      await produce.catch(() => {});
-      await this._synthQ.catch(() => {});
+      // A finished stream is joined (it's already done — this just collects a trailing synth). An
+      // ABORTED one is DETACHED: the producer sits in it.next() on the HOST's llm generator, which
+      // may ignore the abort signal and never yield again, so awaiting it here would never return
+      // from speak() — wedging _speakTurn and every turn queued behind it.
+      //
+      // Detaching is safe on both counts the old join protected:
+      //   • concurrent predict() — every synth chains on the instance-level _synthQ (_enqueueSynth is
+      //     the ONLY path to _synth), so the next turn's synth queues behind an in-flight one instead
+      //     of racing it. It waits on its own entry.blobP, not on the whole turn loop.
+      //   • stale writes — pull() returns at the generation check above before touching any shared
+      //     state, so a producer that wakes up late can't clear a newer reply's _preClip or enqueue.
+      // return() asks a well-behaved generator to wind down (it can't interrupt a pending next(), and
+      // a custom iterator may throw synchronously — hence the guard).
+      if (signal?.aborted) { try { Promise.resolve(it.return?.()).catch(() => {}); } catch {} }
+      else { await produce.catch(() => {}); await this._synthQ.catch(() => {}); }
       this._ttsWake = null;
       this._speaking = false; this._tape = null; this._seekTarget = null; this._seekPending = false; this._curIdx = -1;
     }
