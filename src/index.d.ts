@@ -137,6 +137,10 @@ export function warmDeepgramToken(sttTokenUrl: string, apiKey?: string, getToken
 /** The built-in default voice persona (system prompt): terse, speakable answers. Exported so a
  *  host can reuse or extend it instead of restating the "you are being spoken aloud" rules. */
 export const VOICE_SYSMSG: string;
+/** Language codes the agent can instruct the LLM to reply in, code → English name. The `sttLang`
+ *  values that actually steer the reply language — exported so a host builds its language picker
+ *  from this instead of hand-listing a subset that silently rots as the map grows. */
+export const LANG_NAMES: Record<string, string>;
 
 
 export class VoiceAgent {
