@@ -54,6 +54,12 @@ That's it. Speak, get spoken answers, interrupt at will.
 
 ## Try it in 20 seconds
 
+**[todoforai.github.io/voiceloop](https://todoforai.github.io/voiceloop/)** — the live demo, no
+install. It runs entirely in your browser on the zero-key path (Web Speech STT + local Piper TTS +
+an echo stand-in), so nothing you say leaves the machine.
+
+Or locally, to point it at your own LLM:
+
 ```sh
 npx serve .                     # from a clone
 npx serve node_modules/@todoforai/voiceloop    # from npm
