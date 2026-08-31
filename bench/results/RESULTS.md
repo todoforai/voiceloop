@@ -56,8 +56,10 @@ Realtime is the disclosed exception (speech-to-speech, its own model).
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
 | **voiceloop** · webspeech + Piper (zero-key browser STT — the demo default) | 2113ms | 2607 | 1257ms | 30 |
-| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · deepgram + Piper | _1801ms_ | _2556_ | _1379ms_ | _25_ |
-| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + Piper (shipped default) | _2241ms_ | _6957_ | _915ms_ | _25_ |
+| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · deepgram + EL flash TTS | _1006ms_ | _1206_ | _1060ms_ | _16_ |
+| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · deepgram + Piper | _1246ms_ | _1839_ | _1226ms_ | _25_ |
+| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + EL flash TTS | _1749ms_ | _2022_ | _716ms_ | _18_ |
+| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + Piper (shipped default) | _1945ms_ | _2459_ | _700ms_ | _28_ |
 
 voice→voice = end of the person's speech → first audible agent audio (from the recording).
 barge-in stop = person starts interrupting → agent audio actually stops.
@@ -165,27 +167,51 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   published voiceloop 0.1.5 and adds only the JARVIS persona, LLM adapter and todo tools, so
   these rows now measure *integration overhead*, not a second implementation.
 
-  **Re-measured on 0.1.5** (the earlier 2414ms row was the pre-swap fork): **2241ms** on the
-  shipped webspeech+Piper default, and the gap to voiceloop·webspeech (2124ms) is down to
-  **~120ms**. The TTS half of the old gap is essentially closed — **TTS first audio 1695ms
-  vs 1641 warm (was 1930 vs 418)** — because the phonemizer reuse, worker inference and
-  presynth it used to lack now come from the library. What remains is turn-0 cold start
-  (6177 vs 5712ms), i.e. the missing `crossOriginIsolated` / single-threaded ONNX on the
-  production origin, which no library swap can fix.
+  **All four rows re-measured on 0.1.6.** The previous 2241/1801ms pair was taken on 0.1.5,
+  before the TTS pre-warm fix, and is superseded — quoting it against today's stack overstates
+  our latency by ~500ms. On 0.1.6 the shipped webspeech+Piper default is **1945ms** and
+  deepgram+Piper is **1246ms** (was 1801). The pre-warm fix is the whole difference:
+  commit→first-audio on deepgram+Piper drops to 801ms.
 
-  **Deepgram flux instead of browser STT: 2241 → 1801ms.** EOT collapses **1571 → 400ms**,
-  confirming on our own stack what the webspeech row predicted — the ~1.5s was Chrome's
-  endpointer, not our code (voiceloop measured the same 1565ms on the same browser STT).
-  The headline moves only 440ms because **the bottleneck relocates**: with EOT gone, Piper is
-  now the dominant stage at **1295ms of the 1823ms warm turn**. Deepgram also removes the
-  cold-start cliff (turn-0 TTS 6177 → 760ms) — its socket setup overlaps the Piper warm that
-  the selfCapture path serialises. Reaching voiceloop·deepgram's 984ms from here is a TTS
-  problem (EL flash, or `crossOriginIsolated` for multi-threaded Piper), not an STT one.
+  **STT and TTS fix different halves, and only both together get under a second:**
 
-  Barge-in is word-based like voiceloop (0 false barge-ins); it reads 915ms on webspeech and
-  1379ms on deepgram, but with n=10 and ranges of 416–1427 / 465–1894 that difference is not
-  separable from noise. This row exists to track our shipped product against the state of this
-  repo — the deltas above are its upgrade backlog.
+  | | EOT | commit→audio | v→v |
+  |---|---|---|---|
+  | webspeech + Piper (shipped) | 1558 | 455 | 1945 |
+  | webspeech + EL flash | 1561 | 179 | 1749 |
+  | deepgram + Piper | 416 | 801 | 1246 |
+  | deepgram + EL flash | 346 | 693 | 1006 |
+
+  Deepgram buys the EOT (~1.2s: Chrome's endpointer, not our code — voiceloop measures the
+  same 1565ms on the same browser STT). EL flash buys the synthesis. **Together: 1006ms**,
+  which lands on voiceloop·deepgram's own 984ms — i.e. integration overhead is now ~20ms and
+  the remaining distance to the top of the table is provider choice, not our code.
+
+  Caveat on the per-stage column: the `TTS first audio` metric is measured from the LLM's
+  first token, so it absorbs LLM streaming time and reads high (1294ms) for webspeech+EL even
+  though presynth hit on 25/30 turns there. Measured from turn commit — what the user actually
+  waits — the same config is **179ms**. Use commit→audio when comparing TTS engines.
+
+  Barge-in is word-based like voiceloop (0 false barge-ins) at 700–1226ms across configs, but
+  with n=10 and overlapping ranges those differences are not separable from noise.
+
+  Not deployable as-is: **production has no TTS proxy route** (the backend serves STT tokens
+  only), so the EL flash rows measure a route that would have to be built, and EL TTS is
+  metered where Piper is free.
+
+  **`crossOriginIsolated` is not the Piper fix it looks like.** This rig runs isolated
+  (COOP+COEP, multi-threaded ONNX) and the SUT doesn't, which is the obvious suspect for the
+  Piper gap — so it was measured directly, A/B on the same SUT (`COI=1 node bench/serve.js`):
+
+  | | v→v median | p90 | max | TTS p90 |
+  |---|---|---|---|---|
+  | not isolated (production today) | **1374** | 2314 | 2768 | 1794 |
+  | isolated | **1446** | **1867** | **1973** | **1199** |
+
+  The median gets *worse*; isolation only tightens the tail. An isolated ONNX microbench shows
+  why: 1 thread 2644ms → 4 threads 1935ms (−27%), then flat (8: 2058, 32: 1999). Threading
+  caps out around 4 and doesn't touch the typical synth. Switching TTS engine is worth ~5x more
+  than isolating the origin, so the EL flash row above is the real lever.
 - **ConvAI** — measured through their standard `@elevenlabs/client` SDK with a default-config
   agent (scribe_realtime ASR, `turn_v3`/normal eagerness, `optimize_streaming_latency: 3`; we
   even upgraded its TTS from the default turbo_v2 to the faster flash_v2). Per-run medians were
