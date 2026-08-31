@@ -164,7 +164,7 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
 - **TODOforAI shared-voice** — NOT a competitor: our own product's shipped voice agent
   (`todoforai/packages/shared-voice`), benchmarked via a thin SUT page + `/llm` wire shim
   (`packages/shared-voice/bench/`). It no longer carries a fork of this library: it consumes
-  published voiceloop 0.1.5 and adds only the JARVIS persona, LLM adapter and todo tools, so
+  published voiceloop 0.1.6 and adds only the JARVIS persona, LLM adapter and todo tools, so
   these rows now measure *integration overhead*, not a second implementation.
 
   **All four rows re-measured on 0.1.6.** The previous 2241/1801ms pair was taken on 0.1.5,
@@ -173,7 +173,7 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   deepgram+Piper is **1246ms** (was 1801). The pre-warm fix is the whole difference:
   commit→first-audio on deepgram+Piper drops to 801ms.
 
-  **STT and TTS fix different halves, and only both together get under a second:**
+  **STT and TTS fix different halves of the turn, and only both together reach ~1s:**
 
   | | EOT | commit→audio | v→v |
   |---|---|---|---|
@@ -183,14 +183,18 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   | deepgram + EL flash | 346 | 693 | 1006 |
 
   Deepgram buys the EOT (~1.2s: Chrome's endpointer, not our code — voiceloop measures the
-  same 1565ms on the same browser STT). EL flash buys the synthesis. **Together: 1006ms**,
-  which lands on voiceloop·deepgram's own 984ms — i.e. integration overhead is now ~20ms and
-  the remaining distance to the top of the table is provider choice, not our code.
+  same 1565ms on the same browser STT). EL flash buys the synthesis. Only both together reach
+  ~1s (**1006ms**), which lands on voiceloop·deepgram's own 984ms. With ±300ms run-to-run
+  jitter that 22ms difference is not a measurement: the honest claim is **no integration
+  overhead detectable at this rig's resolution**, and what separates our shipped default from
+  the top of the table is provider choice rather than a gap in our code.
 
   Caveat on the per-stage column: the `TTS first audio` metric is measured from the LLM's
   first token, so it absorbs LLM streaming time and reads high (1294ms) for webspeech+EL even
   though presynth hit on 25/30 turns there. Measured from turn commit — what the user actually
-  waits — the same config is **179ms**. Use commit→audio when comparing TTS engines.
+  waits — the same config is **179ms**. Use commit→audio when comparing TTS engines; it is the
+  pooled median of `voiceToVoiceMs - eotMs` over all 30 turns (equivalently, commit→next
+  `clip_start` scanned from the raw events — both give the same figures above).
 
   Barge-in is word-based like voiceloop (0 false barge-ins) at 700–1226ms across configs, but
   with n=10 and overlapping ranges those differences are not separable from noise.
@@ -208,10 +212,13 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   | not isolated (production today) | **1374** | 2314 | 2768 | 1794 |
   | isolated | **1446** | **1867** | **1973** | **1199** |
 
-  The median gets *worse*; isolation only tightens the tail. An isolated ONNX microbench shows
-  why: 1 thread 2644ms → 4 threads 1935ms (−27%), then flat (8: 2058, 32: 1999). Threading
-  caps out around 4 and doesn't touch the typical synth. Switching TTS engine is worth ~5x more
-  than isolating the origin, so the EL flash row above is the real lever.
+  **No median improvement was detected** — the 72ms shift is well inside run-to-run jitter (and
+  EOT, which isolation cannot affect, moved 504→329ms in the same pair, showing how much of this
+  is noise). What does reproduce is a tighter tail. An isolated ONNX microbench shows the
+  mechanism and its ceiling: 1 thread 2644ms → 4 threads 1935ms (−27%), then flat (8: 2058,
+  32: 1999) — threading caps out around 4 and never touches the typical synth. So isolating the
+  origin buys tail behaviour at best, while switching TTS engine moves the median by 240–500ms;
+  the EL flash row above is the better lever.
 - **ConvAI** — measured through their standard `@elevenlabs/client` SDK with a default-config
   agent (scribe_realtime ASR, `turn_v3`/normal eagerness, `optimize_streaming_latency: 3`; we
   even upgraded its TTS from the default turbo_v2 to the faster flash_v2). Per-run medians were
