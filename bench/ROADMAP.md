@@ -27,9 +27,10 @@ be free to answer fast and eagerly; the table should simply also show what that 
 3. ~~**echo loopback**~~ — DONE (`scenarios/echo.json`, results in RESULTS.md). bench_spk mixed
    into bench_mic at −15dB/30ms (driver-side software tap — deterministic, no pulse modules).
    Metrics landed: echo words in the user transcript + self-interruptions (audio truth).
-   The product check paid off: voiceloop's echo filter failed under real coupling (cascading
-   self-interruptions) and was fixed in src/ — 0 self-interruptions now; Pipecat default (20/30
-   turns) and OpenAI Realtime without client AEC (17/30) audibly break; ConvAI survives.
+   The product check paid off: voiceloop's echo filter failed under real coupling (a
+   self-interruption per run that shifted the script) and was fixed in src/ — 0 self-interruptions
+   in 30 turns now; Pipecat default (20/30 turns) and OpenAI Realtime without client AEC (17
+   self-interruptions) audibly break; ConvAI survives.
 
 ## New metrics
 

@@ -487,6 +487,44 @@ test('SELF-ECHO: a mixed final (echo latch but real user words) is KEPT as a use
     assert.equal(agent._echoRef, '', 'empty final cleared the echo latch');
   }));
 
+test('SELF-ECHO: words ahead of the lagging cursor still latch (clip-bounded scope)', () =>
+  withSttAgent(async ({ agent, tts, stt, finish }) => {
+    // The proportional cursor lags real audio: report cursor = "reply-to" but scope = the whole
+    // clip. Echo of the AHEAD part ("make me a page") must latch instead of barging in.
+    tts._progress?.('reply-to', 'reply-to:make me a page');
+    assert.equal(agent._replyText, 'reply-to', 'cursor holds the lagging estimate');
+    assert.ok(agent._replyEcho.includes('make me a page'), 'echo reference covers the whole clip');
+    const stops = tts.stopped;
+    stt.onPartial('make me a page', 100);                   // echo of words the cursor has not reached
+    assert.ok(agent._echoRef, 'latched via the clip-bounded scope, not the cursor');
+    assert.equal(tts.stopped, stops, 'no self-barge-in on ahead-of-cursor echo');
+    stt.onFinal('', 150);                                   // close the echo turn
+    await finish();
+  }));
+
+test('SELF-ECHO: a barged-in reply clamps the echo reference to the HEARD prefix', async () => {
+  // TTS reports the whole clip as scope while playing, but speak() resolves with only the heard
+  // prefix (barge-in). The clip-bounded reference must be clamped back: the unspoken remainder
+  // never hit the speakers, so a user quoting it must not be swallowed as echo.
+  const tts = {
+    _progress: null,
+    setOnProgress(f) { tts._progress = f; },
+    async speak(stream /*, signal */) {
+      let full = '';
+      for await (const t of stream) full += t;
+      tts._progress?.('reply-to', full);        // cursor lags, scope = whole reply
+      return 'reply-to';                        // barge-in: only this was heard
+    },
+    stop() {},
+  };
+  const { agent } = makeAgent({ tts });
+  agent.sendUserText('make me a page');
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(agent._replyText, 'reply-to');
+  assert.equal(agent._replyEcho, 'reply-to',
+    'clamped: unspoken remainder is not echo-eligible after playback stopped');
+});
+
 // ── TOOLS: the host `tools` map contract ─────────────────────────────────────────────────────────
 // Tools without a run() are dropped, never advertised to the LLM.
 

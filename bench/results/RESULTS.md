@@ -137,11 +137,12 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
 The driver mixes the agent's own speaker output back into the mic (software tap on
 `bench_spk.monitor`, attenuated −15dB, delayed 30ms) — a laptop speaker/mic without working AEC.
 Chrome AEC stays **off for every SUT** so the coupling hits everyone equally; surviving it is up
-to each stack's own echo strategy. Same smalltalk turns, same mock brain.
+to each stack's own echo strategy. Same smalltalk turns; brain comparability as in smalltalk
+(voiceloop/Pipecat/ConvAI share the mock LLM, Realtime is its own model).
 
 | configuration | voice→voice | self-interruptions | echo words in transcript | barge-in stop |
 |---|---|---|---|---|
-| **voiceloop** · deepgram + EL flash | **1111ms** (p95 2015) | **0** / 30 turns | 18 | 1363ms |
+| **voiceloop** · deepgram + EL flash | **931ms** (p95 2035) | **0** / 30 turns | 14 | 1460ms |
 | Pipecat 1.8.1 · deepgram + EL flash | 1317ms (p95 1893) | **20** / 30 turns | n/a (no transcript events) | 767ms |
 | OpenAI Realtime (gpt-realtime) * | 793ms (p95 1429) | **17** / 30 turns | 289 | 347ms |
 | ElevenLabs ConvAI | 1408ms (p95 1636) | **0** / 30 turns | 0 | 568ms |
@@ -152,10 +153,11 @@ window). echo words = response-script words appearing in the SUT's *user* transc
 
 - **voiceloop** — the run that motivated this scenario: the word-based self-echo filter
   (STT text fuzzy-matched against the audible reply prefix) had never faced real coupling.
-  It initially failed two ways, both fixed in `src/voice-agent.js` (see notes below):
-  final result **0 self-interruptions, 0 false barge-ins**, ~13% v→v cost vs clean smalltalk
-  (984→1111ms — echo finals occasionally delay turn commits). The 18 residual echo words are
-  *dropped* turns correctly classified as echo (28 echo drops), not answered.
+  It initially failed in three ways, all fixed in `src/voice-agent.js` (see notes below):
+  final result **0 self-interruptions, 0 false barge-ins, v→v at parity with clean smalltalk**
+  (931 vs 984ms — echo handling costs no latency once the filter classifies correctly). The 14
+  residual echo words are *dropped* turns correctly classified as echo (30 echo drops), not
+  answered.
 - **Pipecat** — default config self-interrupts on 20 of 30 turns: its energy-VAD
   `interrupt_response` hears the agent's own voice as the user and cuts the reply; with the
   reply swallowed the script shifts and parts of runs derail. No echo filtering in the default
@@ -193,7 +195,13 @@ canonical `stt_final`/`barge_stop`.
    never reach the fixed 3-hit drop threshold and became user turns the agent answered; the
    threshold now scales with the final's own length.
 
-Before the fixes: 6+ self-interruptions and v→v 1849ms on this scenario. After: 0 and 1111ms.
+The clip-bounded reference is clamped back to the actually-heard prefix the moment playback
+stops (finish or barge-in), so a user quoting the reply's *unspoken* remainder can never be
+swallowed as echo.
+
+Before the fixes (pooled smoke/diag/fix1 runs, 6 turns each): 1 self-interruption *per run*
+with 6–11 echo words leaking, v→v 1518–1849ms — every run corrupted by turn-0's cascade
+shifting the script. After: 0 self-interruptions in 30 turns, v→v 931ms.
 
 ## Environment
 

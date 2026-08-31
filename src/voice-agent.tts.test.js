@@ -356,3 +356,36 @@ test('presynth is deduped for the same text', async () => {
   await settle();
   assert.equal(tts.synths.filter((s) => s === 'Same text').length, 1);
 });
+
+// ── onProgress scope (the clip-bounded echo reference) ─────────────────────────────────────────
+// _playBuf's onProgress carries a 2nd arg: prefix + the WHOLE clip playing. The proportional
+// cursor (1st arg) lags real audio, so the echo filter judges against this upper bound instead —
+// but ONLY while that clip is actually playing (the agent clamps it back on stop).
+
+test('onProgress scope covers the whole playing clip, ahead of the lagging cursor', async () => {
+  const tts = new FakeTTS('v');
+  const seen = [];
+  tts.setOnProgress((spoken, scope) => seen.push({ spoken, scope }));
+  await play(tts, 'Hello world. Second sentence here.', undefined, (a, t) => {
+    a.tick(0.1);   // cursor barely moved into the clip…
+    return false;  // …then auto-end
+  });
+  assert.ok(seen.length > 0);
+  const first = seen.find((s) => s.scope?.includes('Hello world.'));
+  assert.ok(first, 'scope carries the full first clip from its very first tick');
+  assert.ok(first.scope.length >= first.spoken.length, 'scope is an upper bound of the cursor');
+  const second = seen.find((s) => s.scope?.includes('Second sentence here.'));
+  assert.ok(second.scope.includes('Hello world.'), 'later clips keep the spoken prefix in scope');
+});
+
+test('barge-in: speak() resolves with the HEARD prefix, not the scope upper bound', async () => {
+  const tts = new FakeTTS('v');
+  const ac = new AbortController();
+  let scopes = [];
+  tts.setOnProgress((_s, scope) => scopes.push(scope));
+  const out = await play(tts, 'Hello world. Second sentence here.', ac.signal, (a) => {
+    a.tick(0.5); ac.abort(); return true;   // cut mid-first-clip (stage-0 clip = "Hello")
+  });
+  assert.ok(scopes.some((s) => s.includes('Hello')), 'scope reached the full clip before the cut');
+  assert.ok(!out.includes('Second'), 'heard prefix excludes never-played text');
+});

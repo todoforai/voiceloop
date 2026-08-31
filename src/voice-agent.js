@@ -558,10 +558,14 @@ export class VoiceAgent {
       // TTS reports normalized spoken-so-far; map back to a raw prefix of `text` by non-whitespace count
       // so the host's cursor lands exactly (text keeps the model's original spacing). The audible
       // prefix doubles as the self-echo reference (see onPartial) — a replay leaks into the mic too.
+      // Echo reference = ONLY what this replay actually voices: a mid-reply replay (fromNw > 0)
+      // never plays the skipped head, so it must not be echo-eligible (a user quoting those words
+      // would be swallowed). skipLen = raw chars of that skipped head, cut from every reference.
+      const skipLen = fromNw > 0 ? sliceNw(text, fromNw).length : 0;
       this.tts.setOnProgress?.((spoken, scope) => {
         if (signal.aborted) return;
         this._replyText = sliceNw(text, nw(spoken));
-        this._replyEcho = scope ? sliceNw(text, nw(scope)) : this._replyText;   // clip-bounded echo reference (cursor lags real audio)
+        this._replyEcho = (scope ? sliceNw(text, nw(scope)) : this._replyText).slice(skipLen);   // clip-bounded echo reference (cursor lags real audio), minus the unplayed head
         onProgress(this._replyText, false);
       });
       try {
@@ -570,6 +574,9 @@ export class VoiceAgent {
         if (e.name !== 'AbortError') this.onEvent({ type: 'error', error: e.message });   // barge-in/supersede surfaces as AbortError → ignore
       } finally {
         this.tts.setOnProgress?.(null);
+        // Clamp the clip-bounded reference to what was actually heard (see _speakTurn's finally):
+        // the unspoken remainder of a barged-in clip never hit the speakers.
+        this._replyEcho = this._replyText.slice(skipLen);
         this._replyDoneAt = Date.now();    // start the post-playout echo grace window
         onProgress(text, true);            // solidify the message back to its whole text (played out, barged-in, or superseded)
         if (!this._closed && this.state !== 'idle' && !signal.aborted) this._set('listening');
@@ -926,6 +933,11 @@ export class VoiceAgent {
       // barge-in surfaced as AbortError → fall through and record whatever was heard
     } finally {
       this.tts.setOnProgress?.(null); this._cursorLive = false;       // drop the cursor hook — next turn re-registers
+      // Clamp the echo reference back to what was actually HEARD: the clip-bounded upper bound
+      // (_replyEcho) exists only because a PLAYING clip is ahead of the cursor — once playback
+      // stops (finished or barged-in), the unspoken remainder never hit the speakers, and keeping
+      // it in scope through the grace window would swallow a user quoting those exact words.
+      this._replyEcho = spoken ? rawPrefix(spoken) : this._replyText;
       this._replyDoneAt = Date.now();                                 // start the post-playout echo grace window
     }
 
