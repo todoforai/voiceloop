@@ -32,6 +32,16 @@ import { TUNING } from './tuning.js';
 
 const USAGE_FLUSH_SECONDS = 30;   // report streamed seconds to the backend at least this often
 
+// Cloud STT is a browser WebSocket. Resolved through globalThis at call time, not as a bare
+// identifier: this module is imported under SSR and under node (tests, node <22), where bare
+// `WebSocket` is a ReferenceError instead of undefined. A missing WS is a clear provider error —
+// not a stack trace from inside open().
+const newSocket = (url, protocols) => {
+  const WS = globalThis.WebSocket;
+  if (!WS) throw new Error('cloud STT needs WebSocket (unavailable here — browser or node >=22)');
+  return protocols ? new WS(url, protocols) : new WS(url);
+};
+
 // Common opts shape (provided by the VoiceAgent):
 //   { apiKey, sttUrl, sttModel, sttLang, keyterms, sttTokenUrl, getToken, sttUsageUrl,
 //     onPartial, onFinal, onError, onClose, isClosed }
@@ -145,7 +155,7 @@ export function makeElevenLabsSTT(opts) {
       if (sttLang) p.set('language_code', sttLang);
       for (const k of keyterms) p.append('keyterms', k);
       sttStart = performance.now();
-      ws = new WebSocket(`${sttUrl}?${p}`);
+      ws = newSocket(`${sttUrl}?${p}`);
       ws.onopen = () => { const q = outbox; outbox = []; for (const it of q) it === 'commit' ? sendCommit() : sendAudio(it); };
       ws.onerror = ev => { if (!isClosed()) { onError('STT socket error'); console.error('STT ws error', ev); } };
       ws.onclose = ev => { usage.flush(); onClose?.(); if (!isClosed() && ev.code !== 1000) { onError(`STT closed ${ev.code}: ${ev.reason || 'no reason'}`); console.error('STT ws closed', ev.code, ev.reason); } };
@@ -156,6 +166,11 @@ export function makeElevenLabsSTT(opts) {
         if (m.message_type === 'partial_transcript') onPartial(m.text || '', ms);
         else if (m.message_type?.startsWith('committed') && m.text) onFinal(m.text, ms);
       };
+    } catch (e) {
+      // open() is called fire-and-forget (pre-open, and lazily from feed()), so anything thrown here
+      // would surface as an unhandled rejection and kill the process under node. A socket that can't
+      // be built is unrecoverable for this provider — report it as fatal and let the host stop.
+      if (!isClosed()) onFatal(`STT open failed: ${e?.message || e}`);
     } finally {
       opening = false;
     }
@@ -284,7 +299,7 @@ export function makeSpeechmaticsSTT(opts) {
       if (!body) { outbox = []; sentSinceCommit = false; return; }
       if (isClosed()) return;
       sttStart = performance.now();
-      ws = new WebSocket(`${SM_URL}?jwt=${encodeURIComponent(body.token)}`);
+      ws = newSocket(`${SM_URL}?jwt=${encodeURIComponent(body.token)}`);
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => {
         // Declare the audio format + transcription config, then flush buffered audio once started.
@@ -376,6 +391,11 @@ export function makeSpeechmaticsSTT(opts) {
           case 'Error': onError(`${m.type || 'error'}: ${m.reason || ''}`); break;
         }
       };
+    } catch (e) {
+      // open() is called fire-and-forget (pre-open, and lazily from feed()), so anything thrown here
+      // would surface as an unhandled rejection and kill the process under node. A socket that can't
+      // be built is unrecoverable for this provider — report it as fatal and let the host stop.
+      if (!isClosed()) onFatal(`STT open failed: ${e?.message || e}`);
     } finally {
       opening = false;
     }
@@ -506,7 +526,7 @@ export function makeDeepgramSTT(opts) {
       sttStart = performance.now();
       // Browser WS auth: Sec-WebSocket-Protocol "bearer, <token>" (short-TTL access token from
       // /v1/auth/grant). The token only needs to be valid at handshake time; the socket persists.
-      ws = new WebSocket(`${DG_URL}?${p}`, ['bearer', token]);
+      ws = newSocket(`${DG_URL}?${p}`, ['bearer', token]);
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => { const q = outbox; outbox = []; outboxSamples = 0; for (const c of q) sendAudio(c); };
       ws.onerror = ev => { if (!isClosed()) { onError('STT socket error'); console.error('DG ws error', ev); } };
@@ -535,6 +555,11 @@ export function makeDeepgramSTT(opts) {
           }
         } else if (m.type === 'Error') { onError(`${m.code || 'error'}: ${m.description || ''}`); console.error('DG error msg', m); }
       };
+    } catch (e) {
+      // open() is called fire-and-forget (pre-open, and lazily from feed()), so anything thrown here
+      // would surface as an unhandled rejection and kill the process under node. A socket that can't
+      // be built is unrecoverable for this provider — report it as fatal and let the host stop.
+      if (!isClosed()) onFatal(`STT open failed: ${e?.message || e}`);
     } finally {
       opening = false;
     }
@@ -637,9 +662,12 @@ export function makeWebSpeechSTT(opts) {
   let micPending = null;   // the single in-flight acquisition — concurrent ensureTrack calls share it
   const acquireMic = () => {
     if (micPending) return micPending;
-    if (micTrack?.readyState === 'live' || !trackArg || !navigator.mediaDevices?.getUserMedia) return Promise.resolve();
+    // globalThis.navigator, not bare `navigator`: this module is imported under SSR and under node
+    // (tests), where the bare identifier is a ReferenceError rather than undefined — and this path
+    // is already written to degrade to the recognizer's own capture when there's no getUserMedia.
+    if (micTrack?.readyState === 'live' || !trackArg || !globalThis.navigator?.mediaDevices?.getUserMedia) return Promise.resolve();
     const gen = micGen;
-    micPending = navigator.mediaDevices.getUserMedia({ audio: {
+    micPending = globalThis.navigator.mediaDevices.getUserMedia({ audio: {
       echoCancellation: true, noiseSuppression: true, autoGainControl: true,
       ...(micDeviceId ? { deviceId: { exact: micDeviceId } } : {}),
     } }).then((s) => {
