@@ -16,8 +16,12 @@ Everything is pluggable: bring your own LLM (any OpenAI-compatible endpoint or a
 
 ## Quick start
 
+```sh
+npm i @todoforai/voiceloop
+```
+
 ```js
-import { VoiceAgent, unlockAudio, prewarmVoice } from 'voiceloop';
+import { VoiceAgent, unlockAudio, prewarmVoice } from '@todoforai/voiceloop';
 
 prewarmVoice(); // optional but recommended: preload VAD/WASM while your UI sits idle
 
@@ -163,7 +167,7 @@ myAgentLoop.acceptsToolGate = true;  // the loop awaits `toolGate` before ANY to
 ```
 
 - **`executesTools`** — a tool chunk carrying `result` (or `error`) is *reported*, not executed again. Emitting a `running: true` chunk first opens a live spinner chip that the outcome chunk replaces in place (matched by `id`); if the turn dies before the outcome arrives, voiceloop resolves the chip as `interrupted — did not finish` so a spinner is never left stuck.
-- **`acceptsToolGate`** — required to keep [speculative prefetch](#how-the-latency-adds-up) enabled. Prefetch starts the LLM on a *stable interim*, before the user has finished the sentence — so a tool firing there could send an email the user was still amending, and abort cannot undo it. The gate is a promise voiceloop resolves only when the turn **commits**: text streams speculatively, tools wait at the door, and a discarded speculation aborts instead. Without the flag, voiceloop refuses to speculate on that adapter at all (correct, but slower).
+- **`acceptsToolGate`** — required to keep [speculative prefetch](#how-the-latency-adds-up) enabled. Prefetch starts the LLM on a *stable interim*, before the user has finished the sentence — so a tool firing there could send an email the user was still amending, and abort cannot undo it. The gate is a promise voiceloop resolves only when the turn **commits**: text streams speculatively, tools wait at the door, and a discarded speculation **rejects** the gate instead — it always settles, so a loop awaiting it unwinds rather than hanging. Without the flag, voiceloop refuses to speculate on that adapter at all (correct, but slower).
 
 ## API surface
 
@@ -197,14 +201,14 @@ Liveness: the turn loop is strictly serialized, so host code it awaits could sta
 Default is **Piper** (local WASM, free, many languages and voices):
 
 ```js
-import { PiperTTS } from 'voiceloop';
+import { PiperTTS } from '@todoforai/voiceloop';
 new VoiceAgent({ tts: new PiperTTS('en_US-amy-medium') });
 ```
 
 **ElevenLabs** for human-grade voices (cloud; key stays server-side behind your proxy route):
 
 ```js
-import { ElevenLabsTTS } from 'voiceloop';
+import { ElevenLabsTTS } from '@todoforai/voiceloop';
 new VoiceAgent({ tts: new ElevenLabsTTS({ ttsUrl: '/api/tts' }) });   // your backend adds xi-api-key
 // dev only: new ElevenLabsTTS({ apiKey: 'xi-…' }) — direct browser→ElevenLabs
 ```
