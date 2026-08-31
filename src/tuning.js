@@ -150,6 +150,7 @@ export const TUNING = {
   // The 'level' event: a 0..1 loudness of the mic, emitted off the frames capture already produces.
   // Purely cosmetic — nothing in the pipeline reads it — so it's tuned for how a meter LOOKS.
   LEVEL_MIN_MS: 45,               // rate limit; capture chunks are ~256ms, so this never throttles today but bounds a finer-grained capture
+  LEVEL_NOISE_FLOOR_RMS: 0.004,   // below this the meter reads 0 — a quiet room must look silent, not "restless"
   LEVEL_FULL_SCALE_RMS: 0.28,     // RMS that reads as "full" — normal close speech peaks near 0.1-0.2, so this leaves headroom without pinning at 1
 
   // ── TTS (first-audio latency) ─────────────────────────────────────────────────────────────────

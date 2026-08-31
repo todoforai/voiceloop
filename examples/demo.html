@@ -41,8 +41,9 @@
 
   /* Halo: the light this thing throws on the page. It sits OUTSIDE the clipped orb, so the glow
      blooms past the rim — at video scale that bloom is most of the "alive" read.
-     The gradient must stay opaque out to the orb's own edge (~69% of this box) or the only visible
-     part is a thin ring: the orb itself paints over everything inside it. */
+     This box is 190% of the orb, so the orb's own edge falls at ~53% of this radius: the gradient
+     has to still be bright there (opaque to 34%, fading to 72%) or the only visible part is a dim
+     ring — the orb paints over everything inside it. */
   #orb::before { content:''; position:absolute; inset:-45%; border-radius:50%; pointer-events:none;
                  background:radial-gradient(circle, var(--b) 0 34%, transparent 72%);
                  opacity:calc(var(--glow) * (.34 + var(--lvl) * .66)); filter:blur(22px);
@@ -118,7 +119,13 @@
   body[data-state="thinking"]  { --c:#ffc453 }
   body[data-state="speaking"]  { --c:#ff8a3d }
 
+  /* Reduced motion: hold the orb STILL. Killing the transitions alone isn't enough — the level var
+     keeps changing, so every scale would just snap instead of glide. Pin --lvl and the object
+     becomes a flat, quietly coloured disc that still reads state by hue. (setLevel() also stops
+     writing the var, and ripple() creates no rings — a display:none ring never fires animationend,
+     so it would leak one element per turn.) */
   @media (prefers-reduced-motion: reduce) {
+    #orb { --lvl:0 !important }
     #mic i { animation:none } #mic, #orb::before, #mic i { transition:none }
     #orb u { display:none }
   }
@@ -313,24 +320,33 @@ function onSettingChanged() { showPipeline(); prewarmIfPipelined(); }
 // empty the meter between two events at 60fps and flicker, and would run at a different speed on a
 // 144Hz display.
 const orb = $('orb');
+const stillMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const HALF_LIFE_MS = 260;                                        // target sags to half this long after its last source sample
 const ATTACK_MS = 60, RELEASE_MS = 320;                          // fast attack, slow release — how a meter reads as "alive"
 const decayed = (v, ms, halfLife) => v * Math.pow(0.5, ms / halfLife);
-let lvl = 0, lvlTarget = 0, lastFrame = 0;
-const setLevel = (v) => { lvlTarget = Math.max(lvlTarget, Math.min(1, v)); };
-const tickLevel = (now) => {
+let lvl = 0, lvlTarget = 0, lastFrame = 0, running = false;
+const setLevel = (v) => {
+  if (!Number.isFinite(v) || stillMotion.matches) return;   // a NaN would poison the meter for the page's lifetime
+  lvlTarget = Math.max(lvlTarget, Math.min(1, Math.max(0, v)));
+  if (!running) { running = true; lastFrame = 0; requestAnimationFrame(tickLevel); }
+};
+// Runs only while there is something to show: sources re-arm it, and it parks itself once the meter
+// has settled at rest — an idle demo shouldn't be writing a style property 60 times a second.
+function tickLevel(now) {
   const dt = Math.min(100, now - (lastFrame || now)); lastFrame = now;   // clamp: a backgrounded tab resumes with a huge gap
   lvlTarget = decayed(lvlTarget, dt, HALF_LIFE_MS);
   // Exponential approach toward the target, converging at the same rate regardless of frame rate.
   lvl += (lvlTarget - lvl) * (1 - Math.exp(-dt / (lvlTarget > lvl ? ATTACK_MS : RELEASE_MS)));
+  if (lvl < 0.002 && lvlTarget < 0.002) { lvl = lvlTarget = 0; running = false; }
   orb.style.setProperty('--lvl', lvl.toFixed(3));
-  requestAnimationFrame(tickLevel);
-};
-requestAnimationFrame(tickLevel);
+  if (running) requestAnimationFrame(tickLevel);
+}
 
 // One ring per turn boundary. Marks the two instants the transcript cannot show: your turn being
-// committed, and a barge-in cutting the reply.
+// committed, and a barge-in cutting the reply. Under reduced motion the ring is display:none, which
+// never fires animationend — so don't create one at all rather than leak an element per turn.
 const ripple = () => {
+  if (stillMotion.matches) return;
   const u = document.createElement('u');
   u.onanimationend = () => u.remove();
   orb.append(u);
@@ -374,7 +390,7 @@ function onEvent(e) {
         ripple();                        // your turn closed — the instant the latency clock starts
         interimEl?.remove(); interimEl = null;
         bubble('user', e.text);
-        aiEl = null; t0 = Date.now(); tText = tAudio = 0; $('lat').textContent = '';
+        aiEl = null; spokenLen = 0; t0 = Date.now(); tText = tAudio = 0; $('lat').textContent = '';
       } else {
         interimEl ??= bubble('user interim');
         interimEl.textContent = `${e.committed ?? ''} ${e.text}`.trim();
@@ -384,7 +400,7 @@ function onEvent(e) {
     case 'assistant': {
       // Empty and non-final means "that draft never happened" (interrupted before
       // a word was spoken) — drop the bubble rather than blank it.
-      if (!e.text && !e.final) { aiEl?.remove(); aiEl = null; break; }
+      if (!e.text && !e.final) { aiEl?.remove(); aiEl = null; spokenLen = 0; break; }
       if (!tText && t0) { tText = Date.now(); showLat(); }
       // `full` only exists once the TTS progress cursor is live — i.e. a clip is
       // actually playing. The 'speaking' state is just the first token, not sound.
@@ -393,9 +409,13 @@ function onEvent(e) {
       // and only the UI should say so.
       aiEl ??= bubble($('mode').value === 'echo' ? 'ai echoed' : 'ai');
       // The agent's own voice has no level event (TTS plays through an internal AEC sink), so drive
-      // the orb from how fast the spoken cursor advances — the orb rides its own speech.
-      if (e.full != null) setLevel(0.35 + Math.min(0.6, (e.text.length - spokenLen) * 0.09));
-      spokenLen = e.text.length;
+      // the orb from how fast the spoken CURSOR advances — the orb rides its own speech. Only events
+      // carrying `full` have a cursor; a pre-audio streaming draft would otherwise run spokenLen up
+      // to the draft's length and the NEXT reply would sit flat until it grew past that stale mark.
+      if (e.full != null) {
+        setLevel(0.35 + Math.min(0.6, Math.max(0, e.text.length - spokenLen) * 0.09));
+        spokenLen = e.text.length;
+      }
       aiEl.textContent = e.text;                                    // spoken so far
       const tail = (e.full ?? e.text).slice(e.text.length);         // generated, not yet heard
       if (tail) aiEl.append(Object.assign(document.createElement('span'), { className:'tail', textContent:tail }));

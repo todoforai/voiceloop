@@ -1149,11 +1149,11 @@ test('level events follow mic loudness on a 0..1 perceptual curve', () => {
   const frame = (amp) => Float32Array.from({ length: 512 }, (_, i) => amp * Math.sin(i / 4));
   const levelOf = (amp) => {
     agent._levelAt = 0;                    // defeat the rate limit: these frames arrive back-to-back
-    events.length = 0; agent._feed(frame(amp));
+    events.length = 0; agent._onCapture(frame(amp));
     return events.find((e) => e.type === 'level').level;
   };
   const [silent, quiet, loud] = [levelOf(0), levelOf(0.05), levelOf(0.5)];
-  assert.ok(silent < 0.05, `silence reads as ~0 (got ${silent})`);
+  assert.equal(silent, 0, 'silence reads as exactly 0');
   assert.ok(quiet > silent && quiet < loud, `speech sits between (got ${quiet})`);
   assert.ok(loud <= 1, `never exceeds full scale (got ${loud})`);
   // Cube-root curve: normal speech must land in the MIDDLE of the range, not squashed near zero
@@ -1162,11 +1162,47 @@ test('level events follow mic loudness on a 0..1 perceptual curve', () => {
   agent.destroy();
 });
 
+// A near-silent room still has RMS. Without a noise floor a cube root lifts it to a visible level and
+// the meter never rests — the orb looks permanently restless with nobody in the room.
+test('room noise below the floor reads as silence', () => {
+  const { agent, events } = makeAgent();
+  agent._levelAt = 0;
+  agent._onCapture(Float32Array.from({ length: 512 }, (_, i) => 0.002 * Math.sin(i / 4)));
+  assert.equal(events.find((e) => e.type === 'level').level, 0, 'quiet room → a resting meter');
+  agent.destroy();
+});
+
 // The rate limit is what keeps a fine-grained capture from flooding the host with repaints.
 test('level events are rate-limited', () => {
   const { agent, events } = makeAgent();
   const frame = Float32Array.from({ length: 512 }, () => 0.2);
-  agent._feed(frame); agent._feed(frame); agent._feed(frame);
+  agent._onCapture(frame); agent._onCapture(frame); agent._onCapture(frame);
   assert.equal(events.filter((e) => e.type === 'level').length, 1, 'back-to-back frames collapse to one emit');
+  agent.destroy();
+});
+
+// stop() PAUSES the pipeline (warm resume) — the mic stays open and the worklet keeps delivering
+// frames. A host meter must go quiet with the session, not keep dancing to a stopped agent.
+test('no level events after stop() or while muted', () => {
+  const { agent, events } = makeAgent();
+  const frame = Float32Array.from({ length: 512 }, (_, i) => 0.4 * Math.sin(i / 4));
+  const feed = () => { agent._levelAt = 0; events.length = 0; agent._onCapture(frame); return events.filter((e) => e.type === 'level').length; };
+  assert.equal(feed(), 1, 'precondition: a live session meters');
+  agent.stop();
+  assert.equal(feed(), 0, 'stopped → silent, even though frames still arrive');
+  agent._closed = false; agent.setMuted(true);
+  assert.equal(feed(), 0, 'muted → silent, not a flat zero stream');
+  agent.destroy();
+});
+
+// The cosmetic tap must never cost the pipeline a frame: a host that throws while painting its meter
+// would otherwise take the audio STT needs down with it.
+test('a throwing level listener does not cost STT the frame', () => {
+  const fed = [];
+  const { agent } = makeAgent({ opts: { onEvent: (e) => { if (e.type === 'level') throw new Error('host render blew up'); } } });
+  agent.stt = { ...agent.stt, continuous: true, feed: (c) => fed.push(c) };
+  agent._levelAt = 0;
+  assert.throws(() => agent._onCapture(Float32Array.from({ length: 512 }, () => 0.3)), /host render blew up/);
+  assert.equal(fed.length, 1, 'STT got the frame before the host callback ran');
   agent.destroy();
 });

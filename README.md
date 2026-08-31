@@ -55,8 +55,10 @@ That's it. Speak, get spoken answers, interrupt at will.
 ## Try it in 20 seconds
 
 **[todoforai.github.io/voiceloop](https://todoforai.github.io/voiceloop/)** — the live demo, no
-install. It runs entirely in your browser on the zero-key path (Web Speech STT + local Piper TTS +
-an echo stand-in), so nothing you say leaves the machine.
+install, no keys and no backend of ours: the default path is your browser's own Web Speech STT,
+local Piper TTS, and an echo stand-in for the LLM. (Web Speech is the *browser's* recognizer —
+on most builds it still sends audio to the browser vendor. Pick a pipeline STT provider in
+settings to see voiceloop's own VAD→STT path.)
 
 Or locally, to point it at your own LLM:
 
@@ -65,10 +67,11 @@ npx serve .                     # from a clone
 npx serve node_modules/@todoforai/voiceloop    # from npm
 ```
 
-Open **`/examples/demo.html`** — the whole loop behind one orb that breathes with
-your voice (and with its own), the live interim transcript, click-to-interrupt with
-the unspoken remainder struck through where you cut it off, and the two numbers that
-decide whether it feels alive: **first token** and **first sound**. It starts in **echo mode**
+Open **`/examples/demo.html`** — the whole loop behind one orb that breathes with the
+mic level (and, while it answers, with how fast its spoken cursor advances), the live
+interim transcript, click-to-interrupt with the unspoken remainder struck through where
+you cut it off, and the two numbers that decide whether it feels alive: **first token**
+and **first sound**. It starts in **echo mode**
 — browser-native Web Speech STT, local Piper TTS and a stand-in "LLM" that
 repeats you — so it runs with no keys, no backend and no cost. Open *settings*
 to point it at any OpenAI-compatible endpoint (Ollama, your proxy) and a cloud
@@ -252,9 +255,11 @@ Two of them exist purely so a UI can look alive, and both cost you nothing to ig
   meter or a reacting orb with it; decay it over *elapsed time* rather than per frame, or it
   flickers out between samples. Not emitted for a `selfCapture` provider (webspeech owns its mic).
 - **interruption** — there is no "cut short" event: the final `assistant` event carries both what
-  was heard (`text`) and what was written (`full`), so `full.slice(text.length)` non-empty *is* the
-  barge-in. Render that remainder struck through and the transcript shows exactly where your voice
-  cut it off (see `examples/demo.html`).
+  was heard (`text`) and what was written (`full`), so a non-empty `full.slice(text.length)` means
+  the reply was cut before that remainder was ever spoken. Render it struck through and the
+  transcript shows exactly where playback stopped (see `examples/demo.html`). It does not say *why*:
+  a voice barge-in, `interrupt()`, a superseding turn and `setTtsMuted(true)` all end a reply the
+  same way.
 
 ## Tuning
 

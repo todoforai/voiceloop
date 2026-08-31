@@ -497,7 +497,7 @@ export class VoiceAgent {
         await ctx.audioWorklet.addModule(CAPTURE_WORKLET_URL);
         if (gen !== this._pipelineGen || this._closed) { stream.getTracks().forEach(t => t.stop()); ctx.close(); return; }   // superseded/stopped while loading
         const node = new AudioWorkletNode(ctx, 'capture-processor');
-        node.port.onmessage = e => this._feed(e.data);   // Float32Array chunk from the audio thread
+        node.port.onmessage = e => this._onCapture(e.data);   // Float32Array chunk from the audio thread
         // The processor writes no output — this connection only keeps the node pulled by the graph.
         src.connect(node); node.connect(ctx.destination);
         this._ctx = ctx; this._node = node;
@@ -1226,7 +1226,6 @@ export class VoiceAgent {
   // keep a small preroll so word-starts aren't clipped, and feed/commit on VAD boundaries.
   _feed(f32) {
     if (this._useBootstrap) this._bootstrapVadTick(f32);
-    this._emitLevel(f32);
     const i16 = new Int16Array(f32.length);
     for (let i = 0; i < f32.length; i++) i16[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
     this._tapPush(i16);   // diagnostic ring buffer of the exact frames handed to STT (see dumpAudio)
@@ -1241,20 +1240,35 @@ export class VoiceAgent {
     this.stt.feed(i16);
   }
 
+  // The capture entry point: everything the pipeline needs, THEN the cosmetic tap. _feed has several
+  // early returns (preroll while silent, continuous providers), so the level can't just live at its
+  // end — and it must not live at the START either, where a host that throws while painting its
+  // meter would take down the frame STT was waiting for.
+  _onCapture(f32) { this._feed(f32); this._emitLevel(f32); }
+
   // ── mic level ──────────────────────────────────────────────────────────
   // How loud the user is RIGHT NOW, for host visualisers (a mic meter, a reacting orb). Derived from
   // the frames already in hand — no second AudioContext, no AnalyserNode, no extra mic tap.
-  // RMS is mapped to 0..1 on a perceptual (cube-root) curve: linear RMS spends most of its range on
-  // levels nobody can hear, so a meter driven by it barely moves during normal speech.
-  // Rate-limited to ~LEVEL_MIN_MS so a 4096-sample (256ms @16k) cadence can't be outrun by a faster
-  // capture chunk; a selfCapture STT (Web Speech) owns its own mic, so this never fires there.
+  // Purely cosmetic, so it is emitted only for a session the host would call LIVE: stop() pauses the
+  // pipeline without closing the mic (warm resume) and the worklet keeps delivering frames, so
+  // without the _closed guard a "stopped" agent would keep driving the host's meter; a muted mic
+  // would likewise stream a flat zero forever instead of going quiet.
+  // Rate-limited to ~LEVEL_MIN_MS so a capture finer than the current 4096-sample (256ms @16k)
+  // chunk can't flood the host. A selfCapture STT (Web Speech) owns its own mic — no frames, no
+  // level events at all.
   _emitLevel(f32) {
+    if (this._closed || this._muted) return;
     const now = (globalThis.performance ?? Date).now();
     if (now - this._levelAt < TUNING.LEVEL_MIN_MS) return;
     this._levelAt = now;
     let sum = 0; for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
     const rms = Math.sqrt(sum / f32.length);
-    this.onEvent({ type: 'level', level: Math.min(1, Math.cbrt(rms / TUNING.LEVEL_FULL_SCALE_RMS)) });
+    // Perceptual curve, floored: linear RMS spends most of its range on levels nobody can hear, so a
+    // meter driven by it barely moves during speech. The floor is what keeps room noise reading as
+    // silence — without it a cube root maps a near-silent room to ~0.15-0.3 and the meter never rests.
+    const norm = (rms - TUNING.LEVEL_NOISE_FLOOR_RMS) / (TUNING.LEVEL_FULL_SCALE_RMS - TUNING.LEVEL_NOISE_FLOOR_RMS);
+    const level = norm <= 0 ? 0 : Math.min(1, Math.cbrt(norm));
+    this.onEvent({ type: 'level', level });
   }
 
   // ── diagnostic tap ─────────────────────────────────────────────────────
