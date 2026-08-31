@@ -52,6 +52,26 @@ button.onclick = async () => {
 
 That's it. Speak, get spoken answers, interrupt at will.
 
+## Try it in 20 seconds
+
+```sh
+npx serve .                     # from a clone
+npx serve node_modules/@todoforai/voiceloop    # from npm
+```
+
+Open **`/examples/demo.html`** — the whole loop behind one orb, with the live
+interim transcript, click-to-interrupt, and the two numbers that decide whether
+it feels alive: **first token** and **first sound**. It starts in **echo mode**
+— browser-native Web Speech STT, local Piper TTS and a stand-in "LLM" that
+repeats you — so it runs with no keys, no backend and no cost. Open *settings*
+to point it at any OpenAI-compatible endpoint (Ollama, your proxy) and a cloud
+STT provider.
+
+`/examples/simple-browser.html` is the same loop with no UI at all — 100 lines,
+the place to start reading.
+
+(`file://` won't work — mic and module imports need `http://localhost` or https.)
+
 ## How the latency adds up
 
 ```

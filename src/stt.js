@@ -71,7 +71,10 @@ async function mintSttToken(url, apiKey, onFatal, getToken) {
     return null;
   }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok || !body.token) { onFatal(`STT token: ${body.error || body.message || res.statusText}`); return null; }
+  // `message` first: a token route's error body usually puts the reason there and the bare status
+  // name in `error` ({ error: 'Unauthorized', message: 'API key not found' }) — the reason is what
+  // tells the developer their key is wrong rather than their URL.
+  if (!res.ok || !body.token) { onFatal(`STT token: ${body.message || body.error || res.statusText}`); return null; }
   return body;
 }
 
