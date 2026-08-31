@@ -404,6 +404,7 @@ navigator.mediaDevices?.enumerateDevices().then(ds => {
 }).catch(() => {});
 
 setState('idle');
+onSettingChanged();   // the banner must describe the restored settings from the FIRST frame, not only after a click
 window.agent = () => agent;   // console poking: agent().history, …
 </script>
 </body>
