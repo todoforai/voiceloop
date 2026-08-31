@@ -140,26 +140,6 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
   instead of a 300ms mock hurts it. Treat its numbers as "the product as shipped", not as a
   pipeline comparison.
 
-## Scenario: hesitation (pauses and false completions mid-utterance)
-
-Same rig, harder user: 6 booking turns where the "person" pauses 450–900ms **mid-sentence**
-("I'd like a table for… …four people") and uses false-completion phrasings that sound finished
-but aren't. This prices the aggressive-endpointing lever: a stack tuned for minimum EOT delay
-answers the half-sentence and talks over the user. Two metrics expose it — **user-interrupted**
-(agent starts a reply inside a still-open user turn) and **first content word** (filler-word
-head starts don't count).
-
-| config | voice→voice | p95 | user-interrupted | stalls |
-|---|---|---|---|---|
-| voiceloop deepgram + EL flash | 1396ms | 1709 | 2 / 30 | 33 |
-| voiceloop deepgram + Piper | 1400ms | 2006 | 0 / 30 | 43 |
-
-Read against smalltalk (984ms): hesitation costs voiceloop ~400ms of v→v — that's the price of
-waiting out the pause instead of answering the fragment. It only interrupted the user 2 times
-in 60 turns across both configs. A stack could buy the 400ms back by endpointing harder; the
-user-interrupted column is where that would show. Competitor rows (ConvAI / Pipecat / Realtime)
-pending rig time.
-
 ## Scenario: hesitation (6 turns, 400–900ms mid-utterance pauses, fixed mock LLM)
 
 The scenario where **aggressive endpointing pays its bill**. Every person line contains

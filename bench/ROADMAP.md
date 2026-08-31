@@ -24,9 +24,15 @@ be free to answer fast and eagerly; the table should simply also show what that 
    timestamps vs the scripted response). The bill got paid as predicted: Pipecat smart-turn 16/30
    and Realtime server_vad 12/30 premature entries vs 0–2/30 for flux/turn_v3 — while the eager
    two hold the fastest v→v. Both numbers now sit side by side in the table.
-2. **noise** — café/TV speech bed mixed into bench_mic at realistic SNR + a non-speech burst
-   (cough/door slam) during agent speech. This is where energy-VAD barge-in pays its bill,
-   and where word-based barge-in should visibly win.
+2. **noise** — SHELVED after a 5-run voiceloop probe (assets kept: `scenarios/noise.json`,
+   `gen-noise.js`, driver mixing, burst metrics). The probe showed the scenario as cut doesn't
+   measure what it targets: the café bed is *intelligible* English at 15dB SNR, so STT
+   transcribes it as competing dialogue and the agent almost never gets an endpoint to reply on
+   (6/30 replied turns) — a cocktail-party/speaker-separation test, not a false-barge-in test,
+   and the bursts never fired because there was no agent speech to fire into. Every stack with a
+   plain STT stream fails the same way, so a competitor matrix would burn rig time to show one
+   shape. Revival path if wanted: re-cut the bed as unintelligible babble (4–6 overlapped
+   tracks, ~25dB SNR), keep the cough/door bursts, re-probe voiceloop 5× before any matrix.
 3. ~~**echo loopback**~~ — DONE (`scenarios/echo.json`, results in RESULTS.md). bench_spk mixed
    into bench_mic at −15dB/30ms (driver-side software tap — deterministic, no pulse modules).
    Metrics landed: echo words in the user transcript + self-interruptions (audio truth).
