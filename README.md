@@ -62,25 +62,26 @@ first audio ────────┘  next sentences pre-synthesized during p
 
 **Measured, not claimed**: [voice-agent-bench](https://github.com/todoforai/voice-agent-bench)
 (developed here at [`bench/`](bench/)) is a black-box rig — audio in → audio out, zero
-integration — that scores voiceloop and competing agent stacks on the same scripted
-conversation and the same fixed mock LLM. Pooled 5-run medians:
+integration — that scores voiceloop and competing stacks on the same scripted conversations
+and the same fixed mock LLM. Reply latency (voice→voice median), and how often the system
+misbehaves — talks over a hesitating user, or cuts its own reply when its voice echoes back
+into the mic (no AEC):
 
-| system | voice→voice | p95 | with speaker→mic echo: v→v / self-interruptions |
+| system | latency | talked over user | cut itself under echo |
 |---|---|---|---|
-| OpenAI Realtime (speech-to-speech, own LLM — not comparable brain)* | 866ms | 1644 | 793ms / **17**·30 turns, 289 echo words in transcript |
-| **voiceloop** (deepgram + ElevenLabs flash TTS) | **984ms** | **1169** | **931ms / 0** |
-| **voiceloop** (deepgram + Piper, free local TTS) | **~1050ms** | 1306 | — |
-| Pipecat 1.8.1 (same deepgram + EL flash providers) | 1046ms | 3573 | 1317ms / **20**·30 turns |
-| ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1408ms / 0 |
+| OpenAI Realtime (own LLM)* | 870ms | 12/30 | **17/30** |
+| **voiceloop** (deepgram + ElevenLabs flash) | **980ms** | **2/30** | **0/30** |
+| **voiceloop** (deepgram + Piper, free local TTS) | **970ms** | **0/30** | — |
+| Pipecat 1.8.1 (same providers) | 1050ms | 16/30 | **20/30** |
+| ElevenLabs ConvAI | 1450ms | 2/30 | 0/30 |
 
-The echo column is the differentiator: mix the agent's own voice back into the mic (laptop
-speaker/mic, no echo cancellation) and the energy-VAD stacks audibly cut their own replies
-mid-sentence — only voiceloop's word-level echo filter and ConvAI's server-side suppression
-survive, and **voiceloop is the only survivor under 1.2s**, running at full speed with echo
-present (931 vs 984ms clean: echo defense costs nothing).
+The fast rows and the well-behaved rows are different rows — except voiceloop: the other fast
+stacks buy their speed by answering the user's half-sentence and by hearing their own echo as
+the user. voiceloop's word-level echo filter runs echo-coupled turns at full speed (930ms,
+parity with clean).
 
-\* Realtime can't use the bench's fixed mock LLM (it *is* the LLM), and its per-run medians
-spanned 628–1368ms — fast but the noisiest of any system; voiceloop has the tightest p95.
+\* Realtime is speech-to-speech — it can't use the bench's fixed mock LLM, so its row isn't
+fully apples-to-apples.
 
 Full tables, method and reproduction steps: [`bench/results/RESULTS.md`](bench/results/RESULTS.md).
 

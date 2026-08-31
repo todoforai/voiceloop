@@ -26,6 +26,37 @@ talks to the virtual devices. PRs with new SUTs or scenarios welcome.
 checklist) is in [`ADDING_A_SUT.md`](ADDING_A_SUT.md) — integration is just "listen on
 `bench_mic`, speak on `bench_spk`".
 
+## What we measure
+
+One scripted conversation, five times, all turns pooled (median + p95, n=30). Every number
+comes from the recorded audio; a row only gets internal sub-metrics if the SUT is instrumented.
+
+**Latency** (ms, lower is better)
+
+| number | meaning |
+|---|---|
+| **voice→voice** | person stops speaking → first audible agent audio. The headline. |
+| **barge-in stop** | person starts interrupting → agent audio actually stops. |
+| **first content word** | person stops → first agent word from the actual answer (a "Hmm," head start doesn't count). |
+| EOT delay | person stops → agent commits the turn (endpointing decision). |
+| STT first partial | person starts → first partial transcript. |
+| TTS first audio | first LLM token → first audible synthesis. |
+
+**Behavior** (counts over 30 turns, 0 is perfect)
+
+| number | meaning |
+|---|---|
+| **user-interrupted** | agent started talking while the user was mid-turn (e.g. during a pause). |
+| **self-interruptions** | agent cut its own reply with nobody talking (hearing itself as the user). |
+| false barge-ins | agent stopped for something that wasn't the user interrupting. |
+| stalls | ≥250ms silent gap inside one reply. |
+| echo words | agent's own words leaking into its *user* transcript. |
+| WER / spoken ratio | transcript accuracy / fraction of the reply actually delivered. |
+
+Latency and behavior must be read together: several stacks buy their speed by talking over
+users (hesitation scenario) or cutting themselves (echo scenario). Neither column alone ranks
+a system.
+
 Two modes, one scorecard (`metrics.js`):
 
 - **Instrumented** (agents that emit milestone events): internal splits (EOT / TTFT / TTS-first-audio) merged into the audio timeline via epoch clock.

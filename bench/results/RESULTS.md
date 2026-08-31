@@ -10,13 +10,27 @@ Method details: [`bench/README.md`](../README.md) · harness: [`bench/blackbox/`
 **Single runs lie** (±300ms network/WASM jitter — we watched it flip conclusions), so every
 configuration is 5 conversations × 6 turns, pooled (n=30 turns; barge-in n=10).
 
-**Headline**: three scenarios so far — clean ([smalltalk](#scenario-smalltalk-6-turns-2-barge-ins-fixed-mock-llm)),
-hesitating user ([hesitation](#scenario-hesitation-pauses-and-false-completions-mid-utterance)), and acoustic echo
-([echo](#scenario-echo-smalltalk--speakermic-coupling-15db--30ms)). Speed rankings barely move
-between clean and echo — **what changes is who survives**: with the agent's own voice fed back
-into the mic, Pipecat and OpenAI Realtime cut their own replies mid-sentence on 17–20 of 30
-turns, while voiceloop runs clean at 931ms. Fast is table stakes; not talking over yourself —
-or the user's mid-sentence pause — is the actual test.
+## The whole benchmark in one table
+
+Three scenarios: **clean** (smalltalk), **hesitating user** (mid-sentence pauses), **echo**
+(agent's own voice fed back into the mic, no AEC). Latency = voice→voice median; misbehavior =
+talked over the user (hesitation) / cut its own reply (echo), out of 30 turns.
+
+| system | clean | hesitation | talked over user | echo | cut itself |
+|---|---|---|---|---|---|
+| OpenAI Realtime * | 870ms | 1290ms | 12/30 | 790ms | **17/30** |
+| **voiceloop** · deepgram + EL flash | 980ms | 1400ms | **2/30** | 930ms | **0** |
+| **voiceloop** · deepgram + Piper (free, local) | 970ms | 1400ms | **0/30** | — | — |
+| Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 16/30 | 1320ms | **20/30** |
+| ElevenLabs ConvAI | 1450ms | 1810ms | 2/30 | 1410ms | 0 |
+
+Speed rankings barely move across scenarios — **what changes is who misbehaves**. The two
+fastest rows keep their speed by talking over a hesitating user on 40–53% of turns and by
+cutting their own replies under echo. voiceloop is the only system in both the fastest and
+the well-behaved group. Fast is table stakes; not talking over the user — or yourself — is
+the actual test. Full per-scenario tables below.
+
+\* speech-to-speech, its own LLM — the others share a fixed mock LLM (see caveats).
 
 ## Scenario: smalltalk (6 turns, 2 barge-ins, fixed mock LLM)
 
@@ -27,7 +41,7 @@ so the numbers measure the voice pipeline, not the language model.
 |---|---|---|---|---|
 | OpenAI Realtime (gpt-realtime, speech-to-speech) * | 866ms | 1644 | 429ms | 20 |
 | **voiceloop** · deepgram + ElevenLabs flash TTS | **984ms** | 1169 | 1019ms | 15 |
-| **voiceloop** · deepgram + Piper (free, local) | **981–1101ms** | 1306 | 1452ms | 23 |
+| **voiceloop** · deepgram + Piper (free, local) | **974ms** | 1287 | 1463ms | 19 |
 | Pipecat 1.8.1 · deepgram + EL flash TTS | 1046ms | 3573 | 542ms | 14 |
 | ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1042ms | 8 |
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
