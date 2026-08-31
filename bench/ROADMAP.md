@@ -24,10 +24,12 @@ be free to answer fast and eagerly; the table should simply also show what that 
 2. **noise** — café/TV speech bed mixed into bench_mic at realistic SNR + a non-speech burst
    (cough/door slam) during agent speech. This is where energy-VAD barge-in pays its bill,
    and where word-based barge-in should visibly win.
-3. **echo loopback** — bench_spk mixed back into bench_mic (~−15dB, ~30ms delay), like a
-   laptop speaker/mic. Metrics: echo words leaking into the SUT transcript, self-interruptions.
-   Also a product check: voiceloop's self-echo word filter has never run against real coupling
-   on this rig (AEC is off because virtual devices had no echo path — this scenario creates one).
+3. ~~**echo loopback**~~ — DONE (`scenarios/echo.json`, results in RESULTS.md). bench_spk mixed
+   into bench_mic at −15dB/30ms (driver-side software tap — deterministic, no pulse modules).
+   Metrics landed: echo words in the user transcript + self-interruptions (audio truth).
+   The product check paid off: voiceloop's echo filter failed under real coupling (cascading
+   self-interruptions) and was fixed in src/ — 0 self-interruptions now; Pipecat default (20/30
+   turns) and OpenAI Realtime without client AEC (17/30) audibly break; ConvAI survives.
 
 ## New metrics
 

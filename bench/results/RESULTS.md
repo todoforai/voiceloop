@@ -132,6 +132,69 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
   instead of a 300ms mock hurts it. Treat its numbers as "the product as shipped", not as a
   pipeline comparison.
 
+## Scenario: echo (smalltalk + speaker→mic coupling, −15dB / 30ms)
+
+The driver mixes the agent's own speaker output back into the mic (software tap on
+`bench_spk.monitor`, attenuated −15dB, delayed 30ms) — a laptop speaker/mic without working AEC.
+Chrome AEC stays **off for every SUT** so the coupling hits everyone equally; surviving it is up
+to each stack's own echo strategy. Same smalltalk turns, same mock brain.
+
+| configuration | voice→voice | self-interruptions | echo words in transcript | barge-in stop |
+|---|---|---|---|---|
+| **voiceloop** · deepgram + EL flash | **1111ms** (p95 2015) | **0** / 30 turns | 18 | 1363ms |
+| Pipecat 1.8.1 · deepgram + EL flash | 1317ms (p95 1893) | **20** / 30 turns | n/a (no transcript events) | 767ms |
+| OpenAI Realtime (gpt-realtime) * | 793ms (p95 1429) | **17** / 30 turns | 289 | 347ms |
+| ElevenLabs ConvAI | 1408ms (p95 1636) | **0** / 30 turns | 0 | 568ms |
+
+self-interruptions = the agent cut its own reply with nobody talking (audio truth: reply
+delivered <80% outside scripted interrupts, or an explicit cut outside every person-speech
+window). echo words = response-script words appearing in the SUT's *user* transcript.
+
+- **voiceloop** — the run that motivated this scenario: the word-based self-echo filter
+  (STT text fuzzy-matched against the audible reply prefix) had never faced real coupling.
+  It initially failed two ways, both fixed in `src/voice-agent.js` (see notes below):
+  final result **0 self-interruptions, 0 false barge-ins**, ~13% v→v cost vs clean smalltalk
+  (984→1111ms — echo finals occasionally delay turn commits). The 18 residual echo words are
+  *dropped* turns correctly classified as echo (28 echo drops), not answered.
+- **Pipecat** — default config self-interrupts on 20 of 30 turns: its energy-VAD
+  `interrupt_response` hears the agent's own voice as the user and cuts the reply; with the
+  reply swallowed the script shifts and parts of runs derail. No echo filtering in the default
+  pipeline.
+- **OpenAI Realtime** — server VAD hears its own echo as user speech constantly: 289
+  response-script words landed in its user transcript and it truncated its own answers 30–68
+  times per 6-turn run (17 audible self-interruptions; its fast regenerate often re-covers the
+  script, which keeps v→v looking good while the conversation audibly stutters and repeats —
+  199 stalls). Their docs assume client-side AEC (`echoCancellation: true`); with it off, the
+  stack has no defense. Its fast barge-in stop (347ms) is the same reflex that self-triggers.
+- **ElevenLabs ConvAI** — clean: 0 self-interruptions, 0 echo words. Their server-side stack
+  evidently does its own echo suppression regardless of browser AEC. Latency unchanged vs
+  clean smalltalk (1454→1408ms).
+
+Takeaway: word-level echo filtering (voiceloop) and server-side suppression (ConvAI) both
+survive raw coupling; energy-VAD interruption without echo defense (Pipecat default, Realtime
+without client AEC) audibly breaks. voiceloop is the only one of the survivors that also keeps
+sub-1.2s v→v with the shared mock brain.
+
+\* Realtime caveats as in smalltalk (own brain). Its echo numbers come from remapping its
+`input_audio_transcription.completed`/`output_audio_buffer.cleared` events to the bench's
+canonical `stt_final`/`barge_stop`.
+
+### voiceloop fixes the echo scenario forced (src/voice-agent.js)
+
+1. **Cross-turn echo scope** — a new turn cleared the echo reference while the previous
+   reply's echo tail was still in flight (acoustic delay + STT latency); those words looked
+   novel and barged in on the new reply, cascading. The previous reply's audible text is now
+   parked and included in echo classification within the 2s post-playout grace window.
+2. **Cursor lag** — the proportional time→text spoken cursor lags real audio, so echo partials
+   contained words just *ahead* of it and un-latched the filter. Echo is now judged against
+   prefix + the whole clip playing (a safe upper bound — echo can't be ahead of the audio), while
+   the UI keeps the precise cursor.
+3. **Short echo finals** — fast-endpointing STT closes echo as short finals ("Yes.") that could
+   never reach the fixed 3-hit drop threshold and became user turns the agent answered; the
+   threshold now scales with the final's own length.
+
+Before the fixes: 6+ self-interruptions and v→v 1849ms on this scenario. After: 0 and 1111ms.
+
 ## Environment
 
 - AMD Threadripper 1950X (32 threads), Linux, Chrome 138, Node 24

@@ -48,10 +48,16 @@
       switch (e.type) {
         case 'input_audio_buffer.speech_started': state('user_speaking'); break;
         case 'input_audio_buffer.speech_stopped': state('listening'); break;
-        case 'conversation.item.input_audio_transcription.completed': log(`user: ${e.transcript}`); break;
+        // Map to the bench's canonical event names so the generic echo metrics see this SUT:
+        // every completed input transcription is a committed "user turn" to Realtime — under
+        // acoustic coupling that includes its own echo (echoWords counts response-script words here).
+        case 'conversation.item.input_audio_transcription.completed': rec('stt_final', { text: e.transcript }); log(`user: ${e.transcript}`); break;
         case 'response.output_audio_transcript.done': log(`agent: ${e.transcript}`); break;
         case 'output_audio_buffer.started': state('speaking'); break;
-        case 'output_audio_buffer.stopped': case 'output_audio_buffer.cleared': state('listening'); break;
+        // cleared = the server VAD cut the reply (interrupt_response). Outside a person-speech
+        // window that is a SELF-interruption — metrics.js classifies via barge_stop + personNear.
+        case 'output_audio_buffer.cleared': rec('barge_stop'); state('listening'); break;
+        case 'output_audio_buffer.stopped': state('listening'); break;
         case 'error': log(`ERR: ${JSON.stringify(e.error)}`); break;
       }
     };
