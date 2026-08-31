@@ -1853,6 +1853,10 @@ const CDN_PIPER = `${CDN}@mintplex-labs/piper-tts-web@1.0.4/dist/piper-tts-web.j
 // per-call module setup is exactly what we bypass (see PiperTTS._session).
 const CDN_PIPER_PHONEMIZE = `${CDN}@mintplex-labs/piper-tts-web@1.0.4/dist/piper-o91UDS6e.js`;
 const CDN_PIPER_WASM = `${CDN}@diffusionstudio/piper-wasm@1.0.0/build/piper_phonemize`;
+// Resolved through the importmap at runtime. Kept in a variable, not a string literal, because a
+// literal specifier is resolved by Vite's import analysis BEFORE it checks /* @vite-ignore */ —
+// which fails since onnxruntime-web isn't installed as a dependency.
+const ORT_SPECIFIER = 'onnxruntime-web';
 
 // OPFS blob cache — same 'piper' directory and url-basename filenames as the lib's own cache, so
 // models already downloaded through the lib are reused (and vice versa).
@@ -1921,7 +1925,7 @@ export class PiperTTS extends StreamingTTS {
       const path = lib.PATH_MAP[voiceId];
       if (!path) throw new Error(`unknown Piper voice: ${voiceId}`);
       const [ort, phonMod, cfgBlob, modelBlob] = await Promise.all([
-        import(/* webpackIgnore: true */ /* @vite-ignore */ 'onnxruntime-web'),
+        import(/* webpackIgnore: true */ /* @vite-ignore */ ORT_SPECIFIER),
         import(/* webpackIgnore: true */ /* @vite-ignore */ CDN_PIPER_PHONEMIZE),
         opfsCachedFetch(`${lib.HF_BASE}/${path}.json`),
         opfsCachedFetch(`${lib.HF_BASE}/${path}`),
