@@ -91,8 +91,14 @@ export interface VoiceAgentOptions {
    *  short-TTL token the backend mints (raw key stays server-side).
    *  'webspeech' auto-downgrades to a cloud provider in browsers with no SpeechRecognition (Firefox,
    *  the Linux WebKitGTK desktop webview) — read `agent.sttProvider` for what's actually running. */
-  sttProvider?: 'webspeech' | 'speechmatics' | 'elevenlabs' | 'deepgram';
+  sttProvider?: SttProvider;
+  /** ONE endpoint that mints the token. When each provider needs a different route or credential,
+   *  use `getSttToken` instead — it is handed the resolved provider, so the downgrade rule above
+   *  stays in this library instead of being mirrored by every host. */
   sttTokenUrl?: string;
+  /** Mint a short-TTL STT token yourself, for auth that doesn't fit one POST route. Called with the
+   *  provider actually RUNNING (post-downgrade), never the requested one. Wins over sttTokenUrl. */
+  getSttToken?: (provider: SttProvider) => Promise<SttToken>;
   sttUsageUrl?: string;
   sttUrl?: string;
   sttModel?: string;
@@ -130,10 +136,11 @@ export function warmVad(): Promise<void>;
  *  mount), so a voice start only pays the WS handshake. Best-effort + deduped; no-op while a
  *  fresh cached token remains.
  *  `sttTokenUrl` is the EXACT endpoint that mints a Deepgram token (e.g. `/api/v1/stt/deepgram-token`),
- *  the same value passed as the `sttTokenUrl` option — NOT an API base. Pass `getSttToken` here as
- *  `getToken` if the host mints tokens itself. Warming with the wrong URL silently no-ops the
- *  optimization: the real session just mints again on click. */
-export function warmDeepgramToken(sttTokenUrl: string, apiKey?: string, getToken?: () => Promise<string>): Promise<void>;
+ *  the same value passed as the `sttTokenUrl` option — NOT an API base. A host that mints tokens
+ *  itself passes its `getSttToken` as `getToken` and can skip the URL entirely (warm for the
+ *  provider it will actually run: `() => getSttToken('deepgram')`). Warming with the wrong URL
+ *  silently no-ops the optimization: the real session just mints again on click. */
+export function warmDeepgramToken(sttTokenUrl?: string, apiKey?: string, getToken?: () => Promise<SttToken>): Promise<void>;
 /** The built-in default voice persona (system prompt): terse, speakable answers. Exported so a
  *  host can reuse or extend it instead of restating the "you are being spoken aloud" rules. */
 export const VOICE_SYSMSG: string;
@@ -246,7 +253,17 @@ export interface STTSession {
 }
 export type STTFactory = (opts: STTCallbacks & Record<string, unknown>) => STTSession;
 
-export const STT_PROVIDERS: Record<'webspeech' | 'speechmatics' | 'elevenlabs' | 'deepgram', STTFactory>;
+/** The built-in STT provider ids — the keys of STT_PROVIDERS. */
+export type SttProvider = 'webspeech' | 'speechmatics' | 'elevenlabs' | 'deepgram';
+/** What a token minter returns: the short-TTL credential, plus its lifetime in seconds when the
+ *  provider reports one (used to cache and pre-mint just before expiry). */
+export interface SttToken { token: string; expires_in?: number }
+
+export const STT_PROVIDERS: Record<SttProvider, STTFactory>;
+/** Does this provider own the mic and its own end-of-turn? Then the agent builds NO capture pipeline
+ *  and runs no VAD for it — so it emits no `vad` events, and prewarming the VAD/ONNX model is a
+ *  wasted download. Answerable without constructing a session, so a host can decide both up front. */
+export function sttSelfCaptures(provider: string): boolean;
 export function makeDeepgramSTT(opts: STTCallbacks & Record<string, unknown>): STTSession;
 export function makeElevenLabsSTT(opts: STTCallbacks & Record<string, unknown>): STTSession;
 export function makeSpeechmaticsSTT(opts: STTCallbacks & Record<string, unknown>): STTSession;
@@ -255,8 +272,9 @@ export function makeWebSpeechSTT(opts: STTCallbacks & Record<string, unknown>): 
 export const WEBSPEECH_FALLBACK: 'elevenlabs';
 export function webSpeechSupported(): boolean;
 /** The provider id actually used: 'webspeech' downgrades to WEBSPEECH_FALLBACK in a browser
- *  without SpeechRecognition. Call it to label the UI ("using cloud recognition"). */
-export function resolveSttProvider(id: string): string;
+ *  without SpeechRecognition. Call it to label the UI ("using cloud recognition") — but NOT to pick
+ *  a token route: `getSttToken` is already handed the resolved id. */
+export function resolveSttProvider(id: string): SttProvider;
 
 // ── TTS ──────────────────────────────────────────────────────────────────────────────────────
 /** Base class for streaming TTS engines: sentence-splits the incoming token stream, synthesizes

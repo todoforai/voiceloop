@@ -267,7 +267,10 @@ export class VoiceAgent {
     const makeStt = STT_PROVIDERS[this.sttProvider] ?? STT_PROVIDERS.webspeech;
     this.stt = makeStt({
       apiKey, sttUrl, sttModel: this.sttProvider === sttProvider ? sttModel : '', sttLang, micDeviceId, keyterms: keyterms.filter(k => k && k.length <= 20).slice(0, 50),
-      sttTokenUrl, getToken: getSttToken, sttUsageUrl, eotThreshold: sttEotThreshold,
+      // `getSttToken` is called with the provider actually running — the RESOLVED one, so a host
+      // whose credential differs per provider never has to re-derive the webspeech downgrade
+      // (that rule lives here, in resolveSttProvider, and must not be mirrored host-side).
+      sttTokenUrl, getToken: getSttToken && (() => getSttToken(this.sttProvider)), sttUsageUrl, eotThreshold: sttEotThreshold,
       onPartial: (text, ms, committed = '') => {
         const interim = `${committed} ${text}`.trim();
         this._turnText = interim;   // latest interim (committed prefix + live tail) for the turn detector

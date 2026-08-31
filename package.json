@@ -1,6 +1,6 @@
 {
   "name": "@todoforai/voiceloop",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Fast, interruptible browser voice agent: VAD → STT → LLM → TTS with real barge-in, echo filtering, streaming first-sentence TTS and tap-to-seek. Zero runtime dependencies.",
   "type": "module",
   "main": "src/index.js",

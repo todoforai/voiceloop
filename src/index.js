@@ -6,7 +6,7 @@ export {
 } from './voice-agent.js';
 export {
   STT_PROVIDERS, WEBSPEECH_FALLBACK, resolveSttProvider, webSpeechSupported,
-  makeWebSpeechSTT, makeElevenLabsSTT, makeSpeechmaticsSTT, makeDeepgramSTT,
+  makeWebSpeechSTT, makeElevenLabsSTT, makeSpeechmaticsSTT, makeDeepgramSTT, sttSelfCaptures,
   warmDeepgramToken,
 } from './stt.js';
 export { ElevenLabsTTS } from './tts-elevenlabs.js';

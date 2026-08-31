@@ -1070,3 +1070,34 @@ test('RUNNING: a re-emitted running/outcome pair does not resurrect a settled ch
   assert.equal(tools.filter((e) => !e.running).length, 1, 'and its outcome is reported once');
   assert.ok(!tools.some((e) => e.result?.text?.includes('interrupted')), 'never falsely interrupted');
 });
+
+// STT TOKEN SEAM: the webspeech→cloud downgrade rule lives HERE (resolveSttProvider). A host whose
+// credential differs per provider used to have to mirror that rule to pick a token route — two
+// copies of one fact, in two repos, silently wrong the moment either moved. So `getSttToken` is
+// called with the provider actually RUNNING, and the host needs no fallback knowledge at all.
+test('getSttToken receives the RESOLVED provider, not the requested one', async () => {
+  const asked = [];
+  // 'speechmatics' is a cloud provider: no downgrade, and it mints on open().
+  const { agent } = makeAgent({ opts: {
+    sttProvider: 'speechmatics',
+    getSttToken: async (provider) => { asked.push(provider); return { token: 't', expires_in: 60 }; },
+  } });
+  assert.equal(agent.sttProvider, 'speechmatics');
+  agent.stt.open?.();          // fire-and-forget: the socket never connects under node,
+  await settle();              // but the mint happens first — that's what we're asserting.
+  assert.deepEqual(asked, ['speechmatics'], 'called with the provider that actually runs');
+  agent.destroy();
+});
+
+test('getSttToken is not called at all when the provider mints nothing (webspeech, self-capturing)', async () => {
+  let calls = 0;
+  const { agent } = makeAgent({ opts: {
+    sttProvider: 'webspeech',
+    getSttToken: async () => { calls++; return { token: 't' }; },
+  } });
+  // Outside a browser nothing downgrades, so this stays webspeech — which owns its own mic and
+  // needs no token: the host's minter must never be invoked for it.
+  assert.equal(agent.sttProvider, 'webspeech');
+  assert.equal(calls, 0);
+  agent.destroy();
+});

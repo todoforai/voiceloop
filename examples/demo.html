@@ -92,6 +92,10 @@
   .msg { padding:10px 14px; border-radius:14px; max-width:82%; white-space:pre-wrap; word-break:break-word }
   .msg.user { align-self:flex-end;   background:#212c3a; border-bottom-right-radius:4px }
   .msg.ai   { align-self:flex-start; background:#1a1e25; border-bottom-left-radius:4px }
+  /* An echoed reply is not an answer — mark it so the transcript can't be read as a model talking. */
+  .msg.ai.echoed { border-left:2px solid #e0a94a }
+  .msg.ai.echoed::after { content:'echo — no model'; display:block; margin-top:5px;
+                          font-size:10px; letter-spacing:.04em; color:#e0a94a; opacity:.85 }
   .msg.interim { opacity:.5 }
   .msg .tail { opacity:.35 }                 /* generated, not yet spoken */
   .msg.tool { align-self:flex-start; background:#161d17; color:#8fc79a;
@@ -113,6 +117,11 @@
   label { font-size:11px; color:var(--dim); display:flex; flex-direction:column; gap:4px }
   #log { font:11px/1.5 ui-monospace,monospace; color:var(--dim);
          max-height:220px; overflow:auto; white-space:pre-wrap; padding-top:8px }
+  /* Which code is actually running — the demo must never let you mistake the browser's own
+     recognizer for voiceloop's pipeline, or an echo stand-in for a real LLM. */
+  #pipeline { font-size:11.5px; color:var(--dim); text-align:center; line-height:1.7; max-width:46ch }
+  #pipeline b { color:#c8d0da; font-weight:600 }
+  #pipeline .warn { color:#e0a94a }
 </style>
 </head>
 <body>
@@ -122,6 +131,7 @@
   </button>
   <div id="status">click to start · then just talk</div>
   <div id="lat"></div>
+  <div id="pipeline"></div>
 
   <div id="chat"></div>
 
@@ -157,9 +167,12 @@
 </main>
 
 <script type="module">
-import { VoiceAgent, PiperTTS, unlockAudio, prewarmVoice, STT_PROVIDERS, LANG_NAMES } from '../src/index.js';
+import { VoiceAgent, PiperTTS, unlockAudio, prewarmVoice, STT_PROVIDERS, sttSelfCaptures, LANG_NAMES } from '../src/index.js';
 
-prewarmVoice();   // load VAD/WASM + build the Silero session while the page sits idle
+// Load VAD/WASM + build the Silero session while the page sits idle — but ONLY for a provider that
+// will actually use it. A selfCapture provider (webspeech) builds no pipeline, so prewarming there
+// downloads an ONNX model to feed a detector that never runs.
+const prewarmIfPipelined = () => { if (!sttSelfCaptures($('sttProvider').value)) prewarmVoice(); };
 
 const $ = id => document.getElementById(id);
 const fill = (id, entries) => $(id).append(...entries.map(([value, textContent]) =>
@@ -173,7 +186,10 @@ fill('sttLang', Object.entries(LANG_NAMES).map(([code, name]) => [code, `${code}
 const SETTINGS = ['mode','llmUrl','model','sttProvider','sttTokenUrl','apiKey','sttLang','voice','micDeviceId'];
 for (const id of SETTINGS) {
   const v = localStorage.getItem('vl.' + id); if (v) $(id).value = v;
-  $(id).addEventListener('change', () => localStorage.setItem('vl.' + id, $(id).value));
+  $(id).addEventListener('change', () => {
+    localStorage.setItem('vl.' + id, $(id).value);
+    onSettingChanged();   // the banner must never describe the PREVIOUS choice
+  });
 }
 const log = (...a) => {
   const line = `${new Date().toISOString().slice(11,23)} ${a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' ')}`;
@@ -182,7 +198,7 @@ const log = (...a) => {
 
 // ── transcript ──────────────────────────────────────────────────────────────
 const chat = $('chat');
-let interimEl = null, aiEl = null;
+let interimEl = null, aiEl = null, vadOff = null;
 const toolEls = new Map();
 const bubble = (cls, text = '') => {
   const el = document.createElement('div');
@@ -203,14 +219,39 @@ const showLat = () => $('lat').textContent = [
 const tts = new PiperTTS(localStorage.getItem('vl.voice') || undefined);
 let agent = null;
 
-// Echo mode: a stand-in "LLM" that repeats the turn — exercises the entire
-// VAD→STT→…→TTS loop, barge-in included, with no key and no backend.
+// Echo mode: a stand-in "LLM" that repeats the turn VERBATIM — exercises the entire
+// VAD→STT→…→TTS loop, barge-in included, with no key and no backend. Nothing is added to the
+// text: a reply that is exactly the transcript is the whole point, since any prefix would be
+// this page's words in the reply and would blur what the recognizer actually heard. That it's
+// an echo and not a model is stated in the pipeline banner and on the bubble itself.
 async function* echoLLM(history) {
   const last = [...history].reverse().find(m => m.role === 'user')?.content ?? '';
-  for (const w of `You said: ${last}`.match(/\S+\s*/g) ?? []) {
+  for (const w of last.match(/\S+\s*/g) ?? []) {
     yield { text: w }; await new Promise(r => setTimeout(r, 25));
   }
 }
+
+// ── what is ACTUALLY running ────────────────────────────────────────────────
+// A demo that hides which engine served a reply is worse than no demo: a browser-native
+// recognizer looks identical to voiceloop's pipeline, and an echo stand-in looks identical
+// to a model. Both get named on screen, always.
+const describePipeline = (a) => {
+  const echo = $('mode').value === 'echo';
+  // Before the first click there is no session, so ask the provider statically — reading
+  // `a?.stt?.selfCapture` off a null agent silently yields false and the banner claims the
+  // pipeline is running when it is exactly what gets bypassed.
+  const self = a?.stt ? !!a.stt.selfCapture : sttSelfCaptures($('sttProvider').value);
+  const stt = self
+    ? `<b>${$('sttProvider').value}</b> — the browser's own recognizer owns the mic <span class="warn">(voiceloop's VAD + STT pipeline bypassed)</span>`
+    : `<b>${$('sttProvider').value}</b> via voiceloop's pipeline — Silero VAD → feed → commit`;
+  const llm = echo
+    ? '<span class="warn"><b>echo</b> — no model: replies repeat your words back</span>'
+    : `<b>${$('model').value || 'your model'}</b> at ${new URL($('llmUrl').value).host}`;
+  return `STT: ${stt}<br>LLM: ${llm}`;
+};
+const showPipeline = () => { $('pipeline').innerHTML = describePipeline(agent); };
+// Hoisted (function declaration) so the settings listeners above can call it before this point.
+function onSettingChanged() { showPipeline(); prewarmIfPipelined(); }
 
 // A typed turn drives the same state machine without a mic — don't claim we're listening then.
 let micOn = false;
@@ -236,6 +277,14 @@ function onEvent(e) {
       break;
     case 'vad': document.body.dataset.vad = e.active ? '1' : '0'; break;
     case 'stt':
+      // A selfCapture provider runs no agent VAD, so no 'vad' event ever arrives and the orb would
+      // sit dead still while the browser hears you perfectly — looking exactly like a broken mic.
+      // Live partials are the only "I hear you" signal on that path, so drive the pulse from them.
+      if (agent?.stt?.selfCapture) {
+        document.body.dataset.vad = e.turnComplete ? '0' : '1';
+        clearTimeout(vadOff);
+        if (!e.turnComplete) vadOff = setTimeout(() => { document.body.dataset.vad = '0'; }, 700);
+      }
       if (e.turnComplete) {
         interimEl?.remove(); interimEl = null;
         bubble('user', e.text);
@@ -254,7 +303,9 @@ function onEvent(e) {
       // `full` only exists once the TTS progress cursor is live — i.e. a clip is
       // actually playing. The 'speaking' state is just the first token, not sound.
       if (e.full != null && t0 && !tAudio) { tAudio = Date.now(); showLat(); }
-      aiEl ??= bubble('ai');
+      // Tag the bubble (never the text) when no model produced it — the reply is a verbatim echo,
+      // and only the UI should say so.
+      aiEl ??= bubble($('mode').value === 'echo' ? 'ai echoed' : 'ai');
       aiEl.textContent = e.text;                                    // spoken so far
       const tail = (e.full ?? e.text).slice(e.text.length);         // generated, not yet heard
       if (tail) aiEl.append(Object.assign(document.createElement('span'), { className:'tail', textContent:tail }));
@@ -289,7 +340,7 @@ const makeAgent = () => {
     onEvent,
   });
   a.setMuted(muted('muteMic')); a.setTtsMuted(muted('muteTts'));   // the toggles survive a rebuild
-  log('agent created; stt =', a.sttProvider);
+  log('agent created; stt =', a.sttProvider); showPipeline();   // now reflects the LIVE session, not just the form
   return a;
 };
 
@@ -297,6 +348,7 @@ const makeAgent = () => {
 const stop = () => {
   agent?.destroy(); agent = null; micOn = false;
   document.body.dataset.vad = '0'; setState('idle');
+onSettingChanged();   // describe the restored settings, and prewarm only if they'll use the VAD
 };
 $('mic').onclick = async () => {
   unlockAudio();                                   // must be inside the gesture (autoplay policy)

@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeSpeechmaticsSTT, resolveSttProvider, WEBSPEECH_FALLBACK } from './stt.js';
+import { makeSpeechmaticsSTT, makeElevenLabsSTT, resolveSttProvider, WEBSPEECH_FALLBACK } from './stt.js';
 
 // ── Minimal fakes ─────────────────────────────────────────────────────────────────────────────
 // A fake WebSocket we can drive: capture what the STT sends, and hand it server messages on demand.
@@ -548,7 +548,7 @@ test('deepgram: native EndOfTurn during the commit safety window wins (no duplic
 // drive onresult / lifecycle to lock: interim → onPartial tail, isFinal → accumulate the turn, and a
 // silence gap (the EOT debounce elapsing with no new final) → one onFinal turn. No feed/commit/reset.
 import { mock } from 'node:test';
-import { makeWebSpeechSTT } from './stt.js';
+import { makeWebSpeechSTT, STT_PROVIDERS, sttSelfCaptures } from './stt.js';
 import { TUNING } from './tuning.js';
 
 class FakeRec {
@@ -915,3 +915,38 @@ test('resolveSttProvider: webspeech downgrades to the cloud fallback where the b
   assert.equal(resolveSttProvider('webspeech'), WEBSPEECH_FALLBACK, 'downgraded instead of fataling voice mode');
   assert.equal(resolveSttProvider('deepgram'), 'deepgram', 'an explicit provider choice is never rewritten');
 }));
+
+test('sttSelfCaptures matches what each provider actually reports (no drift)', () => withWebSpeech(async () => {
+  // The factory-level flag exists so a host can skip the VAD prewarm WITHOUT constructing a session.
+  // That makes it a second copy of a fact the session also states — so pin them together: a provider
+  // that starts self-capturing (or stops) can't leave the static answer lying.
+  const opts = { onPartial() {}, onFinal() {}, onError() {}, onFatal() {}, onClose() {}, isClosed: () => true };
+  for (const [name, make] of Object.entries(STT_PROVIDERS)) {
+    const session = make({ ...opts });
+    assert.equal(sttSelfCaptures(name), !!session.selfCapture, `${name}: static flag vs session`);
+    session.close?.();
+  }
+  assert.equal(sttSelfCaptures('webspeech'), true, 'webspeech owns its mic');
+  assert.equal(sttSelfCaptures('deepgram'), false, 'a cloud provider is fed by the agent pipeline');
+  assert.equal(sttSelfCaptures('nope'), false, 'unknown provider is not self-capturing');
+}));
+
+// LIVENESS: a host `getToken` is HOST code on the critical path — a minter that never settles must
+// not stall voice start forever. Bounded exactly like the built-in sttTokenUrl fetch.
+test('a getToken that never settles fatals on the timeout instead of hanging forever', async () => {
+  const fatals = [];
+  const stt = makeElevenLabsSTT({
+    getToken: () => new Promise(() => {}),          // never settles
+    onPartial() {}, onFinal() {}, onError() {}, onClose() {},
+    onFatal: (m) => fatals.push(m),
+    isClosed: () => false,
+  });
+  stt.open();
+  // Deadline is the test's own, so a regression FAILS here rather than hanging CI.
+  const deadline = new Promise((_, rej) => setTimeout(() => rej(new Error('mint never gave up')), TUNING.STT.tokenFetchTimeoutMs + 2000));
+  await Promise.race([
+    (async () => { while (!fatals.length) await new Promise((r) => setTimeout(r, 20)); })(),
+    deadline,
+  ]);
+  assert.match(fatals[0], /timed out/);
+});

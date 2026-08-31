@@ -39,8 +39,10 @@ const USAGE_FLUSH_SECONDS = 30;   // report streamed seconds to the backend at l
 // AUTH (cloud providers): the raw provider key must stay server-side. Either
 //   • `sttTokenUrl` — your backend route that mints a short-TTL token: POST, optional X-API-Key
 //     (`apiKey`), responds { token, expires_in? }; or
-//   • `getToken` — an async () => ({ token, expires_in? }) callback, when your auth doesn't fit
-//     that one route shape. Takes precedence over sttTokenUrl.
+//   • `getToken` — an async (provider) => ({ token, expires_in? }) callback, when your auth doesn't
+//     fit that one route shape. Takes precedence over sttTokenUrl. VoiceAgent calls it with the
+//     provider actually RUNNING (post-downgrade), so a host whose credential differs per provider
+//     writes one function instead of mirroring the downgrade rule.
 
 // ── Shared socket-lifecycle helpers ─────────────────────────────────────────
 // The three providers below have genuinely different turn machines (Speechmatics' straggler cursor,
@@ -57,7 +59,14 @@ const USAGE_FLUSH_SECONDS = 30;   // report streamed seconds to the backend at l
 async function mintSttToken(url, apiKey, onFatal, getToken) {
   if (getToken) {
     try {
-      const body = await getToken();
+      // HOST code on the critical path: bound it exactly like the built-in fetch below, or a minter
+      // that never settles stalls voice start forever with no error. We can't cancel the host's
+      // promise — we just stop waiting on it (it may still resolve into the void, which is fine:
+      // a token is idempotent to mint).
+      const body = await Promise.race([
+        getToken(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), TUNING.STT.tokenFetchTimeoutMs)),
+      ]);
       if (!body?.token) throw new Error('getToken returned no token');
       return body;
     } catch (e) { onFatal(`STT token: ${e.message}`); return null; }
@@ -822,6 +831,14 @@ export const STT_PROVIDERS = {
   elevenlabs: makeElevenLabsSTT,
   deepgram: makeDeepgramSTT,
 };
+
+// Self-capturing providers own the mic AND their end-of-turn, so the agent builds no capture
+// pipeline and runs no VAD for them. Readable WITHOUT constructing a session, so a host can decide
+// up front whether prewarming the VAD/ONNX model is worth the download (it isn't, for these) and
+// whether to expect 'vad' events at all. Kept on the factory so it can't drift from the session's
+// own selfCapture flag.
+makeWebSpeechSTT.selfCapture = true;
+export const sttSelfCaptures = (provider) => !!STT_PROVIDERS[provider]?.selfCapture;
 
 // Web Speech only exists in Chromium/Safari — Firefox and Linux WebKitGTK webviews ship no
 // SpeechRecognition at all. There the default 'webspeech' provider can only fatal ("Speech
