@@ -2,7 +2,7 @@ export {
   VoiceAgent, StreamingTTS, PiperTTS,
   unlockAudio, warmVad,
   isSelfEcho, novelChars, toolResultText,
-  VOICE_SYSMSG,
+  VOICE_SYSMSG, LANG_NAMES,
 } from './voice-agent.js';
 export {
   STT_PROVIDERS, WEBSPEECH_FALLBACK, resolveSttProvider, webSpeechSupported,

@@ -139,18 +139,11 @@
       </select></label>
       <label>LLM url<input id="llmUrl" size="30" value="http://localhost:11434/v1/chat/completions"></label>
       <label>model<input id="model" size="14" value="llama3.2"></label>
-      <label>STT<select id="sttProvider">
-        <option value="webspeech">webspeech — free, in-browser</option>
-        <option value="deepgram">deepgram</option>
-        <option value="elevenlabs">elevenlabs</option>
-        <option value="speechmatics">speechmatics</option>
-      </select></label>
+      <label>STT<select id="sttProvider"></select></label>
       <label>STT token url<input id="sttTokenUrl" size="30" placeholder="your backend route (cloud STT only)"></label>
       <label>api key<input id="apiKey" size="18" placeholder="Bearer for LLM · X-API-Key for token url"></label>
-      <label>lang<select id="sttLang">
-        <option value="en">en</option><option value="hu">hu</option><option value="de">de</option>
-      </select></label>
-      <label>voice<select id="voice"><option value="en_US-joe-medium">en_US-joe-medium</option></select></label>
+      <label>lang<select id="sttLang"></select></label>
+      <label>voice<select id="voice"></select></label>
       <label>mic<select id="micDeviceId"><option value="">default</option></select></label>
     </div>
     <div class="bar">
@@ -164,11 +157,19 @@
 </main>
 
 <script type="module">
-import { VoiceAgent, PiperTTS, unlockAudio, prewarmVoice } from '../src/index.js';
+import { VoiceAgent, PiperTTS, unlockAudio, prewarmVoice, STT_PROVIDERS, LANG_NAMES } from '../src/index.js';
 
 prewarmVoice();   // load VAD/WASM + build the Silero session while the page sits idle
 
 const $ = id => document.getElementById(id);
+const fill = (id, entries) => $(id).append(...entries.map(([value, textContent]) =>
+  Object.assign(document.createElement('option'), { value, textContent })));
+
+// Every choice below is READ from the library, never retyped here: a provider added to STT_PROVIDERS
+// or a language added to LANG_NAMES shows up in this page by itself. A hand-typed copy would be a
+// second source of truth that silently rots — and a demo that lies about what the library supports.
+fill('sttProvider', Object.keys(STT_PROVIDERS).map(p => [p, p === 'webspeech' ? 'webspeech — free, in-browser' : p]));
+fill('sttLang', Object.entries(LANG_NAMES).map(([code, name]) => [code, `${code} — ${name}`]));
 const SETTINGS = ['mode','llmUrl','model','sttProvider','sttTokenUrl','apiKey','sttLang','voice','micDeviceId'];
 for (const id of SETTINGS) {
   const v = localStorage.getItem('vl.' + id); if (v) $(id).value = v;
@@ -197,7 +198,9 @@ const showLat = () => $('lat').textContent = [
   tAudio && `first sound ${tAudio - t0}ms`,
 ].filter(Boolean).join('   ·   ');
 
-const tts = new PiperTTS($('voice').value);
+// undefined (not '') when unset — so PiperTTS applies its OWN default voice instead of this page
+// re-declaring one. The picker is populated async below and adopts whatever it resolved to.
+const tts = new PiperTTS(localStorage.getItem('vl.voice') || undefined);
 let agent = null;
 
 // Echo mode: a stand-in "LLM" that repeats the turn — exercises the entire
@@ -338,8 +341,8 @@ for (const id of SETTINGS.filter(i => i !== 'voice'))
 
 // ── device + voice lists ────────────────────────────────────────────────────
 tts.voices().then(vs => {
-  $('voice').innerHTML = vs.map(v => `<option value="${v.id}">${v.id}</option>`).join('');
-  $('voice').value = localStorage.getItem('vl.voice') || 'en_US-joe-medium';
+  fill('voice', vs.map(v => [v.id, v.id]));
+  $('voice').value = localStorage.getItem('vl.voice') || tts.voiceId;   // the library's own default, not a copy of it
   tts.setVoice($('voice').value);
 }).catch(e => log('voice list failed', String(e)));
 navigator.mediaDevices?.enumerateDevices().then(ds => {

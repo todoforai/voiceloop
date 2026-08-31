@@ -870,11 +870,12 @@ test('webspeech: a permanently failing engine backs off and finally fatals (no s
     mock.timers.tick(BACKOFF_MAX);
     assert.ok(rec() !== r && rec().started, 'retried after the backoff');
   }
-  failLaunch(rec());
+  const last = rec();
+  failLaunch(last);
   assert.equal(events.fatals.length, 1, 'gave up out loud instead of restarting forever');
   assert.match(events.fatals[0], /network/, 'the fatal names the underlying engine error');
   mock.timers.tick(BACKOFF_MAX * 4);
-  assert.equal(rec().started, false, 'and stays stopped');
+  assert.equal(rec(), last, 'and never launches another recognizer');
   assert.equal(events.errors.length, TUNING.WEBSPEECH_MAX_ERROR_RESTARTS, 'each retry was surfaced as recoverable');
 }));
 

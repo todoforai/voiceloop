@@ -54,7 +54,7 @@ const CAPTURE_WORKLET_URL = typeof URL !== 'undefined' && URL.createObjectURL
 // + the host's conversation context (if any).
 // The LLM otherwise guesses reply language from the (often short/garbled) transcript and drifts to
 // English under the English persona — so state the selected STT language explicitly.
-const LANG_NAMES = { en: 'English', hu: 'Hungarian', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch', pl: 'Polish', ja: 'Japanese', ko: 'Korean', zh: 'Chinese' };
+export const LANG_NAMES = { en: 'English', hu: 'Hungarian', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch', pl: 'Polish', ja: 'Japanese', ko: 'Korean', zh: 'Chinese' };
 const langRule = (lang) => {
   const name = LANG_NAMES[String(lang || '').split(/[-_]/)[0].toLowerCase()];
   return name ? `ALWAYS reply in ${name} — including tool-call acknowledgements.` : '';
