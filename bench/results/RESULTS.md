@@ -164,7 +164,7 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
 - **TODOforAI shared-voice** — NOT a competitor: our own product's shipped voice agent
   (`todoforai/packages/shared-voice`), benchmarked via a thin SUT page + `/llm` wire shim
   (`packages/shared-voice/bench/`). It no longer carries a fork of this library: it consumes
-  published voiceloop 0.1.6 and adds only the JARVIS persona, LLM adapter and todo tools, so
+  published voiceloop 0.1.7 and adds only the JARVIS persona, LLM adapter and todo tools, so
   these rows now measure *integration overhead*, not a second implementation.
 
   **All four rows re-measured on 0.1.6.** The previous 2241/1801ms pair was taken on 0.1.5,
@@ -181,6 +181,7 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   | webspeech + EL flash | 1561 | 179 | 1749 |
   | deepgram + Piper | 416 | 801 | 1246 |
   | deepgram + EL flash | 346 | 693 | 1006 |
+  | deepgram + EL flash, 0.1.7 | 408 | 431 | **840** |
 
   Deepgram buys the EOT (~1.2s: Chrome's endpointer, not our code — voiceloop measures the
   same 1565ms on the same browser STT). EL flash buys the synthesis. Only both together reach
@@ -188,6 +189,18 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   jitter that 22ms difference is not a measurement: the honest claim is **no integration
   overhead detectable at this rig's resolution**, and what separates our shipped default from
   the top of the table is provider choice rather than a gap in our code.
+
+  **The last row is a library fix these rows found.** Chasing the remaining commit→audio time
+  showed the LLM's first token arriving *after* the commit on 21/30 deepgram turns — the
+  speculative prefetch was never being adopted. It was never being *started*: the speculation
+  waits for the interim to go stable for 200ms, which assumes a trailing-silence debounce to
+  wait inside. Flux ends turns semantically, a median **21ms** behind its own last interim
+  (webspeech leaves ~1.2s), so the timer never fired and every flux turn paid full LLM TTFT.
+  Providers now declare their own `prefetchMs` (flux: 0). Prefetch adoption goes 9/12 → 30/30
+  and deepgram + EL flash drops **1006 → 840ms** (three runs: 827/814/861), now *below*
+  voiceloop's own 984ms because the fix ships in 0.1.7 and lifts that row too when re-measured.
+  Webspeech is unchanged (1808ms, within jitter of 1945) — it keeps the 200ms wait, since
+  speculating on its every interim tick would burn requests for no gain.
 
   Caveat on the per-stage column: the `TTS first audio` metric is measured from the LLM's
   first token, so it absorbs LLM streaming time and reads high (1294ms) for webspeech+EL even
