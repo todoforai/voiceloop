@@ -76,7 +76,8 @@ the place to start reading.
 
 ```
 you stop speaking ──┐
-                    │  end-of-turn debounce (~600ms)
+                    │  end-of-turn debounce (500ms configured; ~1.5s in practice
+                    │  on browser STT — see the webspeech note below)
    LLM prefetch ────┤  ← already streaming since your interim transcript stabilized
                     │
 first LLM tokens ───┤  first sentence boundary (~8+ chars)
@@ -96,6 +97,7 @@ into the mic (no AEC):
 | OpenAI Realtime (own LLM)* | 870ms | **0/30** | **17/30** |
 | **voiceloop** (deepgram + ElevenLabs flash) | **980ms** | **0/30** | **0/30** |
 | **voiceloop** (deepgram + Piper, free local TTS) | **970ms** | **0/30** | — |
+| **voiceloop** (webspeech + Piper, zero-key default) | 2130ms | — | — |
 | Pipecat 1.8.1 (same providers) | 1050ms | 2/30 | **20/30** |
 | ElevenLabs ConvAI | 1450ms | **0/30** | 0/30 |
 
@@ -114,7 +116,7 @@ Full tables, method and reproduction steps: [`results/RESULTS.md`](https://githu
 ## STT providers
 
 ```js
-new VoiceAgent({ sttProvider: 'webspeech' })     // default: free, browser-native (Chrome/Safari)
+new VoiceAgent({ sttProvider: 'webspeech' })     // default: zero-key, browser-native (Chrome/Safari) — but ~1.2s slower to close a turn; see the table below
 new VoiceAgent({ sttProvider: 'elevenlabs',  sttTokenUrl: '/api/stt/token' })
 new VoiceAgent({ sttProvider: 'deepgram',    sttTokenUrl: '/api/stt/token' })
 new VoiceAgent({ sttProvider: 'speechmatics', sttTokenUrl: '/api/stt/token' })
@@ -134,7 +136,7 @@ On browsers without SpeechRecognition (Firefox, WebKitGTK) `webspeech` falls bac
 
 | Provider | End-of-turn | Notes |
 |---|---|---|
-| `webspeech` | Native (browser-managed) | Free, on-device, Chrome/Safari only |
+| `webspeech` | Native (browser-managed) | Zero-key (no token endpoint), Chrome/Safari only. **~2.1s voice→voice** — ~1.2s slower to close a turn than cloud STT ([measured](bench/results/RESULTS.md)); it also owns the mic, so voiceloop's VAD/echo pipeline is bypassed. Recognition is handled by the browser, which may use a vendor cloud service — it is not guaranteed on-device |
 | `elevenlabs` | VAD-gated | Scribe v2 realtime, great accuracy |
 | `deepgram` | **Native** (Flux) | Provider's own turn model hears the full stream |
 | `speechmatics` | VAD-gated | Cheapest per second, locked-words-only finals |

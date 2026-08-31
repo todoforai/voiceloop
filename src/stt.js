@@ -567,7 +567,9 @@ export function makeDeepgramSTT(opts) {
   };
 }
 
-// ── Browser Web Speech API (local, no cloud, no token) ───────────────────────
+// ── Browser Web Speech API (browser-managed, no token) ───────────────────────
+// "Browser-native" is not "on-device": Chrome may route recognition through a vendor speech
+// service. The win here is zero setup (no key, no token endpoint), not guaranteed privacy.
 // The browser's own SpeechRecognition engine (Chrome/Safari `webkitSpeechRecognition`). It OWNS the
 // whole audio path — its own mic capture AND its own silence-based end-of-turn — so the agent builds
 // NO getUserMedia / AudioWorklet / Silero-VAD pipeline for it (`selfCapture: true`, which the agent
@@ -576,7 +578,7 @@ export function makeDeepgramSTT(opts) {
 //   interim results → onPartial(tail)   live draft + word-based barge-in while the agent is speaking
 //   final results   → accumulate + (re)arm the end-of-turn timer; if the user keeps talking within
 //                     the debounce window the fragments merge, else the timer flushes the turn
-// No backend token, no /stt/usage reporting (free + on-device), no socket. Only where the API exists
+// No backend token, no /stt/usage reporting (free, zero-setup), no socket. Only where the API exists
 // (else open() reports a fatal so the host can fall back / surface it).
 // Browser Web Speech API STT. The agent hands it nothing (selfCapture) — it owns its mic and its own
 // end-of-turn (nativeEOT). It reports transcripts via onPartial (live draft, drives the user bubble +
