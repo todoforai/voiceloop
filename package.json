@@ -5,10 +5,14 @@
   "type": "module",
   "main": "src/index.js",
   "exports": {
-    ".": "./src/index.js",
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
     "./stt": "./src/stt.js",
     "./tuning": "./src/tuning.js",
-    "./llm-openai": "./src/llm-openai.js"
+    "./llm-openai": "./src/llm-openai.js",
+    "./package.json": "./package.json"
   },
   "files": [
     "src",
@@ -48,5 +52,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "types": "src/index.d.ts"
 }
