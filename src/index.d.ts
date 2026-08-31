@@ -7,6 +7,10 @@ export type VoiceAgentEvent =
   | { type: 'stt'; turnComplete: boolean; text: string; ms: number; committed?: string }  // text=live tail; committed=locked segments (Speechmatics AddTranscript); turnComplete=user turn ended → send to LLM
   | { type: 'assistant'; text: string; final: boolean; full?: string }   // text=spoken-so-far (solid, advances live as TTS plays); full=complete answer → tail full.slice(text.length) not-yet-spoken (dim)
   | { type: 'vad'; active: boolean }                                      // VAD hears speech?
+  // Mic loudness, 0..1 on a perceptual curve, ~every 256ms while capturing. Cosmetic only (meters,
+  // a reacting orb) — nothing in the pipeline reads it. Never emitted for a selfCapture STT
+  // (webspeech owns its own mic, so there are no frames to measure).
+  | { type: 'level'; level: number }
   // running:true = loop call announced, executing now (display-only spinner; no result yet).
   // The outcome event follows with the same `id` and replaces it in place.
   | { type: 'tool'; name: string; args: Record<string, unknown>; result?: unknown; id?: string; running?: true }

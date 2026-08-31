@@ -1140,3 +1140,33 @@ test('a pending TTS warm is cancelled by stop() (selfCapture path)', () => withF
   assert.equal(warmed, 0, 'stopped before the delay elapsed → no wasted cold start');
   agent.destroy();
 }));
+
+// ── mic level (host visualisers) ────────────────────────────────────────────────────────────────
+// The 'level' event drives meters/orbs. It must ride the frames capture already produces (no second
+// mic tap), stay inside 0..1, and rise with loudness — a meter that pins or flatlines is useless.
+test('level events follow mic loudness on a 0..1 perceptual curve', () => {
+  const { agent, events } = makeAgent();
+  const frame = (amp) => Float32Array.from({ length: 512 }, (_, i) => amp * Math.sin(i / 4));
+  const levelOf = (amp) => {
+    agent._levelAt = 0;                    // defeat the rate limit: these frames arrive back-to-back
+    events.length = 0; agent._feed(frame(amp));
+    return events.find((e) => e.type === 'level').level;
+  };
+  const [silent, quiet, loud] = [levelOf(0), levelOf(0.05), levelOf(0.5)];
+  assert.ok(silent < 0.05, `silence reads as ~0 (got ${silent})`);
+  assert.ok(quiet > silent && quiet < loud, `speech sits between (got ${quiet})`);
+  assert.ok(loud <= 1, `never exceeds full scale (got ${loud})`);
+  // Cube-root curve: normal speech must land in the MIDDLE of the range, not squashed near zero
+  // (which is exactly what a linear RMS meter does — it barely moves while you talk).
+  assert.ok(quiet > 0.25, `quiet speech is visible, not squashed at the bottom (got ${quiet})`);
+  agent.destroy();
+});
+
+// The rate limit is what keeps a fine-grained capture from flooding the host with repaints.
+test('level events are rate-limited', () => {
+  const { agent, events } = makeAgent();
+  const frame = Float32Array.from({ length: 512 }, () => 0.2);
+  agent._feed(frame); agent._feed(frame); agent._feed(frame);
+  assert.equal(events.filter((e) => e.type === 'level').length, 1, 'back-to-back frames collapse to one emit');
+  agent.destroy();
+});

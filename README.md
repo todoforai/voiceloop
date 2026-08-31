@@ -235,7 +235,7 @@ Full types (with per-option notes) in [`src/index.d.ts`](src/index.d.ts).
 | `fetchFn` | transport seam for the built-in adapter (tests, request wrapping) |
 | `onEvent` | every event below |
 
-Events via `onEvent(e)`: `state`, `stt`, `assistant`, `tool`, `vad`, `echo`, `error`, `diag`.
+Events via `onEvent(e)`: `state`, `stt`, `assistant`, `tool`, `vad`, `level`, `echo`, `error`, `diag`.
 A `tool` event carries `{ name, id, args }` plus either `result` (settled) or `running: true` (an [adapter-announced](#adapters-that-run-tools-themselves) call still executing) — render the pair as one chip keyed by `id`.
 
 ## Tuning

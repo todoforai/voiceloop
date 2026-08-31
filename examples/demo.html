@@ -26,22 +26,41 @@
   main { max-width:660px; margin:0 auto; padding:36px 18px 48px;
          display:flex; flex-direction:column; align-items:center; gap:16px }
 
-  /* ── the orb: four radial blobs drifting behind a glass shell ──────────────
+  /* ── the orb ───────────────────────────────────────────────────────────────
      Plain CSS on purpose. A WebGPU version looks marginally better and is dark
      for every Linux visitor (Chrome blocklists the adapter there), and an SVG
-     goo filter costs real CPU per frame for the same silhouette. This is ~25
-     lines, runs on the compositor, and degrades to a flat disc under
-     prefers-reduced-motion. */
-  #mic { position:relative; width:210px; height:210px; border-radius:50%; border:0; padding:0;
+     goo filter costs real CPU per frame for the same silhouette. Everything
+     below runs on the compositor and degrades to a flat disc under
+     prefers-reduced-motion.
+
+     One knob drives the whole thing: --lvl (0..1, the live mic/voice level from
+     the agent's `level` event). Size, glow, rim and halo all read from it, so
+     the orb BREATHES with the audio instead of blinking between states. */
+  #orb { position:relative; width:230px; height:230px; display:grid; place-items:center;
+         --a:#2b3d5c; --b:#39506e; --cc:#2a3550; --d:#334463; --spin:30s; --glow:.14; --lvl:0 }
+
+  /* Halo: the light this thing throws on the page. Outside the clipped orb, so it can bloom past
+     the rim — that bloom is most of the "alive" read at video scale. */
+  #orb::before { content:''; position:absolute; inset:-22%; border-radius:50%; pointer-events:none;
+                 background:radial-gradient(circle, var(--b) 0%, transparent 62%);
+                 opacity:calc(var(--glow) * (.34 + var(--lvl) * .66)); filter:blur(26px);
+                 transform:scale(calc(1 + var(--lvl) * .16));
+                 transition:opacity .12s linear, transform .12s ease-out }
+
+  #mic { position:relative; width:100%; height:100%; border-radius:50%; border:0; padding:0;
          cursor:pointer; overflow:hidden; background:#0c0f14; display:grid; place-items:center;
-         --a:#2b3d5c; --b:#39506e; --cc:#2a3550; --d:#334463; --spin:30s; --glow:.14;
-         transition:transform .18s ease-out }
+         /* level scales the body; the transition is short enough to track speech, long enough
+            not to jitter on a single loud frame */
+         transform:scale(calc(1 + var(--lvl) * .05));
+         transition:transform .12s ease-out }
   /* Each blob is a soft disc smaller than the orb, wandering on its own ellipse.
-     Blurred and screen-blended, four of them read as one body that swells and
-     pinches where they overlap — metaballs, minus the shader. */
+     Blurred and screen-blended, five of them read as one body that swells and
+     pinches where they overlap — metaballs, minus the shader. The blur tightens
+     as the level rises, so loud audio makes the core condense and brighten. */
   #mic i { position:absolute; width:52%; height:52%; left:24%; top:24%; border-radius:50%;
-           filter:blur(13px); mix-blend-mode:screen; animation:wander var(--spin) ease-in-out infinite;
-           transition:background 1s }   /* colours cross-fade; the speed change snaps (animation-* isn't animatable) */
+           filter:blur(calc(15px - var(--lvl) * 5px)); mix-blend-mode:screen;
+           animation:wander var(--spin) ease-in-out infinite;
+           transition:background 1s, filter .12s linear }   /* colours cross-fade; the speed change snaps (animation-* isn't animatable) */
   #mic i:nth-child(1) { background:radial-gradient(circle, var(--a)  0 26%, transparent 66%) }
   #mic i:nth-child(2) { background:radial-gradient(circle, var(--b)  0 24%, transparent 64%);
                         animation-duration:calc(var(--spin)*.72); animation-direction:reverse }
@@ -50,18 +69,38 @@
   #mic i:nth-child(4) { background:radial-gradient(circle, var(--d)  0 22%, transparent 62%);
                         animation-duration:calc(var(--spin)*.9); animation-direction:reverse;
                         animation-delay:calc(var(--spin)*-.55) }
+  /* A 5th blob pinned near the centre and driven ONLY by level: the core that lights up when you
+     speak. Without it the wandering blobs can all be off-centre at the moment you talk, and the
+     orb answers your voice from its edge. */
+  #mic i:nth-child(5) { width:64%; height:64%; left:18%; top:18%; animation:none;
+                        background:radial-gradient(circle, var(--b) 0 18%, transparent 60%);
+                        opacity:calc(var(--lvl) * .85); filter:blur(calc(20px - var(--lvl) * 8px));
+                        transform:scale(calc(.72 + var(--lvl) * .38));
+                        transition:opacity .12s linear, transform .12s ease-out, filter .12s linear }
   /* glass shell: specular cap + rim shadow, one pseudo each */
   #mic::before { content:''; position:absolute; inset:0; border-radius:50%; pointer-events:none;
                  background:radial-gradient(120% 90% at 32% 20%, rgba(255,255,255,.30) 0 10%,
                                             rgba(255,255,255,.05) 26%, transparent 52%);
                  box-shadow:inset 0 0 46px rgba(0,0,0,.75), inset 0 1px 1px rgba(255,255,255,.24) }
+  /* inner rim light — brightens with level, so the edge "rings" on loud syllables */
   #mic::after  { content:''; position:absolute; inset:0; border-radius:50%; pointer-events:none;
-                 box-shadow:0 0 44px 8px var(--b); opacity:var(--glow); transition:opacity .8s }
+                 box-shadow:inset 0 0 calc(18px + var(--lvl) * 26px) rgba(255,255,255,calc(var(--lvl) * .13)),
+                            0 0 44px 8px var(--b);
+                 opacity:var(--glow); transition:opacity .8s, box-shadow .12s linear }
   @keyframes wander {
     0%,100% { transform:translate(-34%,-22%) scale(1)    }
     25%     { transform:translate( 30%,-34%) scale(1.18) }
     50%     { transform:translate( 36%, 28%) scale(.86)  }
     75%     { transform:translate(-28%, 34%) scale(1.12) }
+  }
+  /* Ripple: one ring per turn boundary, fired from JS (see `ripple()`). It marks the two instants
+     the transcript can't show — the moment your turn was committed, and the moment a barge-in cut
+     the reply — which is exactly what a viewer needs to SEE to believe the latency numbers. */
+  #orb u { position:absolute; inset:0; border-radius:50%; border:1.5px solid var(--c);
+           opacity:0; pointer-events:none; animation:ripple .75s ease-out forwards }
+  @keyframes ripple {
+    from { opacity:.55; transform:scale(1) }
+    to   { opacity:0;   transform:scale(1.5) }
   }
   /* the glyph leads while the orb is dark; once the loop is live the orb says it better */
   #glyph { position:relative; font-size:36px; line-height:1; transition:opacity .4s;
@@ -69,18 +108,17 @@
   body:not([data-state="idle"]) #glyph { opacity:0 }
 
   /* same object, more energy — the whole state display is these four lines */
-  body[data-state="listening"] #mic { --a:#12b87e; --b:#39d98a; --cc:#0e7fb4; --d:#5fd9b4; --spin:14s;  --glow:.45 }
-  body[data-state="thinking"]  #mic { --a:#e0a12e; --b:#ff9f43; --cc:#a63fc0; --d:#ffd166; --spin:6s;   --glow:.65 }
-  body[data-state="speaking"]  #mic { --a:#ff7a2d; --b:#ff5f6d; --cc:#ffa94d; --d:#b83fd0; --spin:4s;   --glow:.9 }
-  /* VAD: the orb swells the instant the mic hears you — the "it's alive" tell */
-  body[data-vad="1"] #mic { transform:scale(1.035) }
+  body[data-state="listening"] #orb { --a:#12b87e; --b:#39d98a; --cc:#0e7fb4; --d:#5fd9b4; --spin:14s;  --glow:.45 }
+  body[data-state="thinking"]  #orb { --a:#e0a12e; --b:#ff9f43; --cc:#a63fc0; --d:#ffd166; --spin:6s;   --glow:.65 }
+  body[data-state="speaking"]  #orb { --a:#ff7a2d; --b:#ff5f6d; --cc:#ffa94d; --d:#b83fd0; --spin:4s;   --glow:.9 }
 
   body[data-state="listening"] { --c:#39d98a }
   body[data-state="thinking"]  { --c:#ffc453 }
   body[data-state="speaking"]  { --c:#ff8a3d }
 
   @media (prefers-reduced-motion: reduce) {
-    #mic i { animation:none } #mic { transition:none }
+    #mic i { animation:none } #mic, #orb::before, #mic i { transition:none }
+    #orb u { display:none }
   }
 
   #status { color:var(--c); font-size:14px; min-height:22px; text-align:center; transition:color .3s }
@@ -92,6 +130,11 @@
   .msg { padding:10px 14px; border-radius:14px; max-width:82%; white-space:pre-wrap; word-break:break-word }
   .msg.user { align-self:flex-end;   background:#212c3a; border-bottom-right-radius:4px }
   .msg.ai   { align-self:flex-start; background:#1a1e25; border-bottom-left-radius:4px }
+  /* Barge-in: the reply stopped mid-word because you cut in. Without a mark, an interrupted bubble
+     is indistinguishable from a short answer — and interruption is the feature. */
+  .msg.ai.cut .tail { text-decoration:line-through; text-decoration-color:#ff8a3d80 }
+  .msg.ai.cut::after { content:'interrupted'; display:block; margin-top:5px;
+                       font-size:10px; letter-spacing:.04em; color:#ff8a3d; opacity:.85 }
   /* An echoed reply is not an answer — mark it so the transcript can't be read as a model talking. */
   .msg.ai.echoed { border-left:2px solid #e0a94a }
   .msg.ai.echoed::after { content:'echo — no model'; display:block; margin-top:5px;
@@ -126,9 +169,11 @@
 </head>
 <body>
 <main>
-  <button id="mic" title="click to start / stop · click while it talks to interrupt">
-    <i></i><i></i><i></i><i></i><span id="glyph">🎙</span>
-  </button>
+  <div id="orb">
+    <button id="mic" title="click to start / stop · click while it talks to interrupt">
+      <i></i><i></i><i></i><i></i><i></i><span id="glyph">🎙</span>
+    </button>
+  </div>
   <div id="status">click to start · then just talk</div>
   <div id="lat"></div>
   <div id="pipeline"></div>
@@ -198,7 +243,7 @@ const log = (...a) => {
 
 // ── transcript ──────────────────────────────────────────────────────────────
 const chat = $('chat');
-let interimEl = null, aiEl = null, vadOff = null;
+let interimEl = null, aiEl = null, vadOff = null, spokenLen = 0;
 const toolEls = new Map();
 const bubble = (cls, text = '') => {
   const el = document.createElement('div');
@@ -253,6 +298,33 @@ const showPipeline = () => { $('pipeline').innerHTML = describePipeline(agent); 
 // Hoisted (function declaration) so the settings listeners above can call it before this point.
 function onSettingChanged() { showPipeline(); prewarmIfPipelined(); }
 
+// ── the orb's level ─────────────────────────────────────────────────────────
+// One CSS var, --lvl (0..1), drives size/glow/rim/halo. Three sources feed it, in order of truth:
+//   1. the agent's `level` event — real mic RMS, the only honest one (pipeline STT only);
+//   2. while SPEAKING — the reply's spoken-char rate, so the orb pulses with its own voice
+//      (voiceloop plays TTS through an internal AEC sink we can't tap, and re-tapping the mic
+//      would just measure the echo it works to suppress);
+//   3. a selfCapture STT (webspeech) emits no level at all — fall back to the VAD-style pulse.
+// Every source decays: a level that only ever rises reads as a stuck meter.
+const orb = $('orb');
+let lvl = 0, lvlTarget = 0;
+const setLevel = (v) => { lvlTarget = Math.max(lvlTarget, Math.min(1, v)); };
+const decay = () => {
+  lvlTarget *= 0.82;                                    // sources re-arm it every frame they have data
+  lvl += (lvlTarget - lvl) * (lvlTarget > lvl ? 0.5 : 0.12);   // fast attack, slow release — how meters read as "alive"
+  orb.style.setProperty('--lvl', lvl.toFixed(3));
+  requestAnimationFrame(decay);
+};
+requestAnimationFrame(decay);
+
+// One ring per turn boundary. Marks the two instants the transcript cannot show: your turn being
+// committed, and a barge-in cutting the reply.
+const ripple = () => {
+  const u = document.createElement('u');
+  u.onanimationend = () => u.remove();
+  orb.append(u);
+};
+
 // A typed turn drives the same state machine without a mic — don't claim we're listening then.
 let micOn = false;
 const STATUS = {
@@ -276,16 +348,19 @@ function onEvent(e) {
       setState(e.state);
       break;
     case 'vad': document.body.dataset.vad = e.active ? '1' : '0'; break;
+    case 'level': setLevel(e.level); break;
     case 'stt':
-      // A selfCapture provider runs no agent VAD, so no 'vad' event ever arrives and the orb would
-      // sit dead still while the browser hears you perfectly — looking exactly like a broken mic.
-      // Live partials are the only "I hear you" signal on that path, so drive the pulse from them.
+      // A selfCapture provider runs no agent VAD, so no 'vad'/'level' event ever arrives and the orb
+      // would sit dead still while the browser hears you perfectly — looking exactly like a broken
+      // mic. Live partials are the only "I hear you" signal on that path, so pulse from them.
       if (agent?.stt?.selfCapture) {
         document.body.dataset.vad = e.turnComplete ? '0' : '1';
+        if (!e.turnComplete) setLevel(0.55);
         clearTimeout(vadOff);
         if (!e.turnComplete) vadOff = setTimeout(() => { document.body.dataset.vad = '0'; }, 700);
       }
       if (e.turnComplete) {
+        ripple();                        // your turn closed — the instant the latency clock starts
         interimEl?.remove(); interimEl = null;
         bubble('user', e.text);
         aiEl = null; t0 = Date.now(); tText = tAudio = 0; $('lat').textContent = '';
@@ -306,9 +381,20 @@ function onEvent(e) {
       // Tag the bubble (never the text) when no model produced it — the reply is a verbatim echo,
       // and only the UI should say so.
       aiEl ??= bubble($('mode').value === 'echo' ? 'ai echoed' : 'ai');
+      // The agent's own voice has no level event (TTS plays through an internal AEC sink), so drive
+      // the orb from how fast the spoken cursor advances — the orb rides its own speech.
+      if (e.full != null) setLevel(0.35 + Math.min(0.6, (e.text.length - spokenLen) * 0.09));
+      spokenLen = e.text.length;
       aiEl.textContent = e.text;                                    // spoken so far
       const tail = (e.full ?? e.text).slice(e.text.length);         // generated, not yet heard
       if (tail) aiEl.append(Object.assign(document.createElement('span'), { className:'tail', textContent:tail }));
+      // Cut short: the final says what was HEARD (text) and what was written (full) — a gap between
+      // them is a barge-in, the one thing the transcript would otherwise render as a short answer.
+      // (trim: a natural finish can leave trailing whitespace in `full` — not an interruption)
+      if (e.final) {
+        if (tail.trim()) { aiEl.classList.add('cut'); ripple(); }
+        spokenLen = 0;
+      }
       aiEl.scrollIntoView({ block:'nearest' });
       break;
     }

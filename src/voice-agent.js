@@ -241,7 +241,7 @@ export class VoiceAgent {
   //     also bounds a turnDetector that never returns at all.
   //   `bargeInMinChars` — min transcribed NOVEL chars heard while speaking to count as a real
   //     barge-in; higher ignores short backchannels ("mhm","yeah"). Defaults live in tuning.js.
-  //   `onEvent(e)` — the event tap: { type: 'state'|'stt'|'assistant'|'tool'|'vad'|'echo'|'error'|'diag', … }.
+  //   `onEvent(e)` — the event tap: { type: 'state'|'stt'|'assistant'|'tool'|'vad'|'level'|'echo'|'error'|'diag', … }.
   constructor({ sysmsg = '', persona, model = '', llm, fetchFn, apiKey = '', llmUrl = '', maxTokens = TUNING.MAX_TOKENS,
                 tts, speed, sttLang = 'en', micDeviceId = '', sttProvider = 'webspeech', sttEotThreshold,
                 sttTokenUrl = '', getSttToken, sttUsageUrl = '', sttUrl = '', sttModel = '',
@@ -371,6 +371,7 @@ export class VoiceAgent {
     // Diagnostic tap: last ~30s of the exact i16 frames handed to STT + delivery-stall gaps, for
     // dumpAudio() (replay any "it misheard me" run and prove capture clean-or-not).
     this._tap = []; this._tapSamples = 0; this._tapTotal = 0; this._tapLastMs = 0; this._tapGaps = [];
+    this._levelAt = 0;             // last 'level' emit (rate limit) — see _emitLevel
     this._stream = null; this._ctx = null; this._node = null; this._vad = null; this._streamDeviceId = undefined;   // pipeline kept warm across stop()/start() for instant resume
     this._muted = false;           // mic disabled → browser feeds silence to VAD+STT (nothing reaches the agent)
     this._ttsMuted = false;        // AI voice OUTPUT off → skip speaking, still stream the reply as text
@@ -1225,6 +1226,7 @@ export class VoiceAgent {
   // keep a small preroll so word-starts aren't clipped, and feed/commit on VAD boundaries.
   _feed(f32) {
     if (this._useBootstrap) this._bootstrapVadTick(f32);
+    this._emitLevel(f32);
     const i16 = new Int16Array(f32.length);
     for (let i = 0; i < f32.length; i++) i16[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
     this._tapPush(i16);   // diagnostic ring buffer of the exact frames handed to STT (see dumpAudio)
@@ -1237,6 +1239,22 @@ export class VoiceAgent {
       for (const c of this._preroll) this.stt.feed(c); this._preroll = []; this._wasSpeaking = true;
     }
     this.stt.feed(i16);
+  }
+
+  // ── mic level ──────────────────────────────────────────────────────────
+  // How loud the user is RIGHT NOW, for host visualisers (a mic meter, a reacting orb). Derived from
+  // the frames already in hand — no second AudioContext, no AnalyserNode, no extra mic tap.
+  // RMS is mapped to 0..1 on a perceptual (cube-root) curve: linear RMS spends most of its range on
+  // levels nobody can hear, so a meter driven by it barely moves during normal speech.
+  // Rate-limited to ~LEVEL_MIN_MS so a 4096-sample (256ms @16k) cadence can't be outrun by a faster
+  // capture chunk; a selfCapture STT (Web Speech) owns its own mic, so this never fires there.
+  _emitLevel(f32) {
+    const now = (globalThis.performance ?? Date).now();
+    if (now - this._levelAt < TUNING.LEVEL_MIN_MS) return;
+    this._levelAt = now;
+    let sum = 0; for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+    const rms = Math.sqrt(sum / f32.length);
+    this.onEvent({ type: 'level', level: Math.min(1, Math.cbrt(rms / TUNING.LEVEL_FULL_SCALE_RMS)) });
   }
 
   // ── diagnostic tap ─────────────────────────────────────────────────────

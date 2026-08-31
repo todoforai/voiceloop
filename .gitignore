@@ -5,3 +5,7 @@ node_modules/
 # (bench/results/*.md) are tracked; raw audio + per-run json stay local.
 bench/results/*.raw
 bench/results/*.json
+bench/results/.rig.lock
+
+# transient screenshot copies of the demo (orb state captures)
+examples/_s_*.html

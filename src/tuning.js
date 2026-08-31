@@ -146,6 +146,12 @@ export const TUNING = {
     redemptionFrames: 6,
   },
 
+  // ── Mic level (host visualisers) ──────────────────────────────────────────────────────────────
+  // The 'level' event: a 0..1 loudness of the mic, emitted off the frames capture already produces.
+  // Purely cosmetic — nothing in the pipeline reads it — so it's tuned for how a meter LOOKS.
+  LEVEL_MIN_MS: 45,               // rate limit; capture chunks are ~256ms, so this never throttles today but bounds a finer-grained capture
+  LEVEL_FULL_SCALE_RMS: 0.28,     // RMS that reads as "full" — normal close speech peaks near 0.1-0.2, so this leaves headroom without pinning at 1
+
   // ── TTS (first-audio latency) ─────────────────────────────────────────────────────────────────
   // How soon the FIRST spoken chunk is cut from the streaming LLM text. Lower = the agent starts talking
   // sooner (less waiting on generation), at a small prosody cost (it may break on a comma/clause rather
