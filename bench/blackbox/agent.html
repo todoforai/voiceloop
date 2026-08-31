@@ -27,10 +27,13 @@
   // but Chrome's AEC — with the TTS as far-end reference and zero echo to find — suppresses the
   // person's speech during playback (double-talk suppression), eating whole interruptions.
   // Force echoCancellation off unless ?aec=on (to test the speakers-with-echo scenario instead).
+  // ?ns=on keeps the app's production noiseSuppression (default-on in shipped browsers) — used by
+  // the noise scenario; NS-off only rode along with AEC-off historically and tests a config nobody runs.
   if (q.get('aec') !== 'on') {
+    const ns = q.get('ns') === 'on' ? {} : { noiseSuppression: false };
     const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = (c) =>
-      gum(c?.audio ? { ...c, audio: { ...(c.audio === true ? {} : c.audio), echoCancellation: false, noiseSuppression: false } } : c);
+      gum(c?.audio ? { ...c, audio: { ...(c.audio === true ? {} : c.audio), echoCancellation: false, ...ns } } : c);
   }
 
   // First streamed byte of each LLM response = llm_first_token (covers speculative prefetches too).

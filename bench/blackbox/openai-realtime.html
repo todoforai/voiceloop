@@ -19,10 +19,12 @@
 
   // Same rig fix as agent.html: virtual devices have no acoustic echo; Chrome AEC with a far-end
   // reference and nothing to cancel suppresses the person's barge-ins. Off unless ?aec=on.
+  // ?ns=on keeps default/production noiseSuppression (noise scenario); NS-off is the legacy rig default.
   if (q.get('aec') !== 'on') {
+    const ns = q.get('ns') === 'on' ? {} : { noiseSuppression: false };
     const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = (c) =>
-      gum(c?.audio ? { ...c, audio: { ...(c.audio === true ? {} : c.audio), echoCancellation: false, noiseSuppression: false } } : c);
+      gum(c?.audio ? { ...c, audio: { ...(c.audio === true ? {} : c.audio), echoCancellation: false, ...ns } } : c);
   }
 
   // Instrumentation: closed box, but its server events give speech/transcript timing —
