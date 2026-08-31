@@ -82,6 +82,14 @@ export const TUNING = {
   // a dead speech service costs a handful of tries over a few seconds instead of a spin loop.
   WEBSPEECH_ERROR_BACKOFF_MS: 300,
 
+  // Delay before pre-warming the TTS engine after start() (download+compile the voice model, JIT the
+  // WASM inference path). Deferred rather than immediate: Piper's ~60MB model download saturates
+  // bandwidth and was measured stretching the Deepgram WS handshake from ~0.5s to ~3s when fired
+  // concurrently. TTS isn't needed until the first REPLY (a user utterance + LLM roundtrip away), so
+  // waiting costs nothing — while NOT warming at all costs the first reply Piper's full cold start
+  // (measured 5.4–10.2s to first audio, vs 637ms warmed).
+  TTS_WARM_DELAY_MS: 2500,
+
   // Speculative LLM prefetch: once the live interim has been STABLE this long (no new words), the
   // agent starts generating a reply for the probable final text — overlapping the LLM's first-token
   // latency with the rest of the end-of-turn debounce. Exact-match turns adopt the running stream

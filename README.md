@@ -97,7 +97,7 @@ into the mic (no AEC):
 | OpenAI Realtime (own LLM)* | 870ms | **0/30** | **17/30** |
 | **voiceloop** (deepgram + ElevenLabs flash) | **980ms** | **0/30** | **0/30** |
 | **voiceloop** (deepgram + Piper, free local TTS) | **970ms** | **0/30** | — |
-| **voiceloop** (webspeech + Piper, zero-key default) | 2130ms | — | — |
+| **voiceloop** (webspeech + Piper, zero-key default) | 2110ms | — | — |
 | Pipecat 1.8.1 (same providers) | 1050ms | 2/30 | **20/30** |
 | ElevenLabs ConvAI | 1450ms | **0/30** | 0/30 |
 

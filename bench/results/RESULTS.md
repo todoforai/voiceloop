@@ -21,7 +21,7 @@ talked over the user (hesitation) / cut its own reply (echo), out of 30 turns.
 | OpenAI Realtime * | 870ms | 1290ms | 12/30 → **0** (yields in 130ms) | 790ms | **17/30** |
 | **voiceloop** · deepgram + EL flash | 980ms | 1400ms | 2/30 → **0** (420ms) | 930ms | **0** |
 | **voiceloop** · deepgram + Piper (free TTS, local) | 970ms | 1400ms | 0/30 → **0** | — | — |
-| **voiceloop** · webspeech + Piper (zero-key, browser STT) | 2130ms | — | — | — | — |
+| **voiceloop** · webspeech + Piper (zero-key, browser STT) | 2110ms | — | — | — | — |
 | Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 12/30 → **2** (200ms) | 1320ms | **20/30** |
 | ElevenLabs ConvAI | 1450ms | 1810ms | 2/30 → **0** (490ms) | 1410ms | 0 |
 
@@ -55,7 +55,7 @@ Realtime is the disclosed exception (speech-to-speech, its own model).
 | ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1042ms | 8 |
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
-| **voiceloop** · webspeech + Piper (zero-key browser STT — the demo default) | 2126ms | 6379 | 976ms | 28 |
+| **voiceloop** · webspeech + Piper (zero-key browser STT — the demo default) | 2113ms | 2607 | 1257ms | 30 |
 | _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + Piper | _2414ms_ | _4771_ | _1406ms_ | _32_ |
 
 voice→voice = end of the person's speech → first audible agent audio (from the recording).
@@ -70,7 +70,7 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
 |---|---|---|
 | STT first partial (person start → first transcript) | 714ms | 591ms |
 | end-of-turn delay (person end → turn committed) | 366ms | **1565ms** |
-| TTS first audio (first LLM token → audible) | 418ms | 1665ms † |
+| TTS first audio (first LLM token → audible) | 418ms | 1656ms † |
 
 The headline gap is **accounted for by one stage**: end-of-turn (1565 vs 366 ≈ 1.2s, and the
 voice→voice gap is ~1.15s). Browser STT was *faster* to a first partial in these runs (591 vs
@@ -78,10 +78,9 @@ voice→voice gap is ~1.15s). Browser STT was *faster* to a first partial in the
 
 † Not a Piper-vs-Piper comparison, for two reasons. This metric is measured from the *last* LLM
 first-token to first audio, and on this path the LLM prefetch fires at ~469ms while the turn
-doesn't commit until ~1570ms — so most of the 1665ms is the pipeline *waiting for end-of-turn*,
+doesn't commit until ~1570ms — so most of the 1656ms is the pipeline *waiting for end-of-turn*,
 counted again. Measured from turn commit → first audio, the same warm turns are **556ms** (vs
-1009ms on the deepgram row). Turn-0 Piper cold start (5.4–10.2s) inflates the p95/range but
-barely moves the median (warm-only median 1641ms).
+1009ms on the deepgram row).
 
 ### Notes per configuration
 
@@ -117,6 +116,15 @@ barely moves the median (warm-only median 1641ms).
   both failed fixes were tuning against a signal the bench can't observe.
   The honest price of the zero-key path: **no API key, no token endpoint, ~1.15s slower to
   answer.** Choose deepgram when latency matters; webspeech when setup cost does.
+  **Turn-0 cold start (fixed).** Measuring this config surfaced a real bug: `start()` returns
+  early for a selfCapture STT (it builds no mic pipeline) and that early return skipped the
+  deferred `tts.warm()`, which lived only in the pipeline branch. So the zero-key path — the one
+  path where nothing else is downloading — never pre-warmed Piper, and the *first* reply paid the
+  full model download + WASM compile. First-audio on turn 0 went **5422/5526/5712/5731/10166ms →
+  1037/1224/1362/1685/2609ms**, turn-0 voice→voice **6099 → 1930ms**, and the pooled p95 **6379 →
+  2607ms**. Warm turns are unchanged (1641 → 1656ms), which is what confirms it was cold start and
+  not a general shift. The headline median barely moves (2126 → 2113ms) because it was never a
+  turn-0 number — but the worst thing a user experienced was the very first thing they heard.
 - **EL Scribe / Speechmatics STT** — both gate the turn on late partials (~1.2–1.5s EOT):
   accurate transcripts, but not tuned for conversational end-of-turn. Deepgram flux's
   turn-events win this scenario.

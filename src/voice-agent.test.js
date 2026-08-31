@@ -1101,3 +1101,42 @@ test('getSttToken is not called at all when the provider mints nothing (webspeec
   assert.equal(calls, 0);
   agent.destroy();
 });
+
+// REGRESSION: start() returns EARLY for a selfCapture STT (it needs no mic pipeline) — and that
+// early return used to skip the deferred tts.warm() living in the pipeline branch. So the default
+// zero-key demo path (webspeech) never pre-warmed Piper and paid its full cold start on the FIRST
+// reply: measured 5.4–10.2s to first audio, vs 637ms on the warmed pipeline path.
+// A minimal SpeechRecognition stub so open() SUCCEEDS: a fatal open self-stops the agent (correctly
+// suppressing the warm), which would hide the very regression this locks in.
+function withFakeRecognition(fn) {
+  const realWin = globalThis.window;
+  globalThis.window = { SpeechRecognition: class { start() { this.onstart?.(); } stop() { this.onend?.(); } abort() {} } };
+  const realDelay = TUNING.TTS_WARM_DELAY_MS;
+  TUNING.TTS_WARM_DELAY_MS = 5;   // keep the suite fast; the deferral itself is what matters, not its length
+  return Promise.resolve(fn()).finally(() => { globalThis.window = realWin; TUNING.TTS_WARM_DELAY_MS = realDelay; });
+}
+
+test('start() warms TTS even on the selfCapture path (no mic pipeline is built)', () => withFakeRecognition(async () => {
+  let warmed = 0;
+  const tts = { ...makeFakeTTS(), warm: async () => { warmed++; } };
+  const { agent } = makeAgent({ tts, opts: { sttProvider: 'webspeech' } });
+  assert.equal(agent.stt.selfCapture, true, 'precondition: this path builds no pipeline');
+  await agent.start();
+  assert.equal(warmed, 0, 'deferred, not fired inside start() (it must not compete with STT connect)');
+  await new Promise((r) => setTimeout(r, TUNING.TTS_WARM_DELAY_MS + 20));
+  assert.equal(warmed, 1, 'warmed after the delay, so the first reply skips cold start');
+  agent.destroy();
+}));
+
+// stop() must cancel a warm that has not fired yet: it bumps the generation, and a late timer firing
+// into a dead session would download+compile a model nobody is waiting for.
+test('a pending TTS warm is cancelled by stop() (selfCapture path)', () => withFakeRecognition(async () => {
+  let warmed = 0;
+  const tts = { ...makeFakeTTS(), warm: async () => { warmed++; } };
+  const { agent } = makeAgent({ tts, opts: { sttProvider: 'webspeech' } });
+  await agent.start();
+  agent.stop();
+  await new Promise((r) => setTimeout(r, TUNING.TTS_WARM_DELAY_MS + 20));
+  assert.equal(warmed, 0, 'stopped before the delay elapsed → no wasted cold start');
+  agent.destroy();
+}));

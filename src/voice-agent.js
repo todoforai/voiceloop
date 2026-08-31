@@ -407,7 +407,17 @@ export class VoiceAgent {
     // handled by setMuted() → stt.setEnabled(). No warm-resume machinery: open() is idempotent + cheap.
     // open() can fail synchronously (Web Speech unsupported → onFatal → stop() sets _closed + idle).
     // Guard the listening flip so a fatal isn't overwritten with a fake 'listening' state.
-    if (this.stt.selfCapture) { this.stt.open?.(); if (!this._closed) this._set('listening'); return; }
+    // TTS still needs warming though: it's the one cold start a selfCapture STT does NOT own. Same
+    // deferral as the pipeline path below — the first reply is a user utterance + LLM roundtrip away,
+    // so a late start costs nothing, while skipping it entirely made turn 0 pay Piper's full cold
+    // start (measured 5.4–10.2s to first audio, vs 637ms on the warmed pipeline path).
+    if (this.stt.selfCapture) {
+      this.stt.open?.();
+      if (!this._closed) this._set('listening');
+      const gen = ++this._pipelineGen;
+      setTimeout(() => { if (gen === this._pipelineGen && !this._closed) this.tts.warm?.().catch(() => {}); }, TUNING.TTS_WARM_DELAY_MS);
+      return;
+    }
     // WARM RESUME: stop() pauses (not tears down) the pipeline, so a resume of the SAME agent finds the
     // mic stream + audio graph + VAD model still alive — just re-arm them. This skips the getUserMedia
     // permission round-trip AND the MicVAD.new() Silero/ONNX cold start (the bulk of "open→listening"
@@ -509,11 +519,9 @@ export class VoiceAgent {
       this._startVad(gen).then(() => { if (gen === this._pipelineGen && !this._closed) this._swapToSileroWhenReady(); })
         .catch(() => { if (gen === this._pipelineGen) this._sileroPending = false; });
       // Warm the TTS engine (Piper: download+compile the ONNX voice model, JIT the WASM path) so the
-      // first reply isn't stalled by cold start mid-turn — but DEFERRED off the STT connect window:
-      // Piper's ~60MB HuggingFace download saturates bandwidth and was measured stretching the
-      // Deepgram WS handshake from ~0.5s to ~3s when fired concurrently. TTS isn't needed until the
-      // first REPLY (user utterance + LLM roundtrip away), so a short delay costs nothing.
-      setTimeout(() => { if (gen === this._pipelineGen && !this._closed) this.tts.warm?.().catch(() => {}); }, 2500);
+      // first reply isn't stalled by cold start mid-turn — deferred off the STT connect window (see
+      // TTS_WARM_DELAY_MS).
+      setTimeout(() => { if (gen === this._pipelineGen && !this._closed) this.tts.warm?.().catch(() => {}); }, TUNING.TTS_WARM_DELAY_MS);
     })();
   }
 
