@@ -1920,13 +1920,23 @@ const ORT_SPECIFIER = 'onnxruntime-web';
 
 // OPFS blob cache — same 'piper' directory and url-basename filenames as the lib's own cache, so
 // models already downloaded through the lib are reused (and vice versa).
-async function opfsCachedFetch(url) {
+// `onProgress(loaded, total)` fires while the file is coming down the wire (total is 0 if the server
+// sends no content-length). A Piper voice is ~60MB: on mobile data that is a minute of apparent
+// nothing, so a host needs to be able to SAY so — see PiperTTS.setOnModelProgress. Cache hits report
+// nothing (they're instant).
+async function opfsCachedFetch(url, onProgress) {
   const name = url.split('/').at(-1);
   const dir = () => navigator.storage.getDirectory().then((r) => r.getDirectoryHandle('piper', { create: true }));
   try { return await (await (await dir()).getFileHandle(name)).getFile(); } catch {}
   const res = await fetch(url);
   if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`);
-  const blob = await res.blob();
+  let blob;
+  if (onProgress && res.body) {
+    const total = +(res.headers.get('content-length') || 0);
+    const chunks = []; let loaded = 0;
+    for await (const c of res.body) { chunks.push(c); loaded += c.byteLength; onProgress(loaded, total); }
+    blob = new Blob(chunks);
+  } else blob = await res.blob();
   try { const w = await (await (await dir()).getFileHandle(name, { create: true })).createWritable(); await w.write(blob); await w.close(); } catch {}
   return blob;
 }
@@ -1945,6 +1955,10 @@ function pcm2wav(f32, sampleRate) {
 }
 export class PiperTTS extends StreamingTTS {
   constructor(voiceId = 'en_US-joe-medium', speed = 1.0) { super(voiceId, speed); }
+  // Called with (loadedBytes, totalBytes) while the ~60MB voice model downloads on first use —
+  // that download is one silent minute on mobile data, so a UI can show a real progress bar
+  // instead of a dead button. Fires only on a cache MISS; later sessions read it from OPFS.
+  setOnModelProgress(fn) { this._onModelProgress = fn || null; return this; }
   // webpackIgnore is honored by webpack AND Turbopack (vite needs its own marker) — without it
   // bundlers rewrite this into their runtime require, which can't load a URL
   // ("turbopack_context.x is not a function").
@@ -1988,7 +2002,7 @@ export class PiperTTS extends StreamingTTS {
         import(/* webpackIgnore: true */ /* @vite-ignore */ ORT_SPECIFIER),
         import(/* webpackIgnore: true */ /* @vite-ignore */ CDN_PIPER_PHONEMIZE),
         opfsCachedFetch(`${lib.HF_BASE}/${path}.json`),
-        opfsCachedFetch(`${lib.HF_BASE}/${path}`),
+        opfsCachedFetch(`${lib.HF_BASE}/${path}`, this._onModelProgress),
       ]);
       const cfg = JSON.parse(await cfgBlob.text());
       // Match the importmap's onnxruntime-web version: the lib's baked-in default points at a

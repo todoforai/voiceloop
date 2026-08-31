@@ -144,6 +144,13 @@ new VoiceAgent({ sttProvider, getSttToken: p => fetch(ROUTE[p], { method: 'POST'
 
 On browsers without SpeechRecognition (Firefox, WebKitGTK) `webspeech` falls back to `elevenlabs` — which needs a token route configured, so pass `sttTokenUrl`/`getSttToken` if you want the fallback to work.
 
+**On iOS, prefer a cloud STT provider.** Safari has shipped `webkitSpeechRecognition` since 14.5, but the
+implementation is unreliable for a continuous agent loop: recognition often goes silent after the first
+utterance without firing `onend` or `onerror`, playing audio in the same page can kill it the same way, and
+iOS ducks the speakers while the recognizer holds the mic — which is exactly what a talking agent needs.
+`webspeech` is a fine zero-key default on desktop Chrome; on phones, point `sttProvider` at `elevenlabs`,
+`deepgram` or `speechmatics` so voiceloop owns the mic and its own VAD/echo path.
+
 | Provider | End-of-turn | Notes |
 |---|---|---|
 | `webspeech` | Native (browser-managed) | Zero-key (no token endpoint), Chrome/Safari only. **~2.1s voice→voice** — ~1.2s slower to close a turn than cloud STT ([measured](bench/results/RESULTS.md)); it also owns the mic, so voiceloop's VAD/echo pipeline is bypassed. Recognition is handled by the browser, which may use a vendor cloud service — it is not guaranteed on-device |

@@ -217,9 +217,18 @@
                               border-radius:9px; padding:9px 12px; font:inherit }
   input:focus, select:focus { outline:none; border-color:var(--c) }
   button.btn { cursor:pointer } button.btn:hover { border-color:#3a424e }
+  /* iOS Safari auto-zooms the page when you focus a field whose text is under 16px, and it does NOT
+     zoom back out on blur — one tap on "type a turn" and the whole demo is left scaled up and
+     panned. 16px is the documented threshold, so meet it on touch devices (the 11px settings
+     labels stay small; only the FIELDS matter). */
+  @media (pointer: coarse) { input, select, textarea { font-size:16px } }
   #typed { flex:1 }
   details { width:100%; border-top:1px solid var(--line); padding-top:10px }
   summary { cursor:pointer; color:var(--dim); font-size:13px; list-style:none }
+  /* A 13px line of text is a ~20px tap target; both platforms' guidelines say ~44px. Padding is
+     enough — these are the only touch controls on the page that aren't already finger-sized.
+     min-height pins the result at 44px instead of trusting 13px text to round up to it. */
+  @media (pointer: coarse) { summary { padding:11px 0; min-height:44px; box-sizing:border-box } }
   summary::before { content:'▸ ' } details[open] summary::before { content:'▾ ' }
   .grid { display:flex; flex-wrap:wrap; gap:10px; padding:12px 0 4px }
   label { font-size:11px; color:var(--dim); display:flex; flex-direction:column; gap:4px }
@@ -344,6 +353,15 @@ async function* echoLLM(history) {
 // ── what is ACTUALLY running ────────────────────────────────────────────────
 // A demo that hides which engine served a reply is worse than no demo: a browser-native
 // recognizer looks identical to voiceloop's pipeline, and an echo stand-in looks identical
+// iPadOS 13+ reports itself as "MacIntel", so the touch-point check is what separates an iPad
+// from a desktop Mac — UA sniffing alone would let the iPad through unwarned.
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+// Safari ships webkitSpeechRecognition but it goes deaf after an utterance without firing onend/onerror,
+// and iOS ducks the speakers while it holds the mic. Say so here rather than let the demo look broken.
+const IOS_WEBSPEECH_WARNING = '<span class="warn"><br>⚠️ on iOS this often stops hearing you after the ' +
+  'first reply, and quiets the speaker — pick a cloud STT provider in settings for a reliable loop</span>';
+
 // to a model. Both get named on screen, always.
 const describePipeline = (a) => {
   const echo = $('mode').value === 'echo';
@@ -352,7 +370,7 @@ const describePipeline = (a) => {
   // pipeline is running when it is exactly what gets bypassed.
   const self = a?.stt ? !!a.stt.selfCapture : sttSelfCaptures($('sttProvider').value);
   const stt = self
-    ? `<b>${$('sttProvider').value}</b> — the browser's own recognizer owns the mic <span class="warn">(voiceloop's VAD + STT pipeline bypassed)</span>`
+    ? `<b>${$('sttProvider').value}</b> — the browser's own recognizer owns the mic <span class="warn">(voiceloop's VAD + STT pipeline bypassed)</span>${IS_IOS ? IOS_WEBSPEECH_WARNING : ''}`
     : `<b>${$('sttProvider').value}</b> via voiceloop's pipeline — Silero VAD → feed → commit`;
   const llm = echo
     ? '<span class="warn"><b>echo</b> — no model: replies repeat your words back</span>'
@@ -416,10 +434,20 @@ const STATUS = {
   thinking:  () => 'thinking…',
   speaking:  () => micOn ? 'speaking — talk over it to interrupt' : 'speaking — click to interrupt',
 };
+// The first spoken reply blocks on a ~60MB Piper voice download (once — it's cached in OPFS after).
+// On mobile data that is a minute during which the status line claimed "speaking", which reads as
+// "the demo is broken". While the model is coming down, the download owns the status line.
+let modelPct = null;
 const setState = s => {
   document.body.dataset.state = micOn || s !== 'listening' ? s : 'idle';
-  $('status').textContent = STATUS[s]?.() ?? s;
+  if (modelPct === null) $('status').textContent = STATUS[s]?.() ?? s;
 };
+tts.setOnModelProgress?.((loaded, total) => {
+  const done = total && loaded >= total;
+  modelPct = done ? null : total ? Math.floor((loaded / total) * 100) : 0;
+  $('status').textContent = done ? (STATUS[document.body.dataset.state]?.() ?? '')
+    : `downloading the voice — ${modelPct}%  (${(loaded / 1048576).toFixed(0)}MB${total ? ` of ${(total / 1048576).toFixed(0)}MB` : ''}, once)`;
+});
 
 function onEvent(e) {
   if (e.type !== 'stt' || e.turnComplete) log(e);
