@@ -12,7 +12,7 @@ be free to answer fast and eagerly; the table should simply also show what that 
 | Aggressive endpointing (EOT window ↓) | v→v ↓ hundreds of ms | answers the user's half-sentence mid-hesitation | *user-interrupted count* on the hesitation scenario |
 | Filler-word head start ("Hmm," at EOT) | v→v ↓ to ~400ms | audio is instant, content isn't | *time-to-first-content-word* next to time-to-first-audio |
 | Energy-VAD barge-in | stop time ↓ (~430–540ms measured) | any noise cuts the agent off | *false barge-ins* on the noise scenario (today the rig is silent between lines — every 0 in that column is untested) |
-| TTS speedup (e.g. 1.3×) | more info per second | none, if intelligible — this is a *legitimate* option | *words-per-second* + content-word timing; speedup that delivers info sooner scores better, as it should |
+| TTS speedup (e.g. 1.3×) | more info per second | none — and **no latency advantage either**: every latency column keys on audio *onsets* (first sample, stop instant), never playback duration; if anything faster playback risks more stalls (less presynth cover). Listed here only because voice *quality* is unmeasured, so a worse/faster voice costs nothing | *words-per-second* makes the rate visible; quality itself stays human-judged (committed voice samples per SUT) |
 | No echo handling | simpler pipeline | self-hearing on real speaker/mic setups | echo scenario: transcript echo-words + self-interruptions |
 
 ## Next scenarios (priority order)
