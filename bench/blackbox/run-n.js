@@ -7,7 +7,7 @@
 // Usage: node bench/blackbox/run-n.js <scenario> <label> [N=5] [cdpPort=9223]
 
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -70,7 +70,30 @@ const stats = (v) => {
 };
 const fmt = (s) => (s ? `${s.median} (p95 ${s.p95}, ${s.min}–${s.max}, n=${s.n})` : '—');
 
+// The rig is a SINGLETON: one virtual mic/speaker pair, one SUT Chrome. Two concurrent runs
+// hear each other's "person" audio — the transcripts interleave, turns stop matching their
+// milestones and BOTH result tables are silently corrupted (observed: EOT n=7/30, phantom
+// self-interruptions, 16s p95). Nothing about the output says it happened, so refuse to start.
+function lockRig() {
+  const lock = join(BENCH, 'results', '.rig.lock');
+  try {
+    const held = +readFileSync(lock, 'utf8');
+    process.kill(held, 0);                       // throws unless that pid is alive
+    console.error(`another bench run (pid ${held}) is using the audio rig — refusing to start.\n` +
+                  `wait for it, or remove ${lock} if it is stale.`);
+    process.exit(1);
+  } catch (e) {
+    if (e?.code === 'EPERM') { console.error(`rig locked by pid from another user — refusing.`); process.exit(1); }
+    // ENOENT (no lock) or ESRCH (dead pid) → stale or free, take it.
+  }
+  writeFileSync(lock, String(process.pid));
+  const release = () => { try { unlinkSync(lock); } catch {} };
+  process.on('exit', release);
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { release(); process.exit(130); });
+}
+
 (async () => {
+  lockRig();
   await cdpConnect();
   const reports = [];
   for (let i = 1; i <= +N; i++) {
