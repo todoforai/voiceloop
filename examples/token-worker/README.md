@@ -37,6 +37,11 @@ the page picks neither model nor limits, and a large `tools` schema can't smuggl
 tokens past the size check. Anthropic serves an OpenAI-compatible `/v1/chat/completions`, so the SSE passes straight
 through to voiceloop's built-in `makeOpenAILLM` — no client-side adapter.
 
+The persona is pinned server-side too (`SYSTEM_PROMPT` var, default: Jarvis, answer extremely
+briefly): caller-supplied `system` messages are stripped, so a client can't prompt the hosted
+demo into long — i.e. expensive — answers. Brevity doubles as a latency control: the reply is
+only as fast as the sentence the TTS is waiting to finish.
+
 ## Use it from the demo
 
 In the demo's settings: STT = `deepgram`, STT token url = `<worker>/stt/token`. Mode =

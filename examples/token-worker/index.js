@@ -18,6 +18,14 @@
 // bill when the URL leaks. Neither is authentication; a demo backend holding capped, cheap keys is
 // the threat model. Anything costlier needs real auth in front of it.
 
+// Persona for the hosted demo (override with the SYSTEM_PROMPT var). The brevity rule is a cost
+// AND a latency control: every output token is billed, and in a voice loop the reply is only as
+// fast as the sentence the TTS is waiting to finish.
+const HOSTED_PERSONA =
+  'You are Jarvis, a voice assistant. Your reply is spoken aloud, so answer EXTREMELY briefly — ' +
+  'one short sentence, two at most. Plain speakable prose: no markdown, no lists, no headings. ' +
+  'Never explain that you are being brief.';
+
 const json = (obj, status, origin) =>
   new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json', ...cors(origin) } });
 
@@ -109,8 +117,10 @@ export default {
     if (url.pathname === '/llm') {
       if (!env.ANTHROPIC_API_KEY) return json({ error: 'ANTHROPIC_API_KEY not configured' }, 500, origin);
       const body = await req.json().catch(() => ({}));
-      const messages = body.messages;
-      if (!Array.isArray(messages) || !messages.length) return json({ error: 'messages required' }, 400, origin);
+      // Strip any caller-supplied system prompt: the persona is pinned HERE, like the model —
+      // otherwise a caller could prompt the hosted demo into long (= expensive) answers.
+      const messages = Array.isArray(body.messages) ? body.messages.filter((m) => m?.role !== 'system') : [];
+      if (!messages.length) return json({ error: 'messages required' }, 400, origin);
       // Same reasoning as /tts's length cap: a leaked demo URL should cost cents, not a plan.
       if (JSON.stringify(messages).length > 8000) return json({ error: 'conversation too long' }, 413, origin);
       const r = await fetch('https://api.anthropic.com/v1/chat/completions', {
@@ -124,7 +134,8 @@ export default {
         body: JSON.stringify({
           model: env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
           max_tokens: Math.min(Number(body.max_tokens) || 512, 1024),
-          messages, stream: true,
+          messages: [{ role: 'system', content: env.SYSTEM_PROMPT || HOSTED_PERSONA }, ...messages],
+          stream: true,
         }),
       });
       if (!r.ok) return json({ error: `anthropic ${r.status}: ${(await r.text().catch(() => '')).slice(0, 200)}` }, 502, origin);
