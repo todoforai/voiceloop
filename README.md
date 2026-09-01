@@ -2,12 +2,13 @@
 
 **The fastest voice agent loop in the browser**
 
-# WHY
-I just couldn't find the right solution that is actually creates the fluid JARVIS feel in the browser. (also it is crazy that we are in 2026 and not in 2010 and still no real good solution?).
+## Why
 
-Everybody should have the best voice loop. That's why we created this and will keep pushing the limits here! Observations and contributions are welcomed, push the boundaries together!
+I just couldn't find a solution that actually creates the fluid JARVIS feel in the browser (and it's crazy that it's 2026, not 2010, and there's still no really good one).
 
-# Features
+Everybody should have the best voice loop. That's why we created this, and we'll keep pushing the limits here — observations and contributions welcome, let's push the boundaries together!
+
+## Features
 
 A zero-dependency JavaScript library that runs the full voice loop — **VAD → STT → LLM → TTS** — with the hard parts already solved:
 
@@ -83,7 +84,7 @@ repeats you — so it runs with no keys, no backend and no cost. Open *settings*
 to point it at any OpenAI-compatible endpoint (Ollama, your proxy) and a cloud
 STT provider.
 
-`/examples/simple-browser.html` is the same loop with no UI at all — 100 lines,
+`/examples/simple-browser.html` is the same loop with no UI at all — ~100 lines,
 the place to start reading.
 
 (`file://` won't work — mic and module imports need `http://localhost` or https.)
@@ -140,7 +141,7 @@ new VoiceAgent({ sttProvider: 'speechmatics', sttTokenUrl: '/api/stt/token' })
 
 Cloud providers authenticate with a **short-TTL token minted by your backend** so the raw API key never reaches the page. Either:
 
-- `sttTokenUrl` — a POST route on your server that returns `{ token }` (mint it against the provider's temp-token API with your secret key — a complete ~70-line Cloudflare Worker doing exactly this for Deepgram, plus an ElevenLabs TTS proxy, is in [`examples/token-worker/`](examples/token-worker/)), or
+- `sttTokenUrl` — a POST route on your server that returns `{ token }` (mint it against the provider's temp-token API with your secret key — a complete single-file Cloudflare Worker doing exactly this for Deepgram, plus ElevenLabs TTS and LLM proxies with rate limits, is in [`examples/token-worker/`](examples/token-worker/)), or
 - `getSttToken` — an async callback `(provider) => ({ token })` when your auth doesn't fit a bare POST, or when each provider mints a different credential. It is handed the provider actually running (after the fallback below), so you pick the route without re-deriving that rule:
 
 ```js
@@ -232,6 +233,8 @@ agent.setHeld(bool)            // hold: queue utterances, reply over all of them
 agent.setMuted(bool)           // mic mute
 agent.setTtsMuted(bool)        // silent mode: transcript + tools still run
 agent.setSysmsg(text)          // update live context mid-session
+agent.interrupt()              // programmatic barge-in: stop the current reply
+agent.setVoice(id) / agent.setSpeed(x) / agent.listVoices()   // voice controls (engine-dependent)
 agent.seek(nwIndex)            // tap-to-seek within the current reply (nwIndex = count of
                                // NON-WHITESPACE chars before the tap — whitespace doesn't count)
 agent.replay(text, fromNw?, onProgress?)   // re-voice a past reply; onProgress(spokenText, done)
