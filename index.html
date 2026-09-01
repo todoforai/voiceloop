@@ -230,8 +230,16 @@
      min-height pins the result at 44px instead of trusting 13px text to round up to it. */
   @media (pointer: coarse) { summary { padding:11px 0; min-height:44px; box-sizing:border-box } }
   summary::before { content:'▸ ' } details[open] summary::before { content:'▾ ' }
-  .grid { display:flex; flex-wrap:wrap; gap:10px; padding:12px 0 4px }
+  /* One row per pipeline stage, in the order the audio flows (LLM group first only because `mode`
+     is the master switch). A flat 11-field soup made "which url goes with which provider" a puzzle;
+     the heading answers it before the placeholder has to. */
+  .grid { display:flex; flex-direction:column; gap:14px; padding:12px 0 4px }
+  .set { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end }
+  .set h4 { flex-basis:100%; margin:0 0 -4px; font-size:10px; font-weight:600;
+            letter-spacing:.1em; text-transform:uppercase; color:var(--dim); opacity:.65 }
   label { font-size:11px; color:var(--dim); display:flex; flex-direction:column; gap:4px }
+  /* A field the current choices ignore must LOOK ignored, not merely refuse focus. */
+  input:disabled, select:disabled { opacity:.4 }
   #log { font:11px/1.5 ui-monospace,monospace; color:var(--dim);
          max-height:220px; overflow:auto; white-space:pre-wrap; padding-top:8px }
   /* Which code is actually running — the demo must never let you mistake the browser's own
@@ -268,24 +276,36 @@
   <details>
     <summary>settings</summary>
     <div class="grid">
-      <label>mode<select id="mode">
-        <option value="echo">echo — no keys, no backend</option>
-        <option value="hosted">full loop — hosted claude haiku</option>
-        <option value="llm">full loop — your LLM</option>
-      </select></label>
-      <label>LLM url<input id="llmUrl" size="30" value="http://localhost:11434/v1/chat/completions"></label>
-      <label>model<input id="model" size="14" value="llama3.2"></label>
-      <label>STT<select id="sttProvider"></select></label>
-      <label>STT token url<input id="sttTokenUrl" size="30" placeholder="your backend route (cloud STT only)"></label>
-      <label>api key<input id="apiKey" size="18" placeholder="Bearer for LLM · X-API-Key for token url"></label>
-      <label>lang<select id="sttLang"></select></label>
-      <label>TTS<select id="ttsProvider">
-        <option value="piper">piper — free, in-browser</option>
-        <option value="elevenlabs">elevenlabs — needs tts url</option>
-      </select></label>
-      <label>TTS url<input id="ttsUrl" size="30" placeholder="your backend route (elevenlabs only)"></label>
-      <label>voice<select id="voice"></select></label>
-      <label>mic<select id="micDeviceId"><option value="">default</option></select></label>
+      <div class="set">
+        <h4>llm</h4>
+        <label>mode<select id="mode">
+          <option value="echo">echo — no keys, no backend</option>
+          <option value="hosted">full loop — hosted claude haiku</option>
+          <option value="llm">full loop — your LLM</option>
+        </select></label>
+        <label>LLM url<input id="llmUrl" size="30" value="http://localhost:11434/v1/chat/completions"></label>
+        <label>model<input id="model" size="14" value="llama3.2"></label>
+      </div>
+      <div class="set">
+        <h4>speech to text</h4>
+        <label>provider<select id="sttProvider"></select></label>
+        <label>language<select id="sttLang"></select></label>
+        <label>token url<input id="sttTokenUrl" size="30" placeholder="your backend route (see examples/token-worker)"></label>
+      </div>
+      <div class="set">
+        <h4>text to speech</h4>
+        <label>provider<select id="ttsProvider">
+          <option value="piper">piper — free, in-browser</option>
+          <option value="elevenlabs">elevenlabs — needs TTS url</option>
+        </select></label>
+        <label>voice<select id="voice"></select></label>
+        <label>TTS url<input id="ttsUrl" size="30" placeholder="your backend route (see examples/token-worker)"></label>
+      </div>
+      <div class="set">
+        <h4>input &amp; auth</h4>
+        <label>mic<select id="micDeviceId"><option value="">default</option></select></label>
+        <label>api key<input id="apiKey" size="26" placeholder="Bearer for your LLM · X-API-Key for token url"></label>
+      </div>
     </div>
     <div class="bar">
       <button class="btn" id="clear">Clear</button>
@@ -329,9 +349,15 @@ const log = (...a) => {
 
 // ── transcript ──────────────────────────────────────────────────────────────
 const chat = $('chat');
-let interimEl = null, aiEl = null, vadOff = null, spokenLen = 0;
-let aiTurn = null;                 // which reply aiEl belongs to — see the 'assistant' case
-const turnEls = new Map();         // turn id → its bubble, so a LATE event can still find its own
+let interimEl = null, vadOff = null, spokenLen = 0;
+// The transcript's single source of truth for replies: turn id → its bubble. EVERY assistant event
+// routes through it — there is no separate "current bubble" to fall out of sync with. A turn's
+// entry lives from its first painted event to its settle (final / drop / reply-scoped error), so a
+// straggler from an interrupted turn finds its own bubble by id, wherever it sits in the chat.
+// Ids are per-agent and monotonic, so `liveTurn` (the highest id seen) tells present from past:
+// smaller = a straggler correcting history — it paints its bubble but drives no cosmetics.
+const turnEls = new Map();
+let liveTurn = 0;                  // turns count from 1; reset with the agent that issued them
 
 // The dimmed tail is "written but not yet heard": on a final, a non-empty tail means the reply was
 // cut off mid-sentence. Shared by the live path and the late-straggler path so an interrupted reply
@@ -427,9 +453,14 @@ const describePipeline = (a) => {
 const showPipeline = () => { $('pipeline').innerHTML = describePipeline(agent); };
 // Hoisted (function declaration) so the settings listeners above can call it before this point.
 function onSettingChanged() {
-  // Say it with the UI, not just the banner: fields the current mode IGNORES are disabled, so the
-  // form can't imply that a typed url or key is doing something.
-  for (const id of ['llmUrl', 'model']) $(id).disabled = $('mode').value !== 'llm';
+  // Say it with the UI, not just the banner: fields the current choices IGNORE are disabled, so the
+  // form can't imply that a typed url or key is doing something. (ttsUrl is applyTts()'s to
+  // disable — it lives on the provider-change path, not here.)
+  const custom = $('mode').value === 'llm';
+  const self = sttSelfCaptures($('sttProvider').value);   // webspeech: no token route, no pipeline
+  for (const id of ['llmUrl', 'model']) $(id).disabled = !custom;
+  $('sttTokenUrl').disabled = self;
+  $('apiKey').disabled = !custom && self;   // used as LLM Bearer OR token-route X-API-Key — dead only when neither hop exists
   showPipeline(); prewarmIfPipelined();
 }
 
@@ -528,57 +559,41 @@ function onEvent(e) {
         ripple();                        // your turn closed — the instant the latency clock starts
         interimEl?.remove(); interimEl = null;
         bubble('user', e.text);
-        // Detach from the previous reply's bubble WITHOUT forgetting which one it was: a barge-in
-        // ends the old turn while its last events are still arriving, and those must keep landing
-        // in the bubble above — not in the one this new turn is about to create.
-        aiEl = null; aiTurn = null;
-        spokenLen = 0; t0 = Date.now(); tText = tAudio = 0; $('lat').textContent = '';
+        t0 = Date.now(); tText = tAudio = 0; $('lat').textContent = '';
       } else {
         interimEl ??= bubble('user interim');
-        // A turn can die WITHOUT turnComplete (echo-dropped, retracted to '', reply error) — the
-        // interim bubble then survives at its old position and `??=` reuses it, painting the NEXT
-        // turn's live speech ABOVE messages appended since. append() moves an existing node.
-        chat.append(interimEl);
         interimEl.textContent = `${e.committed ?? ''} ${e.text}`.trim();
         interimEl.scrollIntoView({ block:'nearest' });
       }
       break;
     case 'assistant': {
-      // Which reply is this? A barge-in ends turn N while its final event is still in flight, so
-      // that event can arrive AFTER turn N+1's user bubble already exists. Keyed only by "the
-      // current aiEl", the late text would be written into the NEW bubble — the old reply's words
-      // would appear below the newer question, and the new reply would overwrite them.
-      // aiTurn (which reply aiEl belongs to) is the discriminator: an event for ANOTHER turn is
-      // either a STRAGGLER from a finished reply — it already owns a bubble above, the only correct
-      // place for its text — or a brand-new reply that arrived without a user turn (notify()),
-      // which must open its own bubble rather than overwrite the previous answer.
-      if (e.turn != null && e.turn !== aiTurn) {
-        const own = turnEls.get(e.turn);
-        if (own) {              // straggler: correct its own bubble in place, touch nothing current
-          if (!e.text && !e.final && e.full == null) { own.remove(); turnEls.delete(e.turn); break; }
-          own.textContent = e.text; paintTail(own, e);
-          if (e.final) turnEls.delete(e.turn);   // settled, even late: an entry kept here would pin the DOM node forever
-          break;
-        }
-        aiEl = null; aiTurn = null; spokenLen = 0;   // new reply → falls through to build its own bubble
+      // ONE routing rule: this event paints the bubble of ITS turn — looked up in turnEls, created
+      // on the turn's first painted event. A barge-in ends turn N while its final is still in
+      // flight, so it can land after turn N+1 exists; keyed by id, it still finds its own bubble.
+      // `live` (id >= the highest seen) does NOT change where text goes — it only gates cosmetics:
+      // a straggler correcting history must not pulse the orb, stamp latency, ripple, or scroll.
+      const live = e.turn >= liveTurn;
+      if (live && e.turn > liveTurn) { liveTurn = e.turn; spokenLen = 0; }   // a NEW reply starts its cursor at 0 (notify() has no stt event to reset it)
+      let el = turnEls.get(e.turn);
+      // "That draft never happened" (interrupted before a word was spoken) → drop the bubble
+      // rather than blank it. Told apart from the FIRST progress tick — also empty (cursor at 0)
+      // but carrying `full` — which must NOT tear the live bubble down.
+      if (!e.text && !e.final && e.full == null) { el?.remove(); turnEls.delete(e.turn); break; }
+      if (!el) {
+        if (!live) break;   // a settled turn with no bubble has no correct place to paint — ignore
+        // Tag the bubble (never the text) when no model produced it — the reply is a verbatim
+        // echo, and only the UI should say so.
+        el = bubble($('mode').value === 'echo' ? 'ai echoed' : 'ai');
+        turnEls.set(e.turn, el);
       }
-      // "That draft never happened" (interrupted before a word was spoken) → drop the bubble rather
-      // than blank it. It must be told apart from the FIRST progress tick, which is also empty
-      // (cursor at 0 chars) but carries `full`: treating that as a drop removed the live bubble and
-      // the next tick built a second one — the whole reply rendered twice.
-      if (!e.text && !e.final && e.full == null) {
-        aiEl?.remove(); if (e.turn != null) turnEls.delete(e.turn);
-        aiEl = null; aiTurn = null; spokenLen = 0;
-        break;
-      }
+      el.textContent = e.text;                                      // spoken so far
+      const tail = paintTail(el, e);
+      if (e.final) turnEls.delete(e.turn);                          // settled: stop tracking (the bubble stays)
+      if (!live) break;                                             // history corrected; the present is untouched
       if (!tText && t0) { tText = Date.now(); showLat(); }
-      // `full` only exists once the TTS progress cursor is live — i.e. a clip is
-      // actually playing. The 'speaking' state is just the first token, not sound.
+      // `full` only exists once the TTS progress cursor is live — i.e. a clip is actually playing.
+      // The 'speaking' state is just the first token, not sound.
       if (e.full != null && t0 && !tAudio) { tAudio = Date.now(); showLat(); }
-      // Tag the bubble (never the text) when no model produced it — the reply is a verbatim echo,
-      // and only the UI should say so.
-      if (!aiEl) { aiEl = bubble($('mode').value === 'echo' ? 'ai echoed' : 'ai'); aiTurn = e.turn ?? null;
-                   if (e.turn != null) turnEls.set(e.turn, aiEl); }
       // The agent's own voice has no level event (TTS plays through an internal AEC sink), so drive
       // the orb from how fast the spoken CURSOR advances — the orb rides its own speech. Only events
       // carrying `full` have a cursor; a pre-audio streaming draft would otherwise run spokenLen up
@@ -587,14 +602,8 @@ function onEvent(e) {
         setLevel(0.35 + Math.min(0.6, Math.max(0, e.text.length - spokenLen) * 0.09));
         spokenLen = e.text.length;
       }
-      aiEl.textContent = e.text;                                    // spoken so far
-      const tail = paintTail(aiEl, e);
-      if (e.final) {
-        if (tail.trim()) ripple();
-        spokenLen = 0;
-        if (e.turn != null) turnEls.delete(e.turn);   // settled: stop tracking (the bubble stays)
-      }
-      aiEl.scrollIntoView({ block:'nearest' });
+      if (e.final && tail.trim()) ripple();
+      el.scrollIntoView({ block:'nearest' });
       break;
     }
     case 'tool': {
@@ -612,10 +621,7 @@ function onEvent(e) {
       bubble('err', e.error);
       // A reply-scoped error (it carries the turn) ends that reply without a final assistant event —
       // release its bubble from tracking (the partial text stays visible) so the map can't grow.
-      if (e.turn != null) {
-        turnEls.delete(e.turn);
-        if (e.turn === aiTurn) { aiEl = null; aiTurn = null; spokenLen = 0; }
-      }
+      if (e.turn != null) turnEls.delete(e.turn);
       break;
   }
 }
@@ -658,7 +664,7 @@ const makeAgent = () => {
 const dropAgent = (why) => {
   if (!agent) return;
   agent.destroy(); agent = null;         // null FIRST-equivalent: the identity guard now drops every late event from it
-  aiEl = null; aiTurn = null; spokenLen = 0; turnEls.clear();
+  liveTurn = 0; spokenLen = 0; turnEls.clear();   // the next agent counts turns from 1 again
   toolEls.clear();                       // tool ids are provider-issued and can repeat — same hazard
   interimEl?.remove(); interimEl = null; // a half-heard interim went nowhere; the dead agent will never settle it
   clearTimeout(vadOff); document.body.dataset.vad = '0';
@@ -696,7 +702,7 @@ $('send').onclick = () => {
 $('typed').onkeydown = e => { if (e.key === 'Enter') $('send').click(); };
 
 $('clear').onclick = () => { chat.textContent = ''; $('log').textContent = ''; $('lat').textContent = '';
-                             interimEl = aiEl = null; aiTurn = null; turnEls.clear(); toolEls.clear(); };
+                             interimEl = null; turnEls.clear(); toolEls.clear(); };
 const toggle = (id, fn) => $(id).onclick = () => {
   const on = $(id).dataset.on !== '1';
   $(id).dataset.on = on ? '1' : '0';
