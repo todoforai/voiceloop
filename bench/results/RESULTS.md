@@ -96,7 +96,7 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   fastest barge-in of ours (mp3 clips need no un-cancellable local inference to drain).
 - **deepgram + Piper** — same latency, zero TTS cost, fully offline voice. Piper's WASM synth
   runs in a worker (`ort.env.wasm.proxy`); first-word clip ~185ms on a 32-core box.
-- **webspeech + Piper — the zero-key path, and what `examples/demo.html` runs by default.**
+- **webspeech + Piper — the zero-key path, and what the demo runs by default.**
   2126ms is **2.2× the deepgram + Piper row** (974ms, same synthesizer), and the gap is
   end-of-turn: **EOT 1565ms vs 366**.
   What the traces show, per turn (n=30, browser event log): Chrome is still emitting interim

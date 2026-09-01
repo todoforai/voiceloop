@@ -16,13 +16,26 @@
 //                                                           # at its first mic connection or T+startDelayMs
 // Output: bench/results/bb-<scenario>-<label>-<ts>.json (+ .agent.wav) — analyze.js turns it into a report.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, createWriteStream } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Gate, RATE, segments } from './energy.js';
 
 const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
+
+// The virtual mic is silent BY DESIGN, so a run that leaves it loaded doesn't fail loudly — it
+// leaves every later app recording digital silence with no error to show for it (a browser that
+// simply never hears you). Tear it down on EVERY exit path, not just the happy one: the run ends
+// via process.exit() in four places, plus Ctrl-C and crashes.
+let toreDown = false;
+const audioDown = () => {
+  if (toreDown) return; toreDown = true;
+  spawnSync(join(BENCH, 'blackbox', 'audio-setup.sh'), ['down'], { stdio: 'ignore' });
+};
+process.on('exit', audioDown);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { audioDown(); process.exit(130); });
+process.on('uncaughtException', (e) => { console.error(e); audioDown(); process.exit(1); });
 const scenarioName = process.argv[2] || 'smalltalk';
 const label = process.argv[3] || 'blackbox';
 const scenario = JSON.parse(readFileSync(join(BENCH, 'scenarios', `${scenarioName}.json`), 'utf8'));

@@ -17,7 +17,8 @@
   "files": [
     "src",
     "!src/*.test.js",
-    "examples"
+    "examples",
+    "index.html"
   ],
   "scripts": {
     "test": "node --test src/*.test.js"

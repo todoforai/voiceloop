@@ -67,7 +67,7 @@ npx serve .                     # from a clone
 npx serve node_modules/@todoforai/voiceloop    # from npm
 ```
 
-Open **`/examples/demo.html`** — the whole loop behind one orb that breathes with the
+Open **the demo** (`index.html` — the repo root, and what GitHub Pages serves) — the whole loop behind one orb that breathes with the
 mic level (and, while it answers, with how fast its spoken cursor advances), the live
 interim transcript, click-to-interrupt with the unspoken remainder struck through where
 you cut it off, and the two numbers that decide whether it feels alive: **first token**
@@ -264,7 +264,7 @@ Two of them exist purely so a UI can look alive, and both cost you nothing to ig
 - **interruption** — there is no "cut short" event: the final `assistant` event carries both what
   was heard (`text`) and what was written (`full`), so a non-empty `full.slice(text.length)` means
   the reply was cut before that remainder was ever spoken. Render it struck through and the
-  transcript shows exactly where playback stopped (see `examples/demo.html`). It does not say *why*:
+  transcript shows exactly where playback stopped (see `index.html`). It does not say *why*:
   a voice barge-in, `interrupt()`, a superseding turn and `setTtsMuted(true)` all end a reply the
   same way.
 
