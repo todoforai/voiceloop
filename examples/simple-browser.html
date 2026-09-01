@@ -46,12 +46,12 @@
     const agent = new VoiceAgent({
       // Point at any OpenAI-compatible /chat/completions endpoint.
       // Quick local test with Ollama (from the repo root):
-      //   ollama pull llama3.2
+      //   ollama pull qwen3
       //   OLLAMA_ORIGINS='*' ollama serve
       //   npx serve .          → open http://localhost:3000/examples/simple-browser.html
       // (OLLAMA_ORIGINS allows this page's origin; mic access needs http://localhost or https.)
       llmUrl: 'http://localhost:11434/v1/chat/completions',
-      model: 'llama3.2',
+      model: 'qwen3',
 
       persona: 'You are a concise, friendly voice assistant.',
 
