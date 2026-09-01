@@ -2,6 +2,8 @@
 
 **The fastest voice agent loop in the browser**
 
+### ▶︎ [Try the live demo](https://todoforai.github.io/voiceloop/) — no keys, no install, runs in your tab
+
 ## Why
 
 I just couldn't find a solution that actually creates the fluid JARVIS feel in the browser (and it's crazy that it's 2026, not 2010, and there's still no really good one).
@@ -59,35 +61,24 @@ button.onclick = async () => {
 
 That's it. Speak, get spoken answers, interrupt at will.
 
-## Try it in 20 seconds
+## The demo
 
-**[todoforai.github.io/voiceloop](https://todoforai.github.io/voiceloop/)** — the live demo, no
-install, no keys and no backend of ours: the default path is your browser's own Web Speech STT,
-local Piper TTS, and an echo stand-in for the LLM. (Web Speech is the *browser's* recognizer —
-on most builds it still sends audio to the browser vendor. Pick a pipeline STT provider in
-settings to see voiceloop's own VAD→STT path.)
+**[todoforai.github.io/voiceloop](https://todoforai.github.io/voiceloop/)** starts in echo mode —
+browser Web Speech STT, local Piper TTS, a stand-in "LLM" that repeats you — so it costs nothing
+and needs no backend. It shows the two numbers that decide whether an agent feels alive
+(**first token**, **first sound**), and click-to-interrupt strikes through the words you cut off.
+Open *settings* to switch to a pipeline STT provider (Web Speech bypasses voiceloop's VAD→STT
+path) and point it at any OpenAI-compatible endpoint (Ollama, your proxy).
 
-Or locally, to point it at your own LLM:
+Run it locally against your own LLM:
 
 ```sh
-npx serve .                     # from a clone
-npx serve node_modules/@todoforai/voiceloop    # from npm
+npx serve .                                    # from a clone
+npx serve node_modules/@todoforai/voiceloop    # from npm — then open index.html
 ```
 
-Open **the demo** (`index.html` — the repo root, and what GitHub Pages serves) — the whole loop behind one orb that breathes with the
-mic level (and, while it answers, with how fast its spoken cursor advances), the live
-interim transcript, click-to-interrupt with the unspoken remainder struck through where
-you cut it off, and the two numbers that decide whether it feels alive: **first token**
-and **first sound**. It starts in **echo mode**
-— browser-native Web Speech STT, local Piper TTS and a stand-in "LLM" that
-repeats you — so it runs with no keys, no backend and no cost. Open *settings*
-to point it at any OpenAI-compatible endpoint (Ollama, your proxy) and a cloud
-STT provider.
-
-`/examples/simple-browser.html` is the same loop with no UI at all — ~100 lines,
-the place to start reading.
-
-(`file://` won't work — mic and module imports need `http://localhost` or https.)
+`file://` won't work — mic and module imports need `http://localhost` or https.
+Start reading at [`examples/simple-browser.html`](examples/simple-browser.html): the same loop, no UI, ~100 lines.
 
 ## How the latency adds up
 
