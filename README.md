@@ -114,17 +114,13 @@ into the mic (no AEC):
 | Pipecat 1.8.1 (same providers) | 1050ms | 2/30 | **20/30** |
 | ElevenLabs ConvAI | 1450ms | **0/30** | 0/30 |
 
-Overlapping a hesitating user is fine — people do it, and every stack here except Pipecat backs
-off the moment the user keeps talking (voiceloop yields in 420ms, and only enters 2 of 30 turns
-at all). The failure that still separates them is echo: fed its own voice through the mic with
-no AEC, the other fast stacks hear themselves as the user and cut their own replies.
-voiceloop's word-level echo filter runs echo-coupled turns at full speed (930ms, parity with
-clean).
+The separating failure is echo: with no AEC, the other fast stacks hear their own voice as the
+user and cut their own replies. voiceloop's word-level echo filter runs echo-coupled turns at
+full speed (930ms — parity with clean).
 
-\* Realtime is speech-to-speech — it can't use the bench's fixed mock LLM, so its row isn't
-fully apples-to-apples.
+\* Realtime is speech-to-speech, so it can't use the bench's fixed mock LLM — not fully apples-to-apples.
 
-Full tables, method and reproduction steps: [`results/RESULTS.md`](https://github.com/todoforai/voice-agent-bench/blob/master/results/RESULTS.md).
+Full tables, method, reproduction: [`results/RESULTS.md`](https://github.com/todoforai/voice-agent-bench/blob/master/results/RESULTS.md).
 
 ## STT providers
 
