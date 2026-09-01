@@ -35,7 +35,7 @@ const agent = new VoiceAgent({
   // Any OpenAI-compatible /chat/completions endpoint. In production point this at
   // YOUR proxy route — never ship a provider secret key to the page.
   llmUrl: '/api/chat/completions',
-  model: 'gpt-4o-mini',
+  model: 'claude-haiku-4-5',   // fast model = fast first token; any model your endpoint serves
 
   persona: 'You are a friendly cooking assistant.',
   sysmsg: 'The user is on the recipes page.',   // live context, update via setSysmsg()
