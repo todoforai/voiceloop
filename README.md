@@ -35,8 +35,7 @@ const agent = new VoiceAgent({
   // Any OpenAI-compatible /chat/completions endpoint. In production point this at
   // YOUR proxy route — never ship a provider secret key to the page.
   llmUrl: '/api/chat/completions',
-  model: 'llama-3.3-70b',   // voice wants first-token speed: Cerebras/Groq are ideal here,
-                            // or any fast model your endpoint serves (haiku, flash, ...)
+  model: 'claude-haiku-4-5',   // voice wants first-token speed — use the fastest model your endpoint serves
 
   persona: 'You are a friendly cooking assistant.',
   sysmsg: 'The user is on the recipes page.',   // live context, update via setSysmsg()
