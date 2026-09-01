@@ -1,6 +1,13 @@
 # voiceloop
 
-**The fastest way to put a real, interruptible voice agent in the browser.**
+**The fastest voice agent loop in the browser**
+
+# WHY
+I just couldn't find the right solution that is actually creates the fluid JARVIS feel in the browser. (also it is crazy that we are in 2026 and not in 2010 and still no real good solution?).
+
+Everybody should have the best voice loop. That's why we created this and will keep pushing the limits here! Observations and contributions are welcomed, push the boundaries together!
+
+# Features
 
 A zero-dependency JavaScript library that runs the full voice loop — **VAD → STT → LLM → TTS** — with the hard parts already solved:
 
