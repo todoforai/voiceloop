@@ -23,6 +23,22 @@ export class ElevenLabsTTS extends StreamingTTS {
     this.ttsUrl = ttsUrl; this.apiKey = apiKey; this.modelId = modelId; this.format = format;
   }
 
+  // Listing voices needs the key, so on the proxy path it has to come from YOUR backend: a GET on
+  // the same ttsUrl returns [{ id, name }] (see examples/token-worker). Direct mode asks ElevenLabs
+  // with the key it already has. Either way a failure is non-fatal — an empty list just means the
+  // host keeps whatever voiceId it was constructed with, and synthesis is unaffected.
+  async voices() {
+    const [url, headers] = this.ttsUrl
+      ? [this.ttsUrl, {}]
+      : ['https://api.elevenlabs.io/v2/voices?page_size=100', { 'xi-api-key': this.apiKey }];
+    try {
+      const r = await fetch(url, { headers, signal: AbortSignal.timeout(5000) });
+      if (!r.ok) return [];
+      const body = await r.json();
+      return (body.voices ?? []).map((v) => ({ id: v.voice_id ?? v.id, name: v.name }));
+    } catch { return []; }
+  }
+
   // Pre-establish the connection (DNS + TLS + any proxy hop) so the first real clip only pays TTFB.
   // A HEAD to the API root is enough to open the socket; failures are non-fatal.
   async warm() {

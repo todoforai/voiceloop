@@ -272,6 +272,11 @@
       <label>STT token url<input id="sttTokenUrl" size="30" placeholder="your backend route (cloud STT only)"></label>
       <label>api key<input id="apiKey" size="18" placeholder="Bearer for LLM · X-API-Key for token url"></label>
       <label>lang<select id="sttLang"></select></label>
+      <label>TTS<select id="ttsProvider">
+        <option value="piper">piper — free, in-browser</option>
+        <option value="elevenlabs">elevenlabs — needs tts url</option>
+      </select></label>
+      <label>TTS url<input id="ttsUrl" size="30" placeholder="your backend route (elevenlabs only)"></label>
       <label>voice<select id="voice"></select></label>
       <label>mic<select id="micDeviceId"><option value="">default</option></select></label>
     </div>
@@ -286,7 +291,7 @@
 </main>
 
 <script type="module">
-import { VoiceAgent, PiperTTS, unlockAudio, prewarmVoice, STT_PROVIDERS, sttSelfCaptures, LANG_NAMES } from './src/index.js';
+import { VoiceAgent, PiperTTS, ElevenLabsTTS, unlockAudio, prewarmVoice, STT_PROVIDERS, sttSelfCaptures, LANG_NAMES } from './src/index.js';
 
 // Load VAD/WASM + build the Silero session while the page sits idle — but ONLY for a provider that
 // will actually use it. A selfCapture provider (webspeech) builds no pipeline, so prewarming there
@@ -335,8 +340,21 @@ const showLat = () => $('lat').textContent = [
 
 // undefined (not '') when unset — so PiperTTS applies its OWN default voice instead of this page
 // re-declaring one. The picker is populated async below and adopts whatever it resolved to.
-const tts = new PiperTTS(localStorage.getItem('vl.voice') || undefined);
+// `tts` is a LET and rebuilt by applyTts(): the synthesizer is a constructor choice, so switching
+// provider means a new object — and the agent holds a reference, so it must be rebuilt too.
+let tts = new PiperTTS(localStorage.getItem('vl.voice') || undefined);
 let agent = null;
+
+// ElevenLabs needs a backend route (the key must not reach the page — see examples/token-worker).
+// Falling back to Piper rather than throwing keeps a half-filled form from bricking the demo.
+const buildTts = () => {
+  const url = $('ttsUrl').value.trim();
+  if ($('ttsProvider').value === 'elevenlabs' && url) {
+    const voice = localStorage.getItem('vl.elVoice') || undefined;   // Piper ids are not EL ids — keep them apart
+    return new ElevenLabsTTS({ ttsUrl: url, ...(voice ? { voiceId: voice } : {}) });
+  }
+  return new PiperTTS(localStorage.getItem('vl.voice') || undefined);
+};
 
 // Echo mode: a stand-in "LLM" that repeats the turn VERBATIM — exercises the entire
 // VAD→STT→…→TTS loop, barge-in included, with no key and no backend. Nothing is added to the
@@ -442,12 +460,15 @@ const setState = s => {
   document.body.dataset.state = micOn || s !== 'listening' ? s : 'idle';
   if (modelPct === null) $('status').textContent = STATUS[s]?.() ?? s;
 };
-tts.setOnModelProgress?.((loaded, total) => {
+// Re-attached on every rebuild: the hook lives on the TTS instance, so a new synthesizer would
+// otherwise download its 60MB model in silence again.
+const wireModelProgress = () => tts.setOnModelProgress?.((loaded, total) => {
   const done = total && loaded >= total;
   modelPct = done ? null : total ? Math.floor((loaded / total) * 100) : 0;
   $('status').textContent = done ? (STATUS[document.body.dataset.state]?.() ?? '')
     : `downloading the voice — ${modelPct}%  (${(loaded / 1048576).toFixed(0)}MB${total ? ` of ${(total / 1048576).toFixed(0)}MB` : ''}, once)`;
 });
+wireModelProgress();
 
 function onEvent(e) {
   if (e.type !== 'stt' || e.turnComplete) log(e);
@@ -585,19 +606,49 @@ toggle('muteTts', on => agent?.setTtsMuted(on));
 
 // Voice switches live. The rest are constructor options, so they can only apply
 // to a NEW agent — drop the current one so the next turn builds it from these.
-$('voice').addEventListener('change', () => { tts.setVoice($('voice').value); log('voice →', $('voice').value); });
+$('voice').addEventListener('change', () => {
+  // Piper ids and ElevenLabs voice ids share one picker but not one namespace — store them apart so
+  // switching provider and back doesn't hand Piper an EL id (which resolves to no voice at all).
+  localStorage.setItem($('ttsProvider').value === 'elevenlabs' ? 'vl.elVoice' : 'vl.voice', $('voice').value);
+  tts.setVoice($('voice').value); log('voice →', $('voice').value);
+});
 for (const id of SETTINGS.filter(i => i !== 'voice'))
   $(id).addEventListener('change', () => {
     if (micOn) return bubble('note', `stop the mic to apply ${id}`);
     if (agent) { agent.destroy(); agent = null; log(id, '→ agent rebuilt on next turn'); }
   });
 
+// The synthesizer is a CONSTRUCTOR choice, so switching provider replaces the object — and the
+// agent holds a reference to it, so it has to be rebuilt too (same rule as the settings above).
+const applyTts = () => {
+  const el = $('ttsProvider').value === 'elevenlabs';
+  $('ttsUrl').disabled = !el;
+  if (el && !$('ttsUrl').value.trim()) { bubble('note', 'elevenlabs needs a TTS url — see examples/token-worker'); }
+  tts = buildTts();
+  wireModelProgress();
+  if (agent) { agent.destroy(); agent = null; log('tts → agent rebuilt on next turn'); }
+  loadVoices();
+  log('tts →', $('ttsProvider').value);
+};
+for (const id of ['ttsProvider', 'ttsUrl'])
+  $(id).addEventListener('change', () => {
+    if (micOn) return bubble('note', `stop the mic to apply ${id}`);
+    applyTts();
+  });
+
 // ── device + voice lists ────────────────────────────────────────────────────
-tts.voices().then(vs => {
-  fill('voice', vs.map(v => [v.id, v.id]));
-  $('voice').value = localStorage.getItem('vl.voice') || tts.voiceId;   // the library's own default, not a copy of it
-  tts.setVoice($('voice').value);
-}).catch(e => log('voice list failed', String(e)));
+// Re-run per provider: the voice list belongs to the synthesizer, and a stale Piper list would
+// offer ids ElevenLabs can't speak.
+function loadVoices() {
+  const key = $('ttsProvider').value === 'elevenlabs' ? 'vl.elVoice' : 'vl.voice';
+  tts.voices().then(vs => {
+    $('voice').replaceChildren();
+    fill('voice', vs.map(v => [v.id, v.name || v.id]));
+    $('voice').value = localStorage.getItem(key) || tts.voiceId;   // the library's own default, not a copy of it
+    if ($('voice').value) tts.setVoice($('voice').value);
+  }).catch(e => log('voice list failed', String(e)));
+}
+loadVoices();
 navigator.mediaDevices?.enumerateDevices().then(ds => {
   for (const d of ds.filter(d => d.kind === 'audioinput'))
     $('micDeviceId').append(Object.assign(document.createElement('option'),

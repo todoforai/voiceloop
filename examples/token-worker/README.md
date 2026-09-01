@@ -26,3 +26,15 @@ headers and a 403. `/tts` also caps text at 600 chars so a leaked URL costs cent
 ## Use it from the demo
 
 In the demo's settings: STT = `deepgram`, STT token url = `<worker>/stt/token`.
+
+| route | returns |
+|---|---|
+| `GET /tts` | `{ voices: [{ id, name }] }` — listing needs the key too, so the browser can't ask ElevenLabs itself |
+
+## The fastest config
+
+Benchmarked at **984ms voice→voice vs 2126ms** for the zero-key path ([RESULTS](../../bench/results/RESULTS.md)) —
+the whole gap is end-of-turn (366ms vs 1565ms). In the demo's settings:
+
+- **STT** `deepgram` · **STT token url** `<worker>/stt/token`
+- **TTS** `elevenlabs` · **TTS url** `<worker>/tts`

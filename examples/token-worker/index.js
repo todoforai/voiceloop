@@ -16,7 +16,7 @@ const json = (obj, status, origin) =>
 const cors = (origin) => origin ? {
   'access-control-allow-origin': origin,
   'access-control-allow-headers': 'content-type,x-api-key',
-  'access-control-allow-methods': 'POST,OPTIONS',
+  'access-control-allow-methods': 'GET,POST,OPTIONS',
   'vary': 'Origin',
 } : {};
 
@@ -38,6 +38,17 @@ export default {
       return new Response(null, { status: origin ? 204 : 403, headers: cors(origin) });
     }
     if (req.headers.get('Origin') && !origin) return json({ error: 'origin not allowed' }, 403, null);
+
+    // GET /tts → the voice list. Listing needs the key too, so the browser can't ask ElevenLabs
+    // itself (that endpoint is NOT public); the picker in a UI has to be fed from here.
+    if (req.method === 'GET' && url.pathname === '/tts') {
+      if (!env.ELEVENLABS_API_KEY) return json({ error: 'ELEVENLABS_API_KEY not configured' }, 500, origin);
+      const r = await fetch('https://api.elevenlabs.io/v2/voices?page_size=100', { headers: { 'xi-api-key': env.ELEVENLABS_API_KEY } });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) return json({ error: body.detail?.message || 'voice list failed' }, 502, origin);
+      return json({ voices: (body.voices ?? []).map((v) => ({ id: v.voice_id, name: v.name })) }, 200, origin);
+    }
+
     if (req.method !== 'POST') return json({ error: 'POST only' }, 405, origin);
 
     if (url.pathname === '/stt/token') {
