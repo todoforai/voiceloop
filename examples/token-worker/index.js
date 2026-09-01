@@ -36,7 +36,6 @@ const cors = (origin) => origin ? {
   'vary': 'Origin',
 } : {};
 
-// Echo back only an allowlisted origin: reflecting whatever arrives would let any page spend the key.
 const allow = (req, env) => {
   const origin = req.headers.get('Origin');
   if (!origin) return null;
@@ -44,12 +43,34 @@ const allow = (req, env) => {
   return list.includes(origin) ? origin : null;
 };
 
-// Per-IP, on the paid routes only. Fails OPEN when the binding is absent so the example still runs
-// under a plain `wrangler dev`, but the deployed config always has it.
-const rateLimited = async (req, env) => {
+// Two windows per IP: the 60s limiter binding is burst protection, and the Quota Durable Object
+// is the long-window wallet cap ([[ratelimits]] only supports 10s/60s periods, hence the DO).
+const rateLimited = async (req, env, limiter = env.PAID_RATE_LIMITER) => {
   const ip = req.headers.get('CF-Connecting-IP') || 'unknown';
-  return env.PAID_RATE_LIMITER ? !(await env.PAID_RATE_LIMITER.limit({ key: ip })).success : false;
+  if (limiter && !(await limiter.limit({ key: ip })).success) return true;
+  if (!env.QUOTA) return false;
+  const r = await env.QUOTA.get(env.QUOTA.idFromName(ip)).fetch('https://quota/', {
+    method: 'POST',
+    body: JSON.stringify({ limit: Number(env.QUOTA_LIMIT) || 300, periodMs: (Number(env.QUOTA_PERIOD_H) || 6) * 3600_000 }),
+  });
+  return !(await r.json()).ok;
 };
+
+// Per-IP fixed-window counter. A Durable Object because the count must be one number, globally —
+// the Workers runtime itself has no cross-datacenter state, and the [[ratelimits]] binding is
+// per-datacenter best-effort. One DO instance per IP (idFromName), state survives restarts.
+export class Quota {
+  constructor(state) { this.state = state; }
+  async fetch(req) {
+    const { limit, periodMs } = await req.json();
+    const now = Date.now();
+    let { start = now, count = 0 } = await this.state.storage.get(['start', 'count']).then((m) => Object.fromEntries(m)) ?? {};
+    if (now - start >= periodMs) { start = now; count = 0; }
+    const ok = count < limit;
+    if (ok) await this.state.storage.put({ start, count: count + 1 });
+    return new Response(JSON.stringify({ ok }));
+  }
+}
 
 export default {
   async fetch(req, env) {
@@ -66,7 +87,7 @@ export default {
     // itself (that endpoint is NOT public); the picker in a UI has to be fed from here.
     if (req.method === 'GET' && url.pathname === '/tts') {
       if (!env.ELEVENLABS_API_KEY) return json({ error: 'ELEVENLABS_API_KEY not configured' }, 500, origin);
-      if (await rateLimited(req, env)) return json({ error: 'rate limited — try again in a minute' }, 429, origin);   // listing hits the key too
+      if (await rateLimited(req, env, env.CONVO_RATE_LIMITER)) return json({ error: 'rate limited — try again in a minute' }, 429, origin);   // listing hits the key too
       const r = await fetch('https://api.elevenlabs.io/v2/voices?page_size=100', { headers: { 'xi-api-key': env.ELEVENLABS_API_KEY } });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) return json({ error: body.detail?.message || 'voice list failed' }, 502, origin);
@@ -75,8 +96,11 @@ export default {
 
     if (req.method !== 'POST') return json({ error: 'POST only' }, 405, origin);
 
-    // Everything below mints a credential or bills a provider.
-    if (await rateLimited(req, env)) return json({ error: 'rate limited — try again in a minute' }, 429, origin);
+    // Everything below mints a credential or bills a provider. /stt/token mints at most one
+    // credential per 5 min so it takes the tight limiter; /tts fires once per spoken SENTENCE and
+    // /llm once per turn plus prefetch, so the conversation hot path gets its own, roomier window.
+    const limiter = url.pathname === '/stt/token' ? env.PAID_RATE_LIMITER : env.CONVO_RATE_LIMITER;
+    if (await rateLimited(req, env, limiter)) return json({ error: 'rate limited — try again in a minute' }, 429, origin);
 
     if (url.pathname === '/stt/token') {
       if (!env.DEEPGRAM_API_KEY) return json({ error: 'DEEPGRAM_API_KEY not configured' }, 500, origin);
@@ -88,7 +112,6 @@ export default {
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok || !body.access_token) return json({ error: body.err_msg || body.error || 'grant failed' }, 502, origin);
-      // voiceloop reads { token, expires_in } (see mintSttToken in src/stt.js).
       return json({ token: body.access_token, expires_in: body.expires_in ?? 300 }, 200, origin);
     }
 
@@ -96,7 +119,8 @@ export default {
       if (!env.ELEVENLABS_API_KEY) return json({ error: 'ELEVENLABS_API_KEY not configured' }, 500, origin);
       const { text, voice_id, model_id, output_format } = await req.json().catch(() => ({}));
       if (!text) return json({ error: 'text required' }, 400, origin);
-      // Cap the spend per call: a leaked demo URL should cost cents, not a plan.
+      // One sentence per call is the contract (that's how the library streams); a whole essay is
+      // not a sentence. Also the cost cap: a leaked demo URL should cost cents, not a plan.
       if (text.length > 600) return json({ error: 'text too long' }, 413, origin);
       const fmt = output_format || 'mp3_44100_64';
       const r = await fetch(

@@ -1,18 +1,39 @@
 name = "voiceloop-token"
-main = "index.js"
+main = "src/index.js"
 compatibility_date = "2026-01-01"
 
 [vars]
 ALLOWED_ORIGINS = "https://todoforai.github.io,http://localhost:8899,http://localhost:3000"
+# Long-window quota (per IP, all paid routes): 300 calls / 6h — this is the actual wallet cap.
+# The [[ratelimits]] bindings below only support 10s/60s periods, so this window lives in the
+# Quota Durable Object instead; the 60s limiters remain as burst protection.
+QUOTA_LIMIT = "300"
+QUOTA_PERIOD_H = "6"
 
-# These routes spend real money and a demo URL is public by definition. CORS is NOT a control here:
-# it only governs what browser JS may READ, and a curl with no Origin (or a forged one) skips it
-# entirely. So cap per-IP request rate too — the cheapest real backstop Workers offers.
-# `period` must be 10 or 60; counters are per Cloudflare location.
+[durable_objects]
+bindings = [{ name = "QUOTA", class_name = "Quota" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Quota"]
+
+# /stt/token mints at most one credential per 5 min (300s TTL), so 30/min is already generous.
 [[ratelimits]]
 name = "PAID_RATE_LIMITER"
 namespace_id = "1001"
 
   [ratelimits.simple]
   limit = 30
+  period = 60
+
+# Conversation hot path: /tts fires once per spoken SENTENCE (5-10 per chatty reply) and /llm
+# once per turn plus prefetch. Sized by cost, not call count — each /tts call is capped at
+# 600 chars and each /llm call at 8000 chars in / 1024 tokens out on Haiku, so even 300/min
+# from a leaked URL bounds the bill to cents.
+[[ratelimits]]
+name = "CONVO_RATE_LIMITER"
+namespace_id = "1002"
+
+  [ratelimits.simple]
+  limit = 300
   period = 60

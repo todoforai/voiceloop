@@ -25,9 +25,12 @@ wrangler secret put ANTHROPIC_API_KEY
 money, so an open CORS policy is an open wallet — a request from an unlisted origin gets no CORS
 headers and a 403. But CORS is **not** authentication: it governs what browser JS may read, and a
 request with no `Origin` (curl, a script) never engages it while a non-browser caller can forge one.
-So every paid route also passes a per-IP rate limit (`[[ratelimits]]`, 30/60s) — best-effort and
-per-Cloudflare-location, a backstop rather than a guarantee. Combine it with provider-side spend
-caps; anything costlier than a demo key needs real auth in front.
+So every paid route also passes per-IP rate limits in two windows: a 60s `[[ratelimits]]` burst
+limiter (best-effort, per-Cloudflare-location — `/stt/token` gets a tight one, the `/tts`+`/llm`
+conversation hot path a roomier one) and a long-window quota (`QUOTA_LIMIT` calls per
+`QUOTA_PERIOD_H` hours, default 300/6h) counted globally in a Durable Object — that one is the
+actual wallet cap. Combine it with provider-side spend caps; anything costlier than a demo key
+needs real auth in front.
 
 `/tts` caps text at 600 chars and `/llm` caps the conversation at 8000.
 
