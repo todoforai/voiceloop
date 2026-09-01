@@ -187,6 +187,7 @@ export function makeElevenLabsSTT(opts) {
     open() { if (!isClosed() && (!ws || ws.readyState >= 2)) open(); },
     feed(i16) {
       if (!isClosed() && (!ws || ws.readyState >= 2)) open();
+      if (!sentSinceCommit) sttStart = performance.now();   // first audio of a fresh turn anchors its ms clock (audio is VAD-gated ≈ speech start)
       sendAudio(i16); sentSinceCommit = true;
     },
     commit() {
@@ -412,6 +413,7 @@ export function makeSpeechmaticsSTT(opts) {
     open() { if (!isClosed() && (!ws || ws.readyState >= 2)) open(); },
     feed(i16) {
       if (!isClosed() && (!ws || ws.readyState >= 2)) open();
+      if (!sentSinceCommit) sttStart = performance.now();   // first audio of a fresh turn anchors its ms clock (audio is VAD-gated ≈ speech start)
       sentSamples += i16.length;   // stream position (counts outbox-queued audio too — sent in order)
       sendAudio(i16); sentSinceCommit = true;
     },
@@ -545,6 +547,10 @@ export function makeDeepgramSTT(opts) {
       ws.onmessage = ev => {
         if (typeof ev.data !== 'string') return;
         const m = JSON.parse(ev.data);
+        // Continuous stream: the socket lives for the whole session, so the ms clock re-anchors at
+        // each turn's FIRST transcript activity (turnText empty → this is the turn's opening event),
+        // not at socket open — otherwise ms grows monotonically across the session.
+        if (m.type === 'TurnInfo' && !turnText && (m.transcript || '').trim()) sttStart = performance.now();
         const ms = Math.round(performance.now() - sttStart);
         if (m.type === 'TurnInfo') {
           const t = (m.transcript || '').trim();
