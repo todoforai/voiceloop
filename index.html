@@ -235,10 +235,15 @@
   #log { font:11px/1.5 ui-monospace,monospace; color:var(--dim);
          max-height:220px; overflow:auto; white-space:pre-wrap; padding-top:8px }
   /* Which code is actually running — the demo must never let you mistake the browser's own
-     recognizer for voiceloop's pipeline, or an echo stand-in for a real LLM. */
-  #pipeline { font-size:11.5px; color:var(--dim); text-align:center; line-height:1.7; max-width:46ch }
+     recognizer for voiceloop's pipeline, or an echo stand-in for a real LLM. Sits right above the
+     collapsed settings (it describes what they configure), not in the hero area under the orb.
+     Arrow chains are .nb (no-break): "Silero VAD →<br>feed" reads as a broken message. */
+  #pipeline { width:100%; font-size:11.5px; color:var(--dim); line-height:1.7;
+              border-top:1px solid var(--line); padding-top:10px }
+  #pipeline:empty { display:none }
   #pipeline b { color:#c8d0da; font-weight:600 }
   #pipeline .warn { color:#e0a94a }
+  #pipeline .nb { white-space:nowrap }
 </style>
 </head>
 <body>
@@ -250,7 +255,6 @@
   </div>
   <div id="status">click to start · then just talk</div>
   <div id="lat"></div>
-  <div id="pipeline"></div>
 
   <div id="chat"></div>
 
@@ -258,6 +262,8 @@
     <input id="typed" placeholder="…or type a turn">
     <button class="btn" id="send">Send</button>
   </div>
+
+  <div id="pipeline"></div>
 
   <details>
     <summary>settings</summary>
@@ -408,7 +414,7 @@ const describePipeline = (a) => {
   const self = a?.stt ? !!a.stt.selfCapture : sttSelfCaptures($('sttProvider').value);
   const stt = self
     ? `<b>${$('sttProvider').value}</b> — the browser's own recognizer owns the mic <span class="warn">(voiceloop's VAD + STT pipeline bypassed)</span>${IS_IOS ? IOS_WEBSPEECH_WARNING : ''}`
-    : `<b>${$('sttProvider').value}</b> via voiceloop's pipeline — Silero VAD → feed → commit`;
+    : `<b>${$('sttProvider').value}</b> via voiceloop's pipeline — <span class="nb">Silero VAD → feed → commit</span>`;
   // new URL() throws on a half-typed url — a banner must never take the page down with it.
   const host = (u) => { try { return new URL(u).host; } catch { return u || 'unset'; } };
   const llm = echo
@@ -529,6 +535,10 @@ function onEvent(e) {
         spokenLen = 0; t0 = Date.now(); tText = tAudio = 0; $('lat').textContent = '';
       } else {
         interimEl ??= bubble('user interim');
+        // A turn can die WITHOUT turnComplete (echo-dropped, retracted to '', reply error) — the
+        // interim bubble then survives at its old position and `??=` reuses it, painting the NEXT
+        // turn's live speech ABOVE messages appended since. append() moves an existing node.
+        chat.append(interimEl);
         interimEl.textContent = `${e.committed ?? ''} ${e.text}`.trim();
         interimEl.scrollIntoView({ block:'nearest' });
       }
