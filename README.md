@@ -315,3 +315,5 @@ The suite locks in turn serialization, hold/release semantics, tool dedup, self-
 ## License
 
 MIT
+
+"voiceloop" is a trademark of TODOforAI. You are free to use, modify and redistribute the code under the MIT license, but not to present a fork or derivative as the official voiceloop project or publish it under the voiceloop name.
