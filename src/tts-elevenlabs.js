@@ -5,7 +5,9 @@
 //
 // Auth, two modes (mirrors the STT providers' "key stays server-side" stance):
 //   • ttsUrl  — YOUR backend proxy: POST { text, voice_id, model_id } → audio bytes. The proxy adds
-//               the xi-api-key and forwards to ElevenLabs. Recommended for production.
+//               the xi-api-key and forwards to ElevenLabs. Recommended for production. Pass
+//               `headers` to authenticate to YOUR proxy (e.g. { 'X-API-Key': ... }) — they ride on
+//               every proxy request (synth + voices), never on a direct ElevenLabs call.
 //   • apiKey  — direct browser→ElevenLabs (dev/bench only: the key is visible in the page).
 //
 // Latency: eleven_flash_v2_5 is EL's low-latency model (~75ms model time); the rest of a clip's
@@ -17,10 +19,11 @@ const EL_API = 'https://api.elevenlabs.io/v1/text-to-speech';
 
 export class ElevenLabsTTS extends StreamingTTS {
   constructor({ ttsUrl, apiKey, voiceId = 'JBFqnCBsd6RMkjVDRZzb' /* George */,
-                modelId = 'eleven_flash_v2_5', format = 'mp3_44100_64' } = {}) {
+                modelId = 'eleven_flash_v2_5', format = 'mp3_44100_64', headers = {} } = {}) {
     super(voiceId);
     if (!ttsUrl && !apiKey) throw new Error('ElevenLabsTTS needs ttsUrl (backend proxy) or apiKey (direct, dev only)');
     this.ttsUrl = ttsUrl; this.apiKey = apiKey; this.modelId = modelId; this.format = format;
+    this.headers = headers;   // proxy-path auth (X-API-Key etc.) — never sent to ElevenLabs directly
   }
 
   // Listing voices needs the key, so on the proxy path it has to come from YOUR backend: a GET on
@@ -29,7 +32,7 @@ export class ElevenLabsTTS extends StreamingTTS {
   // host keeps whatever voiceId it was constructed with, and synthesis is unaffected.
   async voices() {
     const [url, headers] = this.ttsUrl
-      ? [this.ttsUrl, {}]
+      ? [this.ttsUrl, this.headers]
       : ['https://api.elevenlabs.io/v2/voices?page_size=100', { 'xi-api-key': this.apiKey }];
     try {
       const r = await fetch(url, { headers, signal: AbortSignal.timeout(5000) });
@@ -53,7 +56,7 @@ export class ElevenLabsTTS extends StreamingTTS {
     const url = direct ? `${EL_API}/${this.voiceId}?output_format=${this.format}` : this.ttsUrl;
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(direct ? { 'xi-api-key': this.apiKey } : {}) },
+      headers: { 'Content-Type': 'application/json', ...(direct ? { 'xi-api-key': this.apiKey } : this.headers) },
       // The proxy form carries voice/model/format in the body so one backend route serves any voice.
       body: JSON.stringify(direct ? { text, model_id: this.modelId }
                                   : { text, voice_id: this.voiceId, model_id: this.modelId, output_format: this.format }),

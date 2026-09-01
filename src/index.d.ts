@@ -330,9 +330,10 @@ export class StreamingTTS implements VoiceTTS {
   seek(nwIndex: number): boolean;
 }
 /** Human-grade cloud voices. Pass `ttsUrl` (your backend proxy, key stays server-side); `apiKey`
- *  talks to ElevenLabs directly and is dev-only. */
+ *  talks to ElevenLabs directly and is dev-only. `headers` authenticate proxy requests
+ *  (e.g. { 'X-API-Key': ... }) and are never sent on a direct ElevenLabs call. */
 export class ElevenLabsTTS extends StreamingTTS {
-  constructor(options?: { ttsUrl?: string; apiKey?: string; voiceId?: string; modelId?: string; format?: string });
+  constructor(options?: { ttsUrl?: string; apiKey?: string; voiceId?: string; modelId?: string; format?: string; headers?: Record<string, string> });
   warm(): Promise<void>;
 }
 
