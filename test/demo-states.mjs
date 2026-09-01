@@ -78,7 +78,10 @@ check('T3 a reused turn id does not resurrect the old agent\'s bubble',
   r.indexOf(r.find(x => x.includes('NEW reply turn 99'))) > r.indexOf(r.find(x => x.includes('second agent'))),
   JSON.stringify(r));
 
-// ── T4 terminal error resets the reply slot: the next reply opens a NEW bubble ──
+// ── T4 terminal error settles its turn: the next reply opens a NEW bubble ──
+// Fresh agent first: ids are monotonic PER AGENT, so injected ids must stay consistent with the
+// real turns around them — a real agent never emits 2 after 99.
+await p.evaluate(() => { document.getElementById('model').dispatchEvent(new Event('change')); });
 await p.click('#clear');
 await say('before error');
 await p.evaluate(() => {
