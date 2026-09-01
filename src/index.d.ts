@@ -5,7 +5,11 @@
 export type VoiceAgentEvent =
   | { type: 'state'; state: 'idle' | 'listening' | 'thinking' | 'speaking' }
   | { type: 'stt'; turnComplete: boolean; text: string; ms: number; committed?: string }  // text=live tail; committed=locked segments (Speechmatics AddTranscript); turnComplete=user turn ended → send to LLM
-  | { type: 'assistant'; text: string; final: boolean; full?: string }   // text=spoken-so-far (solid, advances live as TTS plays); full=complete answer → tail full.slice(text.length) not-yet-spoken (dim)
+  // text=spoken-so-far (solid, advances live as TTS plays); full=complete answer → tail
+  // full.slice(text.length) not-yet-spoken (dim). turn identifies the reply: a barge-in ends turn N
+  // while its final event is still in flight, so it can land AFTER turn N+1 started — route by turn,
+  // not by "the current bubble", or the late text overwrites the newer reply.
+  | { type: 'assistant'; text: string; final: boolean; full?: string; turn: number }
   | { type: 'vad'; active: boolean }                                      // VAD hears speech?
   // Mic loudness, 0..1 on a perceptual curve, ~every 256ms while capturing. Cosmetic only (meters,
   // a reacting orb) — nothing in the pipeline reads it. Never emitted for a selfCapture STT
@@ -20,7 +24,7 @@ export type VoiceAgentEvent =
   // Did that speculation pay off? hit = the real reply opened with the presynthesized text (clip
   // reused, latency saved); miss = it didn't (clip discarded). `pre` is what we had guessed.
   | { type: 'diag'; diag: 'presynth-hit' | 'presynth-miss'; text: string; pre: string }
-  | { type: 'error'; error: string };
+  | { type: 'error'; error: string; turn?: number };  // turn present = that reply's TERMINAL event (a reply-killing TTS failure emits no assistant final)
 
 export interface VoiceTool {
   description?: string;

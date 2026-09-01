@@ -333,7 +333,7 @@ const turnEls = new Map();         // turn id → its bubble, so a LATE event ca
 const paintTail = (el, e) => {
   const tail = (e.full ?? e.text).slice(e.text.length);
   if (tail) el.append(Object.assign(document.createElement('span'), { className:'tail', textContent:tail }));
-  if (e.final && tail.trim()) el.classList.add('cut');
+  el.classList.toggle('cut', !!(e.final && tail.trim()));   // toggle: a late repaint must also CLEAR a stale cut mark
   return tail;
 };
 const toolEls = new Map();
@@ -538,23 +538,27 @@ function onEvent(e) {
       // that event can arrive AFTER turn N+1's user bubble already exists. Keyed only by "the
       // current aiEl", the late text would be written into the NEW bubble — the old reply's words
       // would appear below the newer question, and the new reply would overwrite them.
-      // A turn is LATE when it already owns a bubble that isn't the one we're filling now: that
-      // bubble is still in place, above, and is the only correct place for its text. (aiTurn alone
-      // can't decide this — a new user turn clears it, which is exactly when stragglers arrive.)
-      const own = e.turn != null && turnEls.has(e.turn) && turnEls.get(e.turn) !== aiEl
-        ? turnEls.get(e.turn) : null;
-      const late = own != null;
+      // aiTurn (which reply aiEl belongs to) is the discriminator: an event for ANOTHER turn is
+      // either a STRAGGLER from a finished reply — it already owns a bubble above, the only correct
+      // place for its text — or a brand-new reply that arrived without a user turn (notify()),
+      // which must open its own bubble rather than overwrite the previous answer.
+      if (e.turn != null && e.turn !== aiTurn) {
+        const own = turnEls.get(e.turn);
+        if (own) {              // straggler: correct its own bubble in place, touch nothing current
+          if (!e.text && !e.final && e.full == null) { own.remove(); turnEls.delete(e.turn); break; }
+          own.textContent = e.text; paintTail(own, e);
+          if (e.final) turnEls.delete(e.turn);   // settled, even late: an entry kept here would pin the DOM node forever
+          break;
+        }
+        aiEl = null; aiTurn = null; spokenLen = 0;   // new reply → falls through to build its own bubble
+      }
       // "That draft never happened" (interrupted before a word was spoken) → drop the bubble rather
       // than blank it. It must be told apart from the FIRST progress tick, which is also empty
       // (cursor at 0 chars) but carries `full`: treating that as a drop removed the live bubble and
       // the next tick built a second one — the whole reply rendered twice.
       if (!e.text && !e.final && e.full == null) {
-        (own ?? aiEl)?.remove(); if (e.turn != null) turnEls.delete(e.turn);
-        if (!late) { aiEl = null; aiTurn = null; spokenLen = 0; }
-        break;
-      }
-      if (late) {   // a straggler from a finished reply: correct its own bubble in place, nothing else
-        if (own) { own.textContent = e.text; paintTail(own, e); }
+        aiEl?.remove(); if (e.turn != null) turnEls.delete(e.turn);
+        aiEl = null; aiTurn = null; spokenLen = 0;
         break;
       }
       if (!tText && t0) { tText = Date.now(); showLat(); }
@@ -591,7 +595,15 @@ function onEvent(e) {
       break;
     }
     case 'echo':  bubble('note', `self-echo dropped: ${e.text}`); break;
-    case 'error': bubble('err', e.error); break;
+    case 'error':
+      bubble('err', e.error);
+      // A reply-scoped error (it carries the turn) ends that reply without a final assistant event —
+      // release its bubble from tracking (the partial text stays visible) so the map can't grow.
+      if (e.turn != null) {
+        turnEls.delete(e.turn);
+        if (e.turn === aiTurn) { aiEl = null; aiTurn = null; spokenLen = 0; }
+      }
+      break;
   }
 }
 

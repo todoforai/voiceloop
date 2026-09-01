@@ -133,7 +133,9 @@ export default {
         // and the model is pinned here so a caller can't ask for the priciest model on the account.
         body: JSON.stringify({
           model: env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
-          max_tokens: Math.min(Number(body.max_tokens) || 512, 1024),
+          // Clamped to [1,1024] as an integer — Math.min alone would forward a negative or
+          // fractional value, a guaranteed upstream 400 that still burned rate-limit quota.
+          max_tokens: Math.min(Math.max(Math.floor(Number(body.max_tokens)) || 512, 1), 1024),
           messages: [{ role: 'system', content: env.SYSTEM_PROMPT || HOSTED_PERSONA }, ...messages],
           stream: true,
         }),

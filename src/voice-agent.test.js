@@ -932,7 +932,12 @@ test('LIVENESS: a hung tool does not block the turn on the TTS-ERROR exit path e
   const { agent, events } = makeAgent({ llm, tts, opts: { tools: { stuck: { description: '', params: {}, run: () => new Promise(() => {}) } } } });
   agent.sendUserText('go');
   await before(2000, agent._turn, 'the turn whose TTS failed');
-  assert.ok(events.some((e) => e.type === 'error' && /synth exploded/.test(e.error)), 'the TTS failure is surfaced');
+  const err = events.find((e) => e.type === 'error' && /synth exploded/.test(e.error));
+  assert.ok(err, 'the TTS failure is surfaced');
+  // This error is the reply's TERMINAL event (no assistant final follows), so it must say WHICH
+  // reply died — a host tracking bubbles per turn releases that turn's entry on it.
+  assert.equal(typeof err.turn, 'number', 'the reply-killing error carries its turn id');
+  assert.ok(!events.some((e) => e.type === 'assistant' && e.final), 'no assistant final follows — the error was terminal');
   const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
   assert.ok(said.includes('[TOOL CALL stuck]'), 'the dispatch is still ledgered on the error path');
 });

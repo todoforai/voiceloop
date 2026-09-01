@@ -32,7 +32,8 @@ caps; anything costlier than a demo key needs real auth in front.
 `/tts` caps text at 600 chars and `/llm` caps the conversation at 8000.
 
 `/llm` pins the model server-side (`ANTHROPIC_MODEL`, default `claude-haiku-4-5-20251001`) and caps
-`max_tokens`, and forwards an ALLOWLIST of fields (`messages` only) rather than the caller's object:
+`max_tokens`, and forwards an ALLOWLIST rather than the caller's object (only `messages` and a
+clamped `max_tokens` are read from the request; model and stream mode are server-owned):
 the page picks neither model nor limits, and a large `tools` schema can't smuggle billable input
 tokens past the size check. Anthropic serves an OpenAI-compatible `/v1/chat/completions`, so the SSE passes straight
 through to voiceloop's built-in `makeOpenAILLM` — no client-side adapter.

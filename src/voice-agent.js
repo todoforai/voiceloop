@@ -1032,7 +1032,9 @@ export class VoiceAgent {
     } catch (e) {
       if (e.name !== 'AbortError') {                   // real failure (not barge-in) → surface it
         this.tts.setOnProgress?.(null); this._cursorLive = false;
-        this.onEvent({ type: 'error', error: e.message });
+        // Tagged with the turn: this error is this reply's TERMINAL event (no assistant final
+        // follows), and a host tracking bubbles per turn needs to know which one just died.
+        this.onEvent({ type: 'error', error: e.message, turn });
         // Tools fire DURING streaming, so a reply that dies here may already have dispatched one.
         // Record it anyway: the ledger is about what was DONE, not about what got spoken — dropping
         // it would let the next turn call the same tool again.
