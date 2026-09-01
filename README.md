@@ -20,10 +20,10 @@ A zero-dependency JavaScript library that runs the full voice loop — **VAD →
 - **Serialized turns** — rapid-fire turns, tool results, holds and replays can never talk over each other. Locked in by 178 tests.
 - **Local-first** — Silero VAD and Piper TTS run as WASM in the tab: free, no cloud round-trip (CDN, then cache).
 
-Extra
+Extra:
 - **Tap-to-seek** — click anywhere in the transcript to jump the voice there, backward or forward.
 
-Key: in browser voice agent that just works properly. 
+**The point: an in-browser voice agent that just works properly.**
 
 Everything is pluggable: any OpenAI-compatible LLM (or a custom async generator), STT (Web Speech, ElevenLabs Scribe, Deepgram Flux, Speechmatics), swappable TTS.
 
