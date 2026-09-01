@@ -11,15 +11,14 @@ Everybody should have the best voice loop. That's why we created this and will k
 
 A zero-dependency JavaScript library that runs the full voice loop — **VAD → STT → LLM → TTS** — with the hard parts already solved:
 
-- **Real barge-in** — interrupt the agent mid-sentence. Triggers on *transcribed novel words*, not raw mic energy, so the agent's own voice leaking into the mic never cuts it off.
-- **Self-echo filtering** — a word-match filter compares what the mic hears against what the agent is currently saying. Benchmarked under real speaker→mic coupling with echo cancellation fully off: 0 self-interruptions in 30 turns, at full speed — while Pipecat (default config) cut its own reply on 20/30 turns and OpenAI Realtime on 17/30 ([echo results](bench/results/RESULTS.md#scenario-echo-smalltalk--speakermic-coupling-15db--30ms)).
-- **First-sentence streaming TTS** — the LLM streams text, TTS synthesizes the first sentence *while the rest is still generating*, then stays one sentence ahead. First audio in well under a second.
-- **Speculative prefetch** — the LLM call starts while you're still finishing your sentence, overlapping model latency with the end-of-turn pause. Replies feel instant.
-- **Tap-to-seek** — playback keeps a tape of synthesized clips; tap anywhere in the transcript to jump the voice there, backward or forward.
-- **Turn serialization** — rapid-fire turns, tool results, holds and replays can never overlap or talk over each other. Locked in by a 100-test regression suite.
-- **Local-first defaults** — Silero VAD (WASM) and Piper TTS (WASM) run in the browser. Free, no cloud round-trip for voice output (assets load from CDN, then cache).
+- **Real barge-in** — triggers on transcribed *novel words*, not mic energy, so the agent's own voice never cuts it off.
+- **Self-echo filtering** — 0 self-interruptions in 30 echo-coupled turns with AEC off; Pipecat cut itself 20/30, OpenAI Realtime 17/30 ([bench](bench/results/RESULTS.md#scenario-echo-smalltalk--speakermic-coupling-15db--30ms)).
+- **First audio <1s** — TTS speaks sentence 1 while the LLM writes sentence 2, and the LLM call starts speculatively during your end-of-turn pause.
+- **Tap-to-seek** — click anywhere in the transcript to jump the voice there, backward or forward.
+- **Local-first** — Silero VAD and Piper TTS run as WASM in the tab: free, no cloud round-trip (CDN, then cache).
+- **Serialized turns** — rapid-fire turns, tool results, holds and replays can never talk over each other. Locked in by 178 tests.
 
-Everything is pluggable: bring your own LLM (any OpenAI-compatible endpoint or a custom async generator), pick an STT provider (Web Speech, ElevenLabs Scribe, Deepgram Flux, Speechmatics), swap the TTS.
+Everything is pluggable: any OpenAI-compatible LLM (or a custom async generator), STT (Web Speech, ElevenLabs Scribe, Deepgram Flux, Speechmatics), swappable TTS.
 
 ## Quick start
 
