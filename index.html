@@ -345,15 +345,19 @@ let tts;            // assigned by applyTts(), below buildTts()'s definition
 let agent = null;
 
 // ElevenLabs needs a backend route (the key must not reach the page — see examples/token-worker).
-// Falling back to Piper rather than throwing keeps a half-filled form from bricking the demo.
+// Without one this returns NULL rather than quietly substituting Piper: falling back would speak in
+// a different voice than the form promises, and "elevenlabs selected, Piper's voice coming out" is
+// indistinguishable from a broken integration. No synthesizer → the page says so and won't start.
 const buildTts = () => {
   const url = $('ttsUrl').value.trim();
-  if ($('ttsProvider').value === 'elevenlabs' && url) {
+  if ($('ttsProvider').value === 'elevenlabs') {
+    if (!url) return null;
     const voice = localStorage.getItem('vl.elVoice') || undefined;   // Piper ids are not EL ids — keep them apart
     return new ElevenLabsTTS({ ttsUrl: url, ...(voice ? { voiceId: voice } : {}) });
   }
   return new PiperTTS(localStorage.getItem('vl.voice') || undefined);
 };
+const TTS_MISSING = 'elevenlabs needs a TTS url — paste your backend route (see examples/token-worker) or switch TTS back to piper';
 
 // Echo mode: a stand-in "LLM" that repeats the turn VERBATIM — exercises the entire
 // VAD→STT→…→TTS loop, barge-in included, with no key and no backend. Nothing is added to the
@@ -461,7 +465,7 @@ const setState = s => {
 };
 // Re-attached on every rebuild: the hook lives on the TTS instance, so a new synthesizer would
 // otherwise download its 60MB model in silence again.
-const wireModelProgress = () => tts.setOnModelProgress?.((loaded, total) => {
+const wireModelProgress = () => tts?.setOnModelProgress?.((loaded, total) => {
   const done = total && loaded >= total;
   modelPct = done ? null : total ? Math.floor((loaded / total) * 100) : 0;
   $('status').textContent = done ? (STATUS[document.body.dataset.state]?.() ?? '')
@@ -576,6 +580,7 @@ $('mic').onclick = async () => {
   // or not — it cancels the turn and keeps the session.
   if (agent && (agent.state === 'thinking' || agent.state === 'speaking')) return agent.interrupt();
   if (micOn) return stop();
+  if (!tts) return bubble('err', TTS_MISSING);   // no voice → refuse to start, rather than open the mic on a loop that can't reply
   agent ??= makeAgent();
   micOn = true; setState('listening');
   try { await agent.start(); }
@@ -584,6 +589,7 @@ $('mic').onclick = async () => {
 
 $('send').onclick = () => {
   const text = $('typed').value.trim(); if (!text) return;
+  if (!tts) return bubble('err', TTS_MISSING);
   unlockAudio();
   agent ??= makeAgent();
   agent.sendUserText(text);       // emits its own user bubble via the stt turnComplete event
@@ -607,6 +613,7 @@ toggle('muteTts', on => agent?.setTtsMuted(on));
 $('voice').addEventListener('change', () => {
   // Piper ids and ElevenLabs voice ids share one picker but not one namespace — store them apart so
   // switching provider and back doesn't hand Piper an EL id (which resolves to no voice at all).
+  if (!tts) return;
   localStorage.setItem(tts instanceof ElevenLabsTTS ? 'vl.elVoice' : 'vl.voice', $('voice').value);
   tts.setVoice($('voice').value); log('voice →', $('voice').value);
 });
@@ -619,10 +626,9 @@ for (const id of SETTINGS.filter(i => !['ttsProvider','ttsUrl'].includes(i)))
 // The synthesizer is a CONSTRUCTOR choice, so switching provider replaces the object — and the
 // agent holds a reference to it, so it has to be rebuilt too (same rule as the settings above).
 const applyTts = () => {
-  const el = $('ttsProvider').value === 'elevenlabs';
-  $('ttsUrl').disabled = !el;
-  if (el && !$('ttsUrl').value.trim()) { bubble('note', 'elevenlabs needs a TTS url — see examples/token-worker'); }
+  $('ttsUrl').disabled = $('ttsProvider').value !== 'elevenlabs';
   tts = buildTts();
+  if (!tts) bubble('note', TTS_MISSING);
   wireModelProgress();
   if (agent) { agent.destroy(); agent = null; log('tts → agent rebuilt on next turn'); }
   loadVoices();
@@ -642,13 +648,13 @@ for (const id of ['ttsProvider', 'ttsUrl'])
 // Re-run on every rebuild: the voice list belongs to the synthesizer, and a stale Piper list would
 // offer ids ElevenLabs can't speak.
 function loadVoices() {
+  $('voice').replaceChildren();
+  if (!tts) return fill('voice', [['', TTS_MISSING]]);   // nothing to ask — say why, where the user is looking
   // Ask the synthesizer that is ACTUALLY live, never the form: buildTts() is the one place that
-  // decides (and may fall back to Piper on a half-filled form). Re-reading the form here would be a
-  // second copy of that rule, free to disagree with it — and a picker offering ids the live voice
-  // can't speak is exactly the bug this avoids.
+  // decides. Re-reading the form here would be a second copy of that rule, free to disagree with
+  // it — and a picker offering ids the live voice can't speak is exactly the bug this avoids.
   const key = tts instanceof ElevenLabsTTS ? 'vl.elVoice' : 'vl.voice';
   tts.voices().then(vs => {
-    $('voice').replaceChildren();
     if (!vs.length) return fill('voice', [['', "couldn't reach the TTS url — check the route + its origin allowlist"]]);
     fill('voice', vs.map(v => [v.id, v.name || v.id]));
     $('voice').value = localStorage.getItem(key) || tts.voiceId;   // the library's own default, not a copy of it
