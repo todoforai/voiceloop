@@ -588,7 +588,10 @@ function onEvent(e) {
       break;
     }
     case 'tool': {
-      // running and result arrive as two events with one id: update, don't stack.
+      // running and result arrive as two events with one id: update, don't stack. The id stays
+      // mapped after the outcome — a tool finalized as "interrupted" whose detached run settles
+      // later corrects that SAME chip in place (re-emits are deduped library-side, and a dead
+      // agent's late event can't get here at all: makeAgent's onEvent is identity-guarded).
       const el = toolEls.get(e.id) ?? bubble('tool');
       if (e.id) toolEls.set(e.id, el);
       el.textContent = `🔧 ${e.name}(${JSON.stringify(e.args)})${e.running ? ' …' : ` → ${JSON.stringify(e.result ?? '')}`.slice(0,200)}`;
@@ -627,16 +630,35 @@ const makeAgent = () => {
     llm: $('mode').value === 'echo' ? echoLLM
        : hosted() ? makeOpenAILLM({ llmUrl: HOSTED_LLM_URL })   // no apiKey, no model: the route owns both
        : undefined,                                             // 'llm' → built from llmUrl/model/apiKey above
-    onEvent,
+    // Identity-guarded: destroy() stops the loop but a DETACHED tool result still reports through
+    // this agent's onEvent after it. Turn/tool ids are per-agent, so such a late event could match
+    // the NEXT agent's same-numbered entry and repaint its bubble — dropping everything from a
+    // non-current agent closes that whole class, instead of chasing each map it could touch.
+    onEvent: (e) => { if (agent === a) onEvent(e); },
   });
   a.setMuted(muted('muteMic')); a.setTtsMuted(muted('muteTts'));   // the toggles survive a rebuild
   log('agent created; stt =', a.sttProvider); showPipeline();   // now reflects the LIVE session, not just the form
   return a;
 };
 
+// The ONLY way the page discards an agent. Turn ids are per-agent (each starts counting at 1), so
+// tracking state keyed by them must die with the agent that issued them: a surviving turnEls entry
+// would match the NEXT agent's same-numbered reply and hand it the dead agent's bubble to
+// overwrite. (destroy() is terminal — the old agent can emit nothing further, so nothing is lost.)
+const dropAgent = (why) => {
+  if (!agent) return;
+  agent.destroy(); agent = null;         // null FIRST-equivalent: the identity guard now drops every late event from it
+  aiEl = null; aiTurn = null; spokenLen = 0; turnEls.clear();
+  toolEls.clear();                       // tool ids are provider-issued and can repeat — same hazard
+  interimEl?.remove(); interimEl = null; // a half-heard interim went nowhere; the dead agent will never settle it
+  clearTimeout(vadOff); document.body.dataset.vad = '0';
+  t0 = tText = tAudio = 0; $('lat').textContent = '';   // latency legend described the dead session
+  log(why, '→ agent rebuilt on next turn');
+};
+
 // ── one button does everything ──────────────────────────────────────────────
 const stop = () => {
-  agent?.destroy(); agent = null; micOn = false;
+  dropAgent('stop'); micOn = false;
   document.body.dataset.vad = '0'; setState('idle');
 onSettingChanged();   // describe the restored settings, and prewarm only if they'll use the VAD
 };
@@ -686,7 +708,7 @@ $('voice').addEventListener('change', () => {
 for (const id of SETTINGS.filter(i => !['ttsProvider','ttsUrl'].includes(i)))
   $(id).addEventListener('change', () => {
     if (micOn) return bubble('note', `stop the mic to apply ${id}`);
-    if (agent) { agent.destroy(); agent = null; log(id, '→ agent rebuilt on next turn'); }
+    dropAgent(id);
   });
 
 // The synthesizer is a CONSTRUCTOR choice, so switching provider replaces the object — and the
@@ -696,7 +718,7 @@ const applyTts = () => {
   tts = buildTts();
   if (!tts) bubble('note', TTS_MISSING);
   wireModelProgress();
-  if (agent) { agent.destroy(); agent = null; log('tts → agent rebuilt on next turn'); }
+  dropAgent('tts');
   loadVoices();
   log('tts →', $('ttsProvider').value);
 };
