@@ -544,10 +544,12 @@ function onEvent(e) {
       const own = e.turn != null && turnEls.has(e.turn) && turnEls.get(e.turn) !== aiEl
         ? turnEls.get(e.turn) : null;
       const late = own != null;
-      // Empty and non-final means "that draft never happened" (interrupted before
-      // a word was spoken) — drop the bubble rather than blank it.
-      if (!e.text && !e.final) {
-        own?.remove(); if (e.turn != null) turnEls.delete(e.turn);
+      // "That draft never happened" (interrupted before a word was spoken) → drop the bubble rather
+      // than blank it. It must be told apart from the FIRST progress tick, which is also empty
+      // (cursor at 0 chars) but carries `full`: treating that as a drop removed the live bubble and
+      // the next tick built a second one — the whole reply rendered twice.
+      if (!e.text && !e.final && e.full == null) {
+        (own ?? aiEl)?.remove(); if (e.turn != null) turnEls.delete(e.turn);
         if (!late) { aiEl = null; aiTurn = null; spokenLen = 0; }
         break;
       }
