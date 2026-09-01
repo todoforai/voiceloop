@@ -1,0 +1,6 @@
+name = "voiceloop-token"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+ALLOWED_ORIGINS = "https://todoforai.github.io,http://localhost:8899,http://localhost:3000"

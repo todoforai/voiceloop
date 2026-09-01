@@ -134,7 +134,7 @@ new VoiceAgent({ sttProvider: 'speechmatics', sttTokenUrl: '/api/stt/token' })
 
 Cloud providers authenticate with a **short-TTL token minted by your backend** so the raw API key never reaches the page. Either:
 
-- `sttTokenUrl` — a POST route on your server that returns `{ token }` (mint it against the provider's temp-token API with your secret key), or
+- `sttTokenUrl` — a POST route on your server that returns `{ token }` (mint it against the provider's temp-token API with your secret key — a complete ~70-line Cloudflare Worker doing exactly this for Deepgram, plus an ElevenLabs TTS proxy, is in [`examples/token-worker/`](examples/token-worker/)), or
 - `getSttToken` — an async callback `(provider) => ({ token })` when your auth doesn't fit a bare POST, or when each provider mints a different credential. It is handed the provider actually running (after the fallback below), so you pick the route without re-deriving that rule:
 
 ```js
