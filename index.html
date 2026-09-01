@@ -562,6 +562,10 @@ function onEvent(e) {
         t0 = Date.now(); tText = tAudio = 0; $('lat').textContent = '';
       } else {
         interimEl ??= bubble('user interim');
+        // A turn can die WITHOUT turnComplete (echo-dropped, retracted to '', reply error) — the
+        // interim bubble then survives at its old position and `??=` reuses it, painting the NEXT
+        // turn's live speech ABOVE messages appended since. append() moves an existing node.
+        chat.append(interimEl);
         interimEl.textContent = `${e.committed ?? ''} ${e.text}`.trim();
         interimEl.scrollIntoView({ block:'nearest' });
       }

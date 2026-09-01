@@ -60,6 +60,10 @@
           $('state').textContent = e.state;
         } else if (e.type === 'stt') {
           userEl ??= bubble('user');
+          // A turn can die WITHOUT turnComplete (echo-dropped, retracted, reply error) — userEl
+          // then survives at its old position and ??= would paint the NEXT turn's speech above
+          // later messages. append() moves an existing node back to the bottom (no-op otherwise).
+          log.append(userEl);
           // partial: committed prefix + live tail; turnComplete: e.text is the whole turn
           userEl.textContent = e.turnComplete ? e.text : `${e.committed ?? ''} ${e.text}`.trim();
           if (e.turnComplete) userEl = null;
