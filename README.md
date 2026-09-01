@@ -15,11 +15,15 @@ Everybody should have the best voice loop. That's why we created this, and we'll
 A zero-dependency JavaScript library that runs the full voice loop — **VAD → STT → LLM → TTS** — with the hard parts already solved:
 
 - **Real barge-in** — triggers on transcribed *novel words*, not mic energy, so the agent's own voice never cuts it off.
-- **Self-echo filtering** — 0 self-interruptions in 30 echo-coupled turns with AEC off; Pipecat cut itself 20/30, OpenAI Realtime 17/30 ([bench](bench/results/RESULTS.md#scenario-echo-smalltalk--speakermic-coupling-15db--30ms)).
+- **Self-echo filtering** — 0 self-interruptions with AEC off (Pipecat cut itself 20/30, OpenAI Realtime 17/30 [bench](bench/results/RESULTS.md#scenario-echo-smalltalk--speakermic-coupling-15db--30ms)).
 - **First audio <1s** — TTS speaks sentence 1 while the LLM writes sentence 2, and the LLM call starts speculatively during your end-of-turn pause.
-- **Tap-to-seek** — click anywhere in the transcript to jump the voice there, backward or forward.
-- **Local-first** — Silero VAD and Piper TTS run as WASM in the tab: free, no cloud round-trip (CDN, then cache).
 - **Serialized turns** — rapid-fire turns, tool results, holds and replays can never talk over each other. Locked in by 178 tests.
+- **Local-first** — Silero VAD and Piper TTS run as WASM in the tab: free, no cloud round-trip (CDN, then cache).
+
+Extra
+- **Tap-to-seek** — click anywhere in the transcript to jump the voice there, backward or forward.
+
+Key: in browser voice agent that just works properly. 
 
 Everything is pluggable: any OpenAI-compatible LLM (or a custom async generator), STT (Web Speech, ElevenLabs Scribe, Deepgram Flux, Speechmatics), swappable TTS.
 
@@ -65,8 +69,9 @@ That's it. Speak, get spoken answers, interrupt at will.
 
 **[todoforai.github.io/voiceloop](https://todoforai.github.io/voiceloop/)** starts in echo mode —
 browser Web Speech STT, local Piper TTS, a stand-in "LLM" that repeats you — so it costs nothing
-and needs no backend. It shows the two numbers that decide whether an agent feels alive
-(**first token**, **first sound**), and click-to-interrupt strikes through the words you cut off.
+and needs no backend. THIS is not the BEST configuration (deepgram STT + elevenlabs flash TTS). the best goes from 2100ms -> 900ms, that's where it start to be LIVE! 
+
+It shows the two numbers that decide whether an agent feels alive (**first token**, **first sound**), and click-to-interrupt strikes through the words you cut off.
 Open *settings* to switch to a pipeline STT provider (Web Speech bypasses voiceloop's VAD→STT
 path) and point it at any OpenAI-compatible endpoint (Ollama, your proxy).
 
