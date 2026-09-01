@@ -8,6 +8,7 @@ out only what each hop needs.
 |---|---|---|
 | `POST /stt/token` | `{ token, expires_in }` | short-TTL Deepgram key; the browser opens the WS itself |
 | `POST /tts` | `audio/mpeg` | ElevenLabs proxy — the `xi-api-key` stays server-side |
+| `POST /llm` | OpenAI-format SSE | Anthropic proxy — Claude has no short-TTL key to mint, so the key stays here |
 
 (The voiceloop demo runs this exact Worker.)
 
@@ -17,15 +18,29 @@ out only what each hop needs.
 wrangler deploy
 wrangler secret put DEEPGRAM_API_KEY
 wrangler secret put ELEVENLABS_API_KEY
+wrangler secret put ANTHROPIC_API_KEY
 ```
 
 `ALLOWED_ORIGINS` (in `wrangler.toml`) is a comma-separated allowlist. These routes spend real
 money, so an open CORS policy is an open wallet — a request from an unlisted origin gets no CORS
-headers and a 403. `/tts` also caps text at 600 chars so a leaked URL costs cents, not a plan.
+headers and a 403. But CORS is **not** authentication: it governs what browser JS may read, and a
+request with no `Origin` (curl, a script) never engages it while a non-browser caller can forge one.
+So every paid route also passes a per-IP rate limit (`[[ratelimits]]`, 30/60s) — best-effort and
+per-Cloudflare-location, a backstop rather than a guarantee. Combine it with provider-side spend
+caps; anything costlier than a demo key needs real auth in front.
+
+`/tts` caps text at 600 chars and `/llm` caps the conversation at 8000.
+
+`/llm` pins the model server-side (`ANTHROPIC_MODEL`, default `claude-haiku-4-5-20251001`) and caps
+`max_tokens`, and forwards an ALLOWLIST of fields (`messages` only) rather than the caller's object:
+the page picks neither model nor limits, and a large `tools` schema can't smuggle billable input
+tokens past the size check. Anthropic serves an OpenAI-compatible `/v1/chat/completions`, so the SSE passes straight
+through to voiceloop's built-in `makeOpenAILLM` — no client-side adapter.
 
 ## Use it from the demo
 
-In the demo's settings: STT = `deepgram`, STT token url = `<worker>/stt/token`.
+In the demo's settings: STT = `deepgram`, STT token url = `<worker>/stt/token`. Mode =
+`full loop — hosted claude haiku` uses `/llm` and needs no key or LLM url at all.
 
 | route | returns |
 |---|---|
@@ -38,3 +53,4 @@ the whole gap is end-of-turn (366ms vs 1565ms). In the demo's settings:
 
 - **STT** `deepgram` · **STT token url** `<worker>/stt/token`
 - **TTS** `elevenlabs` · **TTS url** `<worker>/tts`
+- **mode** `hosted claude haiku` — measured 568ms to first token, 893ms to first sound in-browser

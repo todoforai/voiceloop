@@ -264,6 +264,7 @@
     <div class="grid">
       <label>mode<select id="mode">
         <option value="echo">echo — no keys, no backend</option>
+        <option value="hosted">full loop — hosted claude haiku</option>
         <option value="llm">full loop — your LLM</option>
       </select></label>
       <label>LLM url<input id="llmUrl" size="30" value="http://localhost:11434/v1/chat/completions"></label>
@@ -291,7 +292,7 @@
 </main>
 
 <script type="module">
-import { VoiceAgent, PiperTTS, ElevenLabsTTS, unlockAudio, prewarmVoice, STT_PROVIDERS, sttSelfCaptures, LANG_NAMES } from './src/index.js';
+import { VoiceAgent, PiperTTS, ElevenLabsTTS, makeOpenAILLM, unlockAudio, prewarmVoice, STT_PROVIDERS, sttSelfCaptures, LANG_NAMES } from './src/index.js';
 
 // Load VAD/WASM + build the Silero session while the page sits idle — but ONLY for a provider that
 // will actually use it. A selfCapture provider (webspeech) builds no pipeline, so prewarming there
@@ -323,6 +324,18 @@ const log = (...a) => {
 // ── transcript ──────────────────────────────────────────────────────────────
 const chat = $('chat');
 let interimEl = null, aiEl = null, vadOff = null, spokenLen = 0;
+let aiTurn = null;                 // which reply aiEl belongs to — see the 'assistant' case
+const turnEls = new Map();         // turn id → its bubble, so a LATE event can still find its own
+
+// The dimmed tail is "written but not yet heard": on a final, a non-empty tail means the reply was
+// cut off mid-sentence. Shared by the live path and the late-straggler path so an interrupted reply
+// renders identically no matter when its last event lands.
+const paintTail = (el, e) => {
+  const tail = (e.full ?? e.text).slice(e.text.length);
+  if (tail) el.append(Object.assign(document.createElement('span'), { className:'tail', textContent:tail }));
+  if (e.final && tail.trim()) el.classList.add('cut');
+  return tail;
+};
 const toolEls = new Map();
 const bubble = (cls, text = '') => {
   const el = document.createElement('div');
@@ -357,6 +370,9 @@ const buildTts = () => {
   }
   return new PiperTTS(localStorage.getItem('vl.voice') || undefined);
 };
+// The demo's own backend (examples/token-worker). Same origin-allowlisted Worker as /stt/token and
+// /tts, so 'hosted' costs the visitor no key at all — the point of a demo you can just click.
+const HOSTED_LLM_URL = 'https://voiceloop-token.havlikmarcell.workers.dev/llm';
 const TTS_MISSING = 'elevenlabs needs a TTS url — paste your backend route (see examples/token-worker) or switch TTS back to piper';
 
 // Echo mode: a stand-in "LLM" that repeats the turn VERBATIM — exercises the entire
@@ -393,14 +409,23 @@ const describePipeline = (a) => {
   const stt = self
     ? `<b>${$('sttProvider').value}</b> — the browser's own recognizer owns the mic <span class="warn">(voiceloop's VAD + STT pipeline bypassed)</span>${IS_IOS ? IOS_WEBSPEECH_WARNING : ''}`
     : `<b>${$('sttProvider').value}</b> via voiceloop's pipeline — Silero VAD → feed → commit`;
+  // new URL() throws on a half-typed url — a banner must never take the page down with it.
+  const host = (u) => { try { return new URL(u).host; } catch { return u || 'unset'; } };
   const llm = echo
     ? '<span class="warn"><b>echo</b> — no model: replies repeat your words back</span>'
-    : `<b>${$('model').value || 'your model'}</b> at ${new URL($('llmUrl').value).host}`;
+    : hosted()
+      ? `<b>claude haiku</b> — hosted by this demo, no key needed`
+      : `<b>${$('model').value || 'your model'}</b> at ${host($('llmUrl').value)}`;
   return `STT: ${stt}<br>LLM: ${llm}`;
 };
 const showPipeline = () => { $('pipeline').innerHTML = describePipeline(agent); };
 // Hoisted (function declaration) so the settings listeners above can call it before this point.
-function onSettingChanged() { showPipeline(); prewarmIfPipelined(); }
+function onSettingChanged() {
+  // Say it with the UI, not just the banner: fields the current mode IGNORES are disabled, so the
+  // form can't imply that a typed url or key is doing something.
+  for (const id of ['llmUrl', 'model']) $(id).disabled = $('mode').value !== 'llm';
+  showPipeline(); prewarmIfPipelined();
+}
 
 // ── the orb's level ─────────────────────────────────────────────────────────
 // One CSS var, --lvl (0..1), drives size/glow/rim/halo. Three sources feed it, in order of truth:
@@ -497,7 +522,11 @@ function onEvent(e) {
         ripple();                        // your turn closed — the instant the latency clock starts
         interimEl?.remove(); interimEl = null;
         bubble('user', e.text);
-        aiEl = null; spokenLen = 0; t0 = Date.now(); tText = tAudio = 0; $('lat').textContent = '';
+        // Detach from the previous reply's bubble WITHOUT forgetting which one it was: a barge-in
+        // ends the old turn while its last events are still arriving, and those must keep landing
+        // in the bubble above — not in the one this new turn is about to create.
+        aiEl = null; aiTurn = null;
+        spokenLen = 0; t0 = Date.now(); tText = tAudio = 0; $('lat').textContent = '';
       } else {
         interimEl ??= bubble('user interim');
         interimEl.textContent = `${e.committed ?? ''} ${e.text}`.trim();
@@ -505,16 +534,35 @@ function onEvent(e) {
       }
       break;
     case 'assistant': {
+      // Which reply is this? A barge-in ends turn N while its final event is still in flight, so
+      // that event can arrive AFTER turn N+1's user bubble already exists. Keyed only by "the
+      // current aiEl", the late text would be written into the NEW bubble — the old reply's words
+      // would appear below the newer question, and the new reply would overwrite them.
+      // A turn is LATE when it already owns a bubble that isn't the one we're filling now: that
+      // bubble is still in place, above, and is the only correct place for its text. (aiTurn alone
+      // can't decide this — a new user turn clears it, which is exactly when stragglers arrive.)
+      const own = e.turn != null && turnEls.has(e.turn) && turnEls.get(e.turn) !== aiEl
+        ? turnEls.get(e.turn) : null;
+      const late = own != null;
       // Empty and non-final means "that draft never happened" (interrupted before
       // a word was spoken) — drop the bubble rather than blank it.
-      if (!e.text && !e.final) { aiEl?.remove(); aiEl = null; spokenLen = 0; break; }
+      if (!e.text && !e.final) {
+        own?.remove(); if (e.turn != null) turnEls.delete(e.turn);
+        if (!late) { aiEl = null; aiTurn = null; spokenLen = 0; }
+        break;
+      }
+      if (late) {   // a straggler from a finished reply: correct its own bubble in place, nothing else
+        if (own) { own.textContent = e.text; paintTail(own, e); }
+        break;
+      }
       if (!tText && t0) { tText = Date.now(); showLat(); }
       // `full` only exists once the TTS progress cursor is live — i.e. a clip is
       // actually playing. The 'speaking' state is just the first token, not sound.
       if (e.full != null && t0 && !tAudio) { tAudio = Date.now(); showLat(); }
       // Tag the bubble (never the text) when no model produced it — the reply is a verbatim echo,
       // and only the UI should say so.
-      aiEl ??= bubble($('mode').value === 'echo' ? 'ai echoed' : 'ai');
+      if (!aiEl) { aiEl = bubble($('mode').value === 'echo' ? 'ai echoed' : 'ai'); aiTurn = e.turn ?? null;
+                   if (e.turn != null) turnEls.set(e.turn, aiEl); }
       // The agent's own voice has no level event (TTS plays through an internal AEC sink), so drive
       // the orb from how fast the spoken CURSOR advances — the orb rides its own speech. Only events
       // carrying `full` have a cursor; a pre-audio streaming draft would otherwise run spokenLen up
@@ -524,14 +572,11 @@ function onEvent(e) {
         spokenLen = e.text.length;
       }
       aiEl.textContent = e.text;                                    // spoken so far
-      const tail = (e.full ?? e.text).slice(e.text.length);         // generated, not yet heard
-      if (tail) aiEl.append(Object.assign(document.createElement('span'), { className:'tail', textContent:tail }));
-      // Cut short: the final says what was HEARD (text) and what was written (full) — a gap between
-      // them is a barge-in, the one thing the transcript would otherwise render as a short answer.
-      // (trim: a natural finish can leave trailing whitespace in `full` — not an interruption)
+      const tail = paintTail(aiEl, e);
       if (e.final) {
-        if (tail.trim()) { aiEl.classList.add('cut'); ripple(); }
+        if (tail.trim()) ripple();
         spokenLen = 0;
+        if (e.turn != null) turnEls.delete(e.turn);   // settled: stop tracking (the bubble stays)
       }
       aiEl.scrollIntoView({ block:'nearest' });
       break;
@@ -549,7 +594,12 @@ function onEvent(e) {
 }
 
 const muted = id => $(id).dataset.on === '1';
+const hosted = () => $('mode').value === 'hosted';
 const makeAgent = () => {
+  // Hosted mode gets its OWN llm client rather than blanking the shared `apiKey`: that one field
+  // also authenticates the STT token route (X-API-Key), so clearing it would silently break a
+  // custom STT backend. This drops the Authorization header on the LLM hop ONLY — the hosted route
+  // holds its own key and pins its own model, so neither belongs in the request.
   const a = new VoiceAgent({
     llmUrl: $('llmUrl').value.trim(),
     model: $('model').value.trim(),
@@ -560,7 +610,9 @@ const makeAgent = () => {
     micDeviceId: $('micDeviceId').value,
     persona: 'You are a concise, friendly voice assistant. Keep answers to a sentence or two.',
     tts,
-    llm: $('mode').value === 'echo' ? echoLLM : undefined,
+    llm: $('mode').value === 'echo' ? echoLLM
+       : hosted() ? makeOpenAILLM({ llmUrl: HOSTED_LLM_URL })   // no apiKey, no model: the route owns both
+       : undefined,                                             // 'llm' → built from llmUrl/model/apiKey above
     onEvent,
   });
   a.setMuted(muted('muteMic')); a.setTtsMuted(muted('muteTts'));   // the toggles survive a rebuild
@@ -598,7 +650,7 @@ $('send').onclick = () => {
 $('typed').onkeydown = e => { if (e.key === 'Enter') $('send').click(); };
 
 $('clear').onclick = () => { chat.textContent = ''; $('log').textContent = ''; $('lat').textContent = '';
-                             interimEl = aiEl = null; toolEls.clear(); };
+                             interimEl = aiEl = null; aiTurn = null; turnEls.clear(); toolEls.clear(); };
 const toggle = (id, fn) => $(id).onclick = () => {
   const on = $(id).dataset.on !== '1';
   $(id).dataset.on = on ? '1' : '0';

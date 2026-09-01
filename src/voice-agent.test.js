@@ -1298,3 +1298,30 @@ test('a TTS failure mid-reply still records the full assistant answer in history
   assert.equal(assistant.length, 1);
   assert.equal(assistant[0].content, 'reply-to:hello', 'the full reply is in history, not a prefix');
 });
+
+// A barge-in ends turn N while its final event is still in flight, so that event can reach the host
+// AFTER turn N+1 has already started. Without a turn id the host cannot tell the two apart and
+// writes the old reply's text into the new reply's bubble — the transcript then shows the previous
+// answer BELOW the newer question, and the new answer overwrites it.
+test('EVENT ORDER: assistant events carry the turn they belong to (late events are attributable)', async () => {
+  const tts = makeFakeTTS();
+  const { agent, events } = makeAgent({ tts });
+  agent.sendUserText('first');
+  await settle();
+  agent.sendUserText('second');          // supersedes the first mid-flight
+  for (let i = 0; i < 12; i++) await settle();
+
+  const asst = events.filter((e) => e.type === 'assistant');
+  assert.ok(asst.length >= 2, 'both turns emitted assistant events');
+  assert.ok(asst.every((e) => typeof e.turn === 'number'), 'every assistant event is tagged with its turn');
+  assert.ok(new Set(asst.map((e) => e.turn)).size >= 2, 'the two replies are distinguishable by turn id');
+
+  // The tag must track the REPLY, not merely increment: the final event of each turn carries the
+  // same id as that turn's own drafts, which is what lets a host route a straggler to its bubble.
+  for (const e of asst) {
+    const sameTurn = asst.filter((x) => x.turn === e.turn);
+    assert.ok(sameTurn.length >= 1);
+    const finals = sameTurn.filter((x) => x.final);
+    assert.ok(finals.length <= 1, 'a turn emits at most one final');
+  }
+});

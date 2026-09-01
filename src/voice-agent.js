@@ -909,7 +909,7 @@ export class VoiceAgent {
       if (this.history[this.history.length - 1]?.role !== 'user') return;
       this._set('thinking');                        // LLM stage
       this._abort = pf?.ctl ?? new AbortController();   // adopted prefetch keeps ITS controller so barge-in aborts the right fetch
-      await this._speakTurn(this._abort.signal, pf?.gen);   // _speakTurn never throws — errors surface via onEvent
+      await this._speakTurn(this._abort.signal, pf?.gen, seq);   // _speakTurn never throws — errors surface via onEvent
     })());
   }
 
@@ -917,7 +917,9 @@ export class VoiceAgent {
   // prefix, not the full generated answer) plus a ledger of the tools it dispatched. Stored as
   // `this._turn` so the next user turn can await it. Never throws (errors surface via onEvent) so
   // the await is safe — and never awaits a tool, so a hung one can't hold the next turn hostage.
-  async _speakTurn(signal, prefetched = null) {
+  // `turn` tags every assistant event with the reply it belongs to, so a host can tell a LATE
+  // event from a superseded turn apart from one for the current turn (see the demo's transcript).
+  async _speakTurn(signal, prefetched = null, turn = 0) {
     // Fresh turn → drop the previous reply's audible text so user speech heard before THIS turn's
     // first audio plays can't be misjudged as echo of the OLD reply — but PARK it in _prevReplyText:
     // its speakers→mic echo tail is still in flight for a moment (acoustic delay + STT latency), and
@@ -989,7 +991,7 @@ export class VoiceAgent {
         // read live each tick), so streaming the whole answer here would yank the cursor to the end.
         // Once the cursor is live we only grow `answer` (the hook reads it); until then (muted, or the
         // first sentence is still synthesizing) we stream the full answer so the bubble isn't empty.
-        if (!self._cursorLive) self.onEvent({ type: 'assistant', text: answer, final: false });
+        if (!self._cursorLive) self.onEvent({ type: 'assistant', text: answer, final: false, turn });
         yield item.text;
       }
     })(this, stripToolCallMimicry(prefetched ?? this.llm(this.history, this.sysmsg, signal)));   // prefetched stream already carries this turn's user text (see _startPrefetch)
@@ -1016,7 +1018,7 @@ export class VoiceAgent {
       const heard = rawPrefix(spokenSoFar);
       this._replyText = heard;          // AUDIBLE prefix — drives the spoken cursor
       this._replyEcho = scope ? rawPrefix(scope) : heard;   // clip-bounded echo reference (cursor lags real audio)
-      this.onEvent({ type: 'assistant', text: heard, full: answer, final: false });
+      this.onEvent({ type: 'assistant', text: heard, full: answer, final: false, turn });
     });
     try {
       // TTS muted: drain the same stream so the transcript + tool calls still run, but never voice
@@ -1063,11 +1065,11 @@ export class VoiceAgent {
       // full.slice(text.length) tail aligns. keepFull/normal-finish → whole answer (no tail); a barge-in
       // → the heard prefix solid + the unspoken remainder dimmed, showing exactly where TTS got.
       const shown = signal.keepFull ? answer : rawPrefix(spoken);
-      this.onEvent({ type: 'assistant', text: shown, full: answer, final: true });
+      this.onEvent({ type: 'assistant', text: shown, full: answer, final: true, turn });
     } else if (answer) {
       // Interrupted before anything was heard (nothing voiced yet): drop the streamed draft so the
       // transcript doesn't keep a dangling unfinished bubble. Empty text → host clears the draft.
-      this.onEvent({ type: 'assistant', text: '', final: false });
+      this.onEvent({ type: 'assistant', text: '', final: false, turn });
     }
     // Tools are NOT joined here. They were dispatched during streaming (in parallel with TTS) and
     // _runTool reports its own outcome via onEvent, so waiting adds nothing — while a tool that

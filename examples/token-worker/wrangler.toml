@@ -1,6 +1,18 @@
 name = "voiceloop-token"
-main = "src/index.js"
+main = "index.js"
 compatibility_date = "2026-01-01"
 
 [vars]
 ALLOWED_ORIGINS = "https://todoforai.github.io,http://localhost:8899,http://localhost:3000"
+
+# These routes spend real money and a demo URL is public by definition. CORS is NOT a control here:
+# it only governs what browser JS may READ, and a curl with no Origin (or a forged one) skips it
+# entirely. So cap per-IP request rate too — the cheapest real backstop Workers offers.
+# `period` must be 10 or 60; counters are per Cloudflare location.
+[[ratelimits]]
+name = "PAID_RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60
