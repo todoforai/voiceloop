@@ -466,3 +466,104 @@ test('LIVENESS: an abandoned producer waking late does not clear a newer reply p
   for (let i = 0; i < 30; i++) await settle();
   assert.equal(tts._preClip, pre, 'the stale producer must not consume the newer turn speculation');
 });
+
+// ── a synth failure mid-reply must not swallow the rest of the answer ─────────────────────────
+// One clip failing to render is a VOICE problem, not an ANSWER problem: the model already produced
+// the text and the user already sees it. Throwing out of speak() at the failed clip abandoned every
+// remaining sentence — the reply went silent partway and the turn recorded only the prefix as heard,
+// so the agent's own history disagreed with what was on screen ("lost between talk"). A failed clip
+// is now SKIPPED: its text still counts as delivered, and the following sentences still speak.
+class FlakyTTS extends StreamingTTS {
+  constructor(v, failText) { super(v); this.failText = failText; this.attempts = []; }
+  async _synth(text) {
+    this.attempts.push(text);
+    if (text === this.failText) throw new Error('synth exploded');
+    return text ? blob(text) : null;
+  }
+}
+
+test('a mid-reply synth failure still speaks the sentences after it', async () => {
+  const tts = new FlakyTTS('v', 'Second sentence here.');
+  const out = await play(tts, 'Hello world. Second sentence here. Third one.');
+  // The whole reply is returned — the failed sentence is silent, not amputated.
+  assert.equal(out, 'Hello world. Second sentence here. Third one.');
+  assert.ok(tts.attempts.includes('Third one.'), 'the sentence AFTER the failure was still synthesized');
+});
+
+test('a failing FIRST clip does not abandon the reply', async () => {
+  const tts = new FlakyTTS('v', 'Hello world.');
+  const out = await play(tts, 'Hello world. Second sentence here.');
+  assert.equal(out, 'Hello world. Second sentence here.');
+});
+
+test('every clip failing still resolves with the full text (not a throw)', async () => {
+  class AllFail extends StreamingTTS { async _synth() { throw new Error('no voice'); } }
+  const tts = new AllFail('v');
+  const out = await play(tts, 'One. Two.');
+  assert.equal(out, 'One. Two.');
+});
+
+test('a skipped sentence is REPORTED, not silently dropped', async () => {
+  const tts = new FlakyTTS('v', 'Second sentence here.');
+  const events = [];
+  tts.onEvent = (e) => events.push(e);
+  await play(tts, 'Hello world. Second sentence here. Third one.');
+  const err = events.find((e) => e.type === 'error');
+  assert.ok(err, 'an error event was emitted for the unvoiced sentence');
+  assert.match(err.error, /synth exploded/);
+});
+
+// heardMax after a skipped clip is a DELIVERY marker, not an audibility claim, and the two callers
+// want opposite things — so pin the tradeoff rather than leave it to a future reader's guess.
+// history: must contain the skipped sentence (the user READ it; dropping it desyncs the model).
+// echo guard: over-wide scope only ever SUPPRESSES a barge-in on those exact words, and words that
+// were never played can't come back off the mic — so the widened scope is inert in practice.
+test('a skipped sentence is still part of the returned (delivered) text', async () => {
+  const tts = new FlakyTTS('v', 'Middle one.');
+  const out = await play(tts, 'First here. Middle one. Last here.');
+  assert.equal(out, 'First here. Middle one. Last here.');
+});
+
+// The failure must not eat a LATER barge-in: after skipping, the next clip plays normally and an
+// abort on it still truncates at what was really heard.
+test('barge-in after a skipped clip still returns only the audible prefix', async () => {
+  const tts = new FlakyTTS('v', 'Middle one.');
+  const ctl = new AbortController();
+  const out = await play(tts, 'First here. Middle one. Last here.', ctl.signal, (clip, t) => {
+    // abort while the sentence AFTER the failed one is playing
+    if (t._curIdx === 2) { ctl.abort(); clip.end(); return true; }
+    return false;
+  });
+  assert.ok(out.startsWith('First here.'), 'kept what was actually played before the abort');
+  // The skipped sentence is still credited (it was delivered on screen), but the abort must stop the
+  // text there — a barge-in during clip 2 cannot report clip 2 as fully heard.
+  assert.ok(out.includes('Middle one.'), 'the skipped-but-delivered sentence is still credited');
+});
+
+// The skip is scoped to SYNTH failures (entry.err). A dead audio path is NOT a per-sentence problem
+// — every later clip would fail the same way — so _playBuf still throws and the turn surfaces it.
+// Without this boundary the fix would turn "audio is broken" into a silent no-op reply.
+test('a playback (not synth) failure still throws out of speak()', async () => {
+  const tts = new FakeTTS('v');
+  const realDecode = MockCtx.prototype.decodeAudioData;
+  MockCtx.prototype.decodeAudioData = async () => { throw new Error('decode died'); };
+  try {
+    // speak() directly: play()'s polling loop would swallow the rejection into its own promise.
+    await assert.rejects(() => tts.speak('One. Two.'), /Audio decode: decode died/);
+  } finally { MockCtx.prototype.decodeAudioData = realDecode; }
+});
+
+// The skip branch advances idx before `continue` — if it ever didn't, an all-failing reply would
+// spin forever and wedge the turn serializer behind it. Bound it in wall-clock, not iterations.
+test('an all-failing reply terminates promptly (no spin)', async () => {
+  class AllFail extends StreamingTTS { async _synth() { throw new Error('nope'); } }
+  const tts = new AllFail('v');
+  const long = Array.from({ length: 40 }, (_, i) => `Sentence number ${i}.`).join(' ');
+  const t0 = Date.now();
+  const out = await Promise.race([
+    tts.speak(long),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('speak() did not terminate — spin')), 4000)),
+  ]);
+  assert.equal(out, long, 'all sentences still counted as delivered');
+  assert.ok(Date.now() - t0 < 4000);
+});

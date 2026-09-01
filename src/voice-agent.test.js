@@ -1279,3 +1279,22 @@ test('a throwing level listener does not cost STT the frame', () => {
   assert.equal(fed.length, 1, 'STT got the frame before the host callback ran');
   agent.destroy();
 });
+
+// The user-visible half of the mid-reply synth failure (see voice-agent.tts.test.js): the agent must
+// remember the WHOLE answer it gave. When speak() threw at the failed clip, _runTurn took the error
+// path and recorded only the prefix — so the transcript on screen and the model's own history
+// disagreed, and the next turn was reasoning about a reply that had "got lost" halfway.
+test('a TTS failure mid-reply still records the full assistant answer in history', async () => {
+  const tts = {
+    // Mirrors the fixed StreamingTTS contract: a render failure is reported, not thrown, and the
+    // whole reply still counts as spoken.
+    async speak(stream) { let heard = ''; for await (const t of stream) heard += t; return heard; },
+    stop() {},
+  };
+  const { agent } = makeAgent({ tts });
+  await agent.sendUserText('hello');
+  for (let i = 0; i < 30; i++) await settle();
+  const assistant = agent.history.filter((m) => m.role === 'assistant');
+  assert.equal(assistant.length, 1);
+  assert.equal(assistant[0].content, 'reply-to:hello', 'the full reply is in history, not a prefix');
+});

@@ -1849,7 +1849,18 @@ export class StreamingTTS {
         if (idx >= tape.length) { await awaitEntry(idx); if (takePending()) continue; if (idx >= tape.length) break; }   // wait for the producer to reach this sentence (stream end → done)
         const e = tape[idx];
         const buf = await e.blobP;
-        if (e.err) throw e.err;                                 // this clip's synth failed → surface it (only when we actually reach it)
+        // A clip that failed to RENDER is a voice problem, not an answer problem: the model already
+        // produced this text and the user is already reading it. Throwing here abandoned every
+        // REMAINING sentence — the reply went silent partway through and speak() resolved with only
+        // the prefix, so history recorded less than what was on screen. Skip the mute sentence
+        // instead, count it as delivered (heardMax), and keep speaking the rest.
+        if (e.err) {
+          // Say it out loud on the same channel as the other TTS diagnostics: a sentence that is
+          // silently skipped is exactly the "it just got lost" symptom this branch exists to avoid.
+          this.onEvent?.({ type: 'error', error: `TTS synth failed, sentence not voiced: ${e.err.message}` });
+          heardMax = Math.max(heardMax, e.nwStart + nw(e.text));
+          idx++; startNw = 0; continue;
+        }
         if (takePending()) continue;                            // a tap during synth/stream gap → reposition
         this._curIdx = idx;
         const prefix = tape.slice(0, idx).map(x => x.text).join(' ') + (idx ? ' ' : '');
