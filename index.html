@@ -535,7 +535,10 @@ const wireModelProgress = () => tts?.setOnModelProgress?.((loaded, total) => {
 });   // applyTts() attaches this — including for the FIRST synthesizer, which it also builds
 
 function onEvent(e) {
-  if (e.type !== 'stt' || e.turnComplete) log(e);
+  // Partials are firehoses — STT interim results and the TTS spoken-cursor draft (one assistant
+  // event per animation frame while a clip plays). Logging them evicts everything else from the
+  // capped buffer, so only their settled forms land in the log; the transcript renders the live ones.
+  if ((e.type !== 'stt' || e.turnComplete) && (e.type !== 'assistant' || e.final)) log(e);
   switch (e.type) {
     case 'state':
       // The agent can stop itself (mic denied, STT socket died) — the mic light

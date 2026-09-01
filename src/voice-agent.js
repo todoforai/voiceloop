@@ -1012,12 +1012,19 @@ export class VoiceAgent {
       return answer.slice(0, i);
     };
     this._cursorLive = false;
+    let lastDraft = '';                 // last emitted heard+answer — the rAF ticker repeats itself
     this.tts.setOnProgress?.((spokenSoFar, scope) => {
       if (signal.aborted) return;
       this._cursorLive = true;          // hook now drives the draft → LLM stream stops emitting full text
       const heard = rawPrefix(spokenSoFar);
       this._replyText = heard;          // AUDIBLE prefix — drives the spoken cursor
       this._replyEcho = scope ? rawPrefix(scope) : heard;   // clip-bounded echo reference (cursor lags real audio)
+      // The player ticks every animation frame but the time→text estimate only advances a char every
+      // few frames — drop the identical repeats so hosts see one event per visible change, not 60/s.
+      // (`answer` is in the key too: while streaming, `full` still grows between identical cursors.)
+      const draft = heard.length + '\u0000' + answer.length;
+      if (draft === lastDraft) return;
+      lastDraft = draft;
       this.onEvent({ type: 'assistant', text: heard, full: answer, final: false, turn });
     });
     try {
