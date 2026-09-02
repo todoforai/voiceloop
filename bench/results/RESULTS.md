@@ -19,7 +19,7 @@ talked over the user (hesitation) / cut its own reply (echo), out of 30 turns.
 | system | clean | hesitation | overlap → talked through | echo | cut itself |
 |---|---|---|---|---|---|
 | OpenAI Realtime * | 870ms | 1290ms | 12/30 → **0** (yields in 130ms) | 790ms | **17/30** |
-| **voiceloop** · deepgram + EL flash | 980ms | 1400ms | 2/30 → **0** (420ms) | 930ms | **0** |
+| **voiceloop** · deepgram + EL flash | 860ms | 1400ms | 2/30 → **0** (420ms) | 930ms | **0** |
 | **voiceloop** · deepgram + Piper (free TTS, local) | 970ms | 1400ms | 0/30 → **0** | — | — |
 | **voiceloop** · webspeech + Piper (zero-key, browser STT) | 2110ms | — | — | — | — |
 | Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 12/30 → **2** (200ms) | 1320ms | **20/30** |
@@ -49,14 +49,14 @@ Realtime is the disclosed exception (speech-to-speech, its own model).
 | configuration | voice→voice median | p95 | barge-in stop | stalls |
 |---|---|---|---|---|
 | OpenAI Realtime (gpt-realtime, speech-to-speech) * | 866ms | 1644 | 429ms | 20 |
-| **voiceloop** · deepgram + ElevenLabs flash TTS | **984ms** | 1169 | 1019ms | 15 |
+| **voiceloop** · deepgram + ElevenLabs flash TTS | **862ms** | 1067 | 944ms | 16 |
 | **voiceloop** · deepgram + Piper (free, local) | **974ms** | 1287 | 1463ms | 19 |
 | Pipecat 1.8.1 · deepgram + EL flash TTS | 1046ms | 3573 | 542ms | 14 |
 | ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1042ms | 8 |
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
 | **voiceloop** · webspeech + Piper (zero-key browser STT — the demo default) | 2113ms | 2607 | 1257ms | 30 |
-| _TODOforAI Jarvis (our shipped agent; internal)_ · deepgram + EL flash TTS | _**808ms**_ | _1088_ | _1149ms_ | _17_ |
+| _TODOforAI Jarvis (our shipped agent; internal)_ · deepgram + EL flash TTS | _849ms_ | _1051_ | _1111ms_ | _14_ |
 | _TODOforAI shared-voice (our shipped Jarvis; internal)_ · deepgram + Piper | _1246ms_ | _1839_ | _1226ms_ | _25_ |
 | _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + EL flash TTS | _1749ms_ | _2022_ | _716ms_ | _18_ |
 | _TODOforAI Jarvis (our shipped agent; internal)_ · webspeech + Piper (shipped default) | _1808ms_ | _2324_ | _708ms_ | _25_ |
