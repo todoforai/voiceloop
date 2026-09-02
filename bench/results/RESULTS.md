@@ -56,10 +56,6 @@ Realtime is the disclosed exception (speech-to-speech, its own model).
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
 | **voiceloop** · webspeech + Piper (zero-key browser STT — the demo default) | 2113ms | 2607 | 1257ms | 30 |
-| _TODOforAI Jarvis (our shipped agent; internal)_ · deepgram + EL flash TTS | _849ms_ | _1051_ | _1111ms_ | _14_ |
-| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · deepgram + Piper | _1246ms_ | _1839_ | _1226ms_ | _25_ |
-| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + EL flash TTS | _1749ms_ | _2022_ | _716ms_ | _18_ |
-| _TODOforAI Jarvis (our shipped agent; internal)_ · webspeech + Piper (shipped default) | _1808ms_ | _2324_ | _708ms_ | _25_ |
 
 voice→voice = end of the person's speech → first audible agent audio (from the recording).
 barge-in stop = person starts interrupting → agent audio actually stops.
