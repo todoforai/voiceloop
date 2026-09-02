@@ -168,9 +168,12 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   these rows now measure *integration overhead*, not a second implementation.
 
   **Re-measured on 0.1.8 (Aug 31): deepgram+EL flash 808ms (EOT 292, 0 echo words/drops),
-  webspeech+Piper 1808ms (EOT 1544).** Jarvis is now *faster* than the standalone voiceloop
-  demo on the same providers (808 vs 846–984ms) — the integration costs nothing. The
-  deepgram+Piper and webspeech+EL rows are still the 0.1.6 measurements.
+  webspeech+Piper 1808ms (EOT 1544).** The deepgram+Piper and webspeech+EL rows are still the
+  0.1.6 measurements.
+  **Same-hour A/B on 0.1.10 (Sep 2), Jarvis vs the standalone voiceloop page, back-to-back on
+  one rig: 849 vs 862ms** (EOT 363 vs 398, TTS first audio 433 vs 430, barge-in 1111 vs 944,
+  0 echo on both; per-run medians 772–886 vs 827–939). The integration costs nothing; the
+  808-vs-900 spread seen across days is Deepgram/network day-to-day, not code.
 
   **History — all four rows on 0.1.6.** The previous 2241/1801ms pair was taken on 0.1.5,
   before the TTS pre-warm fix, and is superseded — quoting it against today's stack overstates
