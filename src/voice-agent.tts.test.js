@@ -513,6 +513,32 @@ test('a skipped sentence is REPORTED, not silently dropped', async () => {
   assert.match(err.error, /synth exploded/);
 });
 
+// A barge-in that lands while a clip is mid-synth cancels the synth (a fetch on the turn's signal
+// rejects with AbortError: "signal is aborted without reason"). That is the cancellation we asked
+// for — it must stop quietly like an abort during playback, NOT be reported as a synth failure.
+test('an abort during synth is a barge-in, not a "synth failed" error', async () => {
+  // The FIRST clip's synth hangs like a slow fetch, so the consumer is parked on its blobP when the
+  // abort lands; the synth then rejects with the DOM's AbortError, as fetch does.
+  class SlowFetchTTS extends StreamingTTS {
+    async _synth(text, signal) {
+      if (text !== 'Hello') return text ? blob(text) : null;   // stage-0 breaks on the first word
+      await new Promise((r) => signal.addEventListener('abort', r, { once: true }));
+      const e = new Error('signal is aborted without reason'); e.name = 'AbortError'; throw e;
+    }
+  }
+  const ac = new AbortController();
+  const tts = new SlowFetchTTS('v');
+  const events = [];
+  tts.onEvent = (e) => events.push(e);
+  const p = tts.speak('Hello world. Second sentence here.', ac.signal);
+  for (let i = 0; i < 5; i++) await settle();               // consumer now awaits clip 0's blobP
+  assert.equal(tts._tape.length, 3, 'producer ran ahead; consumer is parked on the hanging clip');
+  ac.abort();                                                // user cut in
+  const out = await p;
+  assert.equal(out, '', 'nothing was heard');
+  assert.ok(!events.some((e) => e.type === 'error'), 'no "synth failed" event for the cancelled clip');
+});
+
 // heardMax after a skipped clip is a DELIVERY marker, not an audibility claim, and the two callers
 // want opposite things — so pin the tradeoff rather than leave it to a future reader's guess.
 // history: must contain the skipped sentence (the user READ it; dropping it desyncs the model).

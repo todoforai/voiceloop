@@ -1860,6 +1860,10 @@ export class StreamingTTS {
         if (idx >= tape.length) { await awaitEntry(idx); if (takePending()) continue; if (idx >= tape.length) break; }   // wait for the producer to reach this sentence (stream end → done)
         const e = tape[idx];
         const buf = await e.blobP;
+        // Barge-in while this clip was mid-synth: the abort cancels the synth fetch, which rejects with
+        // AbortError ("signal is aborted without reason"). That's the cancellation we asked for, not a
+        // failed render — stop quietly, exactly like an abort during playback.
+        if (signal?.aborted) break;
         // A clip that failed to RENDER is a voice problem, not an answer problem: the model already
         // produced this text and the user is already reading it. Throwing here abandoned every
         // REMAINING sentence — the reply went silent partway through and speak() resolved with only
