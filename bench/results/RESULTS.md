@@ -56,10 +56,10 @@ Realtime is the disclosed exception (speech-to-speech, its own model).
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
 | **voiceloop** · webspeech + Piper (zero-key browser STT — the demo default) | 2113ms | 2607 | 1257ms | 30 |
-| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · deepgram + EL flash TTS | _1006ms_ | _1206_ | _1060ms_ | _16_ |
+| _TODOforAI Jarvis (our shipped agent; internal)_ · deepgram + EL flash TTS | _**808ms**_ | _1088_ | _1149ms_ | _17_ |
 | _TODOforAI shared-voice (our shipped Jarvis; internal)_ · deepgram + Piper | _1246ms_ | _1839_ | _1226ms_ | _25_ |
 | _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + EL flash TTS | _1749ms_ | _2022_ | _716ms_ | _18_ |
-| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + Piper (shipped default) | _1945ms_ | _2459_ | _700ms_ | _28_ |
+| _TODOforAI Jarvis (our shipped agent; internal)_ · webspeech + Piper (shipped default) | _1808ms_ | _2324_ | _708ms_ | _25_ |
 
 voice→voice = end of the person's speech → first audible agent audio (from the recording).
 barge-in stop = person starts interrupting → agent audio actually stops.
@@ -167,7 +167,12 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   published voiceloop 0.1.8 and adds only the JARVIS persona, LLM adapter and todo tools, so
   these rows now measure *integration overhead*, not a second implementation.
 
-  **All four rows re-measured on 0.1.6.** The previous 2241/1801ms pair was taken on 0.1.5,
+  **Re-measured on 0.1.8 (Aug 31): deepgram+EL flash 808ms (EOT 292, 0 echo words/drops),
+  webspeech+Piper 1808ms (EOT 1544).** Jarvis is now *faster* than the standalone voiceloop
+  demo on the same providers (808 vs 846–984ms) — the integration costs nothing. The
+  deepgram+Piper and webspeech+EL rows are still the 0.1.6 measurements.
+
+  **History — all four rows on 0.1.6.** The previous 2241/1801ms pair was taken on 0.1.5,
   before the TTS pre-warm fix, and is superseded — quoting it against today's stack overstates
   our latency by ~500ms. On 0.1.6 the shipped webspeech+Piper default is **1945ms** and
   deepgram+Piper is **1246ms** (was 1801). The pre-warm fix is the whole difference:

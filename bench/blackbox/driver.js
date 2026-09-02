@@ -28,7 +28,13 @@ const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // 
 // leaves every later app recording digital silence with no error to show for it (a browser that
 // simply never hears you). Tear it down on EVERY exit path, not just the happy one: the run ends
 // via process.exit() in four places, plus Ctrl-C and crashes.
-let toreDown = false;
+// ONLY if this process brought the rig up, though. run-n.js spawns the driver N times against one
+// rig; a driver that tore it down after run 1 left runs 2..N with Chrome's mic on a dead bench_mic
+// — echo words, self-interruptions and a 2.7s barge-in that looked like a library regression
+// (vl-dgel-018/019: 2825/2703ms) and was purely the rig eating itself (019b, fixed: 1004ms).
+const rigWasUp = spawnSync('pactl', ['list', 'short', 'modules'], { encoding: 'utf8' }).stdout?.includes('bench_spk');
+if (!rigWasUp) spawnSync(join(BENCH, 'blackbox', 'audio-setup.sh'), ['up'], { stdio: 'ignore' });
+let toreDown = rigWasUp;   // not ours → leave it alone
 const audioDown = () => {
   if (toreDown) return; toreDown = true;
   spawnSync(join(BENCH, 'blackbox', 'audio-setup.sh'), ['down'], { stdio: 'ignore' });
