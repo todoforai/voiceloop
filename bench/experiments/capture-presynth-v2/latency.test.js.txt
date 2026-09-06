@@ -1,0 +1,129 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { VoiceAgent } from './voice-agent.js';
+
+const tick = () => new Promise(r => setImmediate(r));
+function agentWith(chunks, tts = {}) {
+  const warmed = [];
+  const agent = new VoiceAgent({
+    llm: async function* () { yield* chunks; },
+    tts: { presynth: t => warmed.push(t), stop() {}, ...tts },
+  });
+  agent.state = 'listening'; agent._turnText = 'hello';
+  return { agent, warmed };
+}
+
+for (const chunks of [[{ text: 'Hel' }, { text: 'lo' }, { text: ' world.' }], ['I', ' can ', 'help.']]) {
+  test(`presynth accumulates fragmented text and replays exactly: ${JSON.stringify(chunks)}`, async () => {
+    const { agent, warmed } = agentWith(chunks);
+    agent._startPrefetch('hello'); await tick();
+    assert.deepEqual(warmed, [chunks[0] === 'I' ? 'I can' : 'Hello']);
+    const stream = agent._takePrefetch('hello');
+    const got = []; for await (const x of stream.gen) got.push(x);
+    assert.deepEqual(got, chunks);
+  });
+}
+
+test('adoption during pending lookahead yields buffered text without waiting, with one reader', async () => {
+  let release, active = 0, max = 0;
+  const chunks = [{ text: 'Hel' }, { text: 'lo world.' }, { tool: 'test', args: {} }];
+  let i = 0;
+  const { agent, warmed } = agentWith([]);
+  agent.llm = () => ({
+    async next() {
+      active++; max = Math.max(max, active);
+      const n = i++;
+      if (n === 1) await new Promise(r => { release = r; });
+      active--; return n < chunks.length ? { value: chunks[n], done: false } : { done: true };
+    },
+    [Symbol.asyncIterator]() { return this; },
+  });
+  agent._startPrefetch('hello'); await tick();
+  assert.ok(release);
+  const adopted = agent._takePrefetch('hello');
+  assert.deepEqual((await adopted.gen.next()).value, chunks[0]);
+  release();
+  const got = []; for await (const c of adopted.gen) got.push(c);
+  assert.deepEqual(got, chunks.slice(1)); assert.equal(max, 1);
+  assert.deepEqual(warmed, [], 'adopted stream cannot presynth behind the turn');
+});
+
+test('dropping a pending lookahead closes it without stale synthesis', async () => {
+  let release, closed = false;
+  const { agent, warmed } = agentWith([]);
+  agent.llm = async function* () {
+    try { yield { text: 'Hel' }; await new Promise(r => { release = r; }); yield { text: 'lo world.' }; }
+    finally { closed = true; }
+  };
+  agent._startPrefetch('hello'); await tick(); agent._dropPrefetch(); release(); await tick();
+  assert.equal(closed, true); assert.deepEqual(warmed, []);
+});
+
+test('lookahead is bounded, preserves non-text chunks and never opens tool gate', async () => {
+  let ran = false;
+  const { agent } = agentWith([]);
+  agent.llm = async function* (_h, _s, _sig, { toolGate }) {
+    yield { text: 'I' }; await toolGate; ran = true; yield { tool: 'test', args: {} };
+  };
+  agent.llm.executesTools = true; agent.llm.acceptsToolGate = true;
+  agent._startPrefetch('hello'); await tick(); assert.equal(ran, false);
+  const adopted = agent._takePrefetch('hello'); const got = [];
+  for await (const c of adopted.gen) got.push(c);
+  assert.equal(ran, true); assert.equal(got[1].tool, 'test');
+  const chunks = Array.from({ length: 100 }, () => ({ text: 'x' }));
+  const other = agentWith(chunks); other.agent._startPrefetch('hello'); await tick();
+  assert.equal(other.agent._prefetch.buffer.length, 32);
+  const replay = other.agent._takePrefetch('hello'); const all = [];
+  for await (const c of replay.gen) all.push(c);
+  assert.deepEqual(all, chunks);
+});
+
+test('bootstrap RMS decisions identical for 4096 and 512 sample transport', () => {
+  function run(size) {
+    const { agent } = agentWith([]); agent._useBootstrap = true;
+    const events = []; let samples = 0;
+    agent._onSpeechStart = () => { events.push(['start', samples]); agent._speaking = true; };
+    agent._onSpeechEnd = () => { events.push(['end', samples]); agent._speaking = false; };
+    const audio = new Float32Array(4096 * 10);
+    // Vary energy inside the legacy window: checking each short RMS separately would differ.
+    audio.fill(.1, 4096, 4096 + 1024); audio.fill(.1, 8192, 12288);
+    for (let i = 0; i < audio.length; i += size) { samples += size; agent._bootstrapVadTick(audio.subarray(i, i + size)); }
+    return events;
+  }
+  assert.deepEqual(run(512), run(4096));
+  assert.deepEqual(run(512), [['start',8192], ['end',36864]]);
+});
+
+test('explicit legacy preroll units retain exact samples across mixed transport sizes', () => {
+  const { agent } = agentWith([]); agent.prerollMax = 1;
+  const fed = []; agent.stt = { feed: x => fed.push(...x) };
+  const expected = [];
+  for (const size of [512, 1600, 512, 4096, 512]) {
+    const x = new Float32Array(size).fill(size / 10000);
+    agent._feed(x); expected.push(...Array.from(x, v => new Int16Array([v * 32767])[0]));
+  }
+  assert.equal(agent._prerollSamples,4096);
+  agent._speaking = true; agent._feed(new Float32Array(512).fill(.5));
+  assert.deepEqual(fed.slice(0,4096),expected.slice(-4096));
+  assert.equal(fed.length,4608); assert.equal(agent._prerollSamples,0);
+  agent.prerollMax = 0; agent._speaking = false; agent._feed(new Float32Array(512));
+  assert.equal(agent._preroll.length,0);
+});
+
+test('lookahead rejection and early end replay without losing the opening delta', async()=>{
+ for(const fail of [false,true]) {
+  const {agent}=agentWith([]);
+  agent.llm=async function*(){yield {text:'I'};if(fail)throw new Error('stream failed');};
+  agent._startPrefetch('hello');await tick();
+  const adopted=agent._takePrefetch('hello');assert.deepEqual((await adopted.gen.next()).value,{text:'I'});
+  if(fail)await assert.rejects(adopted.gen.next(),/stream failed/);
+  else assert.equal((await adopted.gen.next()).done,true);
+ }
+});
+
+test('transport cadence does not lose or duplicate continuous STT samples',()=>{
+ const {agent}=agentWith([]);const fed=[];agent.stt={continuous:true,feed:x=>fed.push(...x)};
+ const input=Float32Array.from({length:16384},(_,i)=>Math.sin(i/13)*.5);
+ for(let i=0;i<input.length;i+=512)agent._feed(input.subarray(i,i+512));
+ assert.deepEqual(fed,Array.from(input,x=>new Int16Array([x*32767])[0]));
+});

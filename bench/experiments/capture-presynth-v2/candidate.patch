@@ -1,0 +1,377 @@
+--- a/src/voice-agent.js
++++ b/src/voice-agent.js
+@@ -31,12 +31,12 @@
+ 
+ const CDN = 'https://cdn.jsdelivr.net/npm/';
+ 
+-// AudioWorklet processor: accumulate the audio-thread's 128-sample render quanta into ~256ms chunks
+-// (4096 samples @16kHz — the cadence the pipeline's bootstrap-VAD/preroll math assumes) and post each
++// AudioWorklet processor: accumulate 128-sample render quanta into 32ms chunks
++// (512 samples @16kHz). Bootstrap analysis and preroll retain their legacy durations. Post each
+ // to the main thread. Kept as a source string → Blob URL so no separate asset/bundler config is needed.
+ const CAPTURE_WORKLET_SRC = `
+ registerProcessor('capture-processor', class extends AudioWorkletProcessor {
+-  constructor() { super(); this._buf = new Float32Array(4096); this._n = 0; }
++  constructor() { super(); this._buf = new Float32Array(512); this._n = 0; }
+   process(inputs) {
+     const ch = inputs[0]?.[0];
+     if (ch) for (let i = 0; i < ch.length; i++) {
+@@ -378,7 +378,7 @@
+     this.state = 'idle';           // idle | listening | thinking | speaking
+     this._abort = null;            // aborts the in-flight LLM
+     this._replySeq = 0;            // bumped per reply-generating turn; a queued turn drops itself if a newer one exists
+-    this._preroll = []; this._wasSpeaking = false; this._closed = false; this._destroyed = false;
++    this._preroll = []; this._prerollSamples = 0; this._wasSpeaking = false; this._closed = false; this._destroyed = false;
+     // Diagnostic tap: last ~30s of the exact i16 frames handed to STT + delivery-stall gaps, for
+     // dumpAudio() (replay any "it misheard me" run and prove capture clean-or-not).
+     this._tap = []; this._tapSamples = 0; this._tapTotal = 0; this._tapLastMs = 0; this._tapGaps = [];
+@@ -399,7 +399,7 @@
+     // — so the mic is gated (and speech detected) from frame 1 instead of losing/chopping the user's
+     // opening words in the size-capped preroll buffer. Swapped to Silero at the next utterance
+     // boundary once it's ready (never mid-speech — see _endOfSpeech / onSpeechStart).
+-    this._useBootstrap = false; this._sileroPending = false; this._bsSpeechFrames = 0; this._bsSilenceFrames = 0;
++    this._useBootstrap = false; this._sileroPending = false; this._bsSpeechFrames = 0; this._bsSilenceFrames = 0; this._bsSamples = 0; this._bsEnergy = 0;
+     // Bumped on every cold start()/_teardownPipeline() — guards the fire-and-forget _startVad() below:
+     // a rapid re-click or device switch during the cold-load window can call start() again before the
+     // FIRST _startVad() resolves; its late resolution must not stomp the SECOND session's _vad/bootstrap
+@@ -441,7 +441,7 @@
+       this._stream.getAudioTracks().forEach(t => t.enabled = !this._muted);   // honor a mute toggled while paused
+       // stop() is always a safe boundary (nothing is mid-utterance once stopped) — so if Silero
+       // finished loading while paused, resume goes straight to it instead of restarting bootstrap.
+-      if (this._useBootstrap) { this._useBootstrap = false; this._bsSpeechFrames = 0; this._bsSilenceFrames = 0; }
++      if (this._useBootstrap) { this._useBootstrap = false; this._bsSpeechFrames = 0; this._bsSilenceFrames = 0; this._bsSamples = 0; this._bsEnergy = 0; }
+       this._vad.start();
+       this.stt.open?.();   // re-open the STT socket (stop() closed it) so the first utterance doesn't pay a cold connect
+       this.tts.warm?.().catch(() => {});
+@@ -497,7 +497,7 @@
+       // the MAIN thread, so any stall (React renders, ONNX inference, Piper download/compile, SSE
+       // parsing) silently DROPS buffers — the recognizer then sees spliced audio and drops the missing
+       // span + loops on a token ("eleven eleven eleven"). The worklet captures on the audio rendering
+-      // thread, so a busy UI can never drop capture; ~256ms chunks match the old cadence.
++      // thread, so a busy UI can never drop capture; 32ms chunks reduce the STT batching wait.
+       // Build on LOCALS and publish to this._ctx/_node only at the end: a supersede/stop during the
+       // awaited addModule() may have torn down (and a new session rebuilt) the instance fields — a
+       // stale continuation must clean up its own objects only.
+@@ -549,13 +549,13 @@
+     this._replyDoneAt = 0;
+     // Drop buffered-but-unsent audio: flushing it into the next session's socket on resume
+     // would re-transcribe old speech (duplicate user turns).
+-    this._preroll = []; this._wasSpeaking = false; this._speaking = false;
++    this._preroll = []; this._prerollSamples = 0; this._wasSpeaking = false; this._speaking = false;
+     // PAUSE, don't tear down: keep the mic stream + audio graph + VAD model alive so a resume of THIS
+     // agent (start() again) is instant — no getUserMedia prompt, no MicVAD.new() cold start. The STT
+     // socket DOES close (it's cheap to reopen lazily on the next utterance, and a stale socket would
+     // re-transcribe old audio). The host releases the mic by calling destroy() when it ends the session.
+     this._vad?.pause(); this.stt.close();
+-    this._bsSpeechFrames = 0; this._bsSilenceFrames = 0;
++    this._bsSpeechFrames = 0; this._bsSilenceFrames = 0; this._bsSamples = 0; this._bsEnergy = 0;
+     this._tapLastMs = 0;   // the pause gap isn't a capture dropout — don't flag it on resume
+     this._set('idle');
+   }
+@@ -783,16 +783,23 @@
+   // (stage-0 breaker, ~a dozen chars), so even a wasted predict delays a real turn only briefly.
+   async _presynthFirstClip(p) {
+     if (!this.tts.presynth) return;
++    let text = '';
+     try {
+-      const f = await p.first;                             // opening delta of the speculation
+-      if (f.done || p.ctl.signal.aborted || this._prefetch !== p) return;
+-      p.first = Promise.resolve(f);                        // re-stitch: first was consumed here, adoption must still see it
+-      // LLM chunks are { text } / { tool, … } objects (or raw strings from simple custom llms) —
+-      // only text is voiceable.
+-      const chunk = typeof f.value === 'string' ? f.value : (f.value?.text ?? '');
+-      const end = firstWordEnd(chunk);
+-      if (end > 0) this.tts.presynth(chunk.slice(0, end).trim());   // enough for the stage-0 chunk → warm the exact clip
+-    } catch { /* speculation failed/aborted — the real turn re-runs it */ }
++      // One reader owns gen.next(). Publish each pending pull before awaiting it so adoption
++      // can replay immediately, even if the lookahead is parked in a slow/gated generator.
++      for (let i = 0; i < 32; i++) {
++        const f = await p.buffer[i];
++        if (f.done || p.ctl.signal.aborted || this._prefetch !== p) return;
++        const value = f.value;
++        if (typeof value !== 'string' && (typeof value?.text !== 'string' || value.tool)) return;
++        text += typeof value === 'string' ? value : value.text;
++        const end = firstWordEnd(text);
++        if (end > 0) { this.tts.presynth(text.slice(0, end).trim()); return; }
++        if (text.length >= 256 || i === 31) return; // bounded speculation, not a full stream drain
++        const next = p.gen.next(); next.catch(() => {});
++        p.buffer.push(next);
++      }
++    } catch { /* failed speculation is replayed to the normal turn error path */ }
+   }
+ 
+   _startPrefetch(text) {
+@@ -822,6 +829,7 @@
+     committed.catch(() => {});   // an adapter that ignores the gate must not raise an unhandled rejection
+     const gen = this.llm([...this.history, { role: 'user', content: text }], this.sysmsg, ctl.signal, { toolGate: committed });
+     const p = { text, ctl, gen, commit, cancel, first: gen.next(), histLen: this.history.length };   // pull NOW → fetch fires during the debounce; histLen pins the base the speculation saw
++    p.buffer = [p.first];
+     p.first.catch(() => {});                           // aborted/failed speculation must not be an unhandled rejection
+     this._prefetch = p;
+     this._presynthFirstClip(p);                        // fire-and-forget: warm the first TTS clip off the same speculation
+@@ -835,7 +843,7 @@
+       // woken by the abort signal alone, so without this its finally never runs and `first` never
+       // settles — leaking the generator and its fetch (and stranding the return() below forever).
+       p.cancel?.(new DOMException('speculation dropped', 'AbortError'));
+-      p.first.then(() => p.gen.return?.()).catch(() => {});   // abort the fetch AND close the iterator (custom llm impls may clean up in finally)
++      p.buffer.at(-1).then(() => p.gen.return?.()).catch(() => {});   // abort the fetch AND close the iterator (custom llm impls may clean up in finally)
+     }
+   }
+   // Claim the prefetch for a closing SPOKEN turn: exact text match AND unchanged history base (the
+@@ -860,7 +868,10 @@
+     this.onEvent?.({ type: 'diag', diag: 'prefetch-hit', len: text.length });
+     this._prefetch = null;   // timer already cleared: successful adoption is only reached from a spoken onFinal
+     p.commit();              // turn committed → open the tool gate; held-back tool calls execute now
+-    return { ctl: p.ctl, gen: (async function* () { const f = await p.first; if (!f.done) { yield f.value; yield* p.gen; } })() };
++    return { ctl: p.ctl, gen: (async function* () {
++      for (const pending of p.buffer) { const f = await pending; if (f.done) return; yield f.value; }
++      yield* p.gen;
++    })() };
+   }
+ 
+   // The ONE serialized turn runner. Every reply (typed, spoken, held-release, notify) goes through
+@@ -1226,18 +1237,28 @@
+   _swapToSileroWhenReady() {
+     this._sileroPending = false;
+     if (this._speaking) return;   // mid-utterance — _bootstrapVadTick's speech-end path swaps after
+-    this._useBootstrap = false; this._bsSpeechFrames = 0; this._bsSilenceFrames = 0;
++    this._useBootstrap = false; this._bsSpeechFrames = 0; this._bsSilenceFrames = 0; this._bsSamples = 0; this._bsEnergy = 0;
+     this._vad?.start();
+   }
+ 
+   // Zero-load RMS-energy stand-in for Silero, active only during `this._useBootstrap` (cold-start
+   // window before Silero has loaded). Deliberately crude — it only needs to survive the first
+   // second(s) of a session without losing/chopping the user's opening words; see tuning.js
+-  // BOOTSTRAP_VAD for the thresholds. Ticks once per ~256ms worklet capture chunk (_feed below).
++  // BOOTSTRAP_VAD for the thresholds. Analyze the SAME 4096-sample RMS windows as before,
++  // independent of transport chunks: shorter packets must not change cold-start decisions.
+   _bootstrapVadTick(f32) {
+     const cfg = TUNING.BOOTSTRAP_VAD;
+-    let sum = 0; for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+-    const rms = Math.sqrt(sum / f32.length);
++    for (const sample of f32) {
++      this._bsEnergy += sample * sample;
++      if (++this._bsSamples < 4096) continue;
++      const rms = Math.sqrt(this._bsEnergy / this._bsSamples);
++      this._bsEnergy = 0; this._bsSamples = 0;
++      this._bootstrapVadWindow(rms, cfg);
++      if (!this._useBootstrap) break;
++    }
++  }
++
++  _bootstrapVadWindow(rms, cfg) {
+     if (rms >= cfg.energyThreshold) {
+       this._bsSilenceFrames = 0;
+       if (!this._speaking && ++this._bsSpeechFrames >= cfg.minSpeechFrames) this._onSpeechStart();
+@@ -1266,9 +1287,19 @@
+     // silences, so feed the FULL stream — no VAD gating, no preroll replay. VAD still runs above
+     // (state events + speech-start reset + the nativeEOT failsafe), it just doesn't gate the audio.
+     if (this.stt.continuous) { this.stt.feed(i16); return; }
+-    if (!this._speaking) { this._preroll.push(i16); if (this._preroll.length > this.prerollMax) this._preroll.shift(); this._wasSpeaking = false; return; }
++    if (!this._speaking) {
++      this._preroll.push(i16); this._prerollSamples += i16.length;
++      // Public `preroll` keeps its original units: one unit = 4096 samples (256ms).
++      const max = Math.max(0, Math.floor(this.prerollMax) * 4096);
++      while (this._prerollSamples > max) {
++        const head = this._preroll[0], excess = this._prerollSamples - max;
++        if (head.length <= excess) { this._preroll.shift(); this._prerollSamples -= head.length; }
++        else { this._preroll[0] = head.subarray(excess); this._prerollSamples = max; }
++      }
++      this._wasSpeaking = false; return;
++    }
+     if (!this._wasSpeaking) {
+-      for (const c of this._preroll) this.stt.feed(c); this._preroll = []; this._wasSpeaking = true;
++      for (const c of this._preroll) this.stt.feed(c); this._preroll = []; this._prerollSamples = 0; this._wasSpeaking = true;
+     }
+     this.stt.feed(i16);
+   }
+@@ -1286,7 +1317,7 @@
+   // pipeline without closing the mic (warm resume) and the worklet keeps delivering frames, so
+   // without the _closed guard a "stopped" agent would keep driving the host's meter; a muted mic
+   // would likewise stream a flat zero forever instead of going quiet.
+-  // Rate-limited to ~LEVEL_MIN_MS so a capture finer than the current 4096-sample (256ms @16k)
++  // Rate-limited to ~LEVEL_MIN_MS so a capture finer than the current 512-sample (32ms @16k)
+   // chunk can't flood the host. A selfCapture STT (Web Speech) owns its own mic — no frames, no
+   // level events at all.
+   _emitLevel(f32) {
+--- a/src/index.d.ts
++++ b/src/index.d.ts
+@@ -11,7 +11,7 @@
+   // not by "the current bubble", or the late text overwrites the newer reply.
+   | { type: 'assistant'; text: string; final: boolean; full?: string; turn: number }
+   | { type: 'vad'; active: boolean }                                      // VAD hears speech?
+-  // Mic loudness, 0..1 on a perceptual curve, ~every 256ms while capturing. Cosmetic only (meters,
++  // Mic loudness, 0..1 on a perceptual curve, ~every 64ms while capturing. Cosmetic only (meters,
+   // a reacting orb) — nothing in the pipeline reads it. Never emitted for a selfCapture STT
+   // (webspeech owns its own mic, so there are no frames to measure).
+   | { type: 'level'; level: number }
+@@ -143,7 +143,7 @@
+   /** Domain words to bias cloud STT towards ("Kubernetes", product names) — the fix for jargon
+    *  transcribed phonetically. Silently trimmed to 50 terms of ≤20 chars. Cloud providers only. */
+   keyterms?: string[];
+-  /** Audio chunks retained BEFORE the VAD fires, prepended to the utterance so the first syllable
++  /** Legacy 256ms audio units retained BEFORE the VAD fires, prepended to the utterance so the first syllable
+    *  isn't clipped (VAD confirms speech a beat after it starts). Default TUNING.PREROLL_CHUNKS. */
+   preroll?: number;
+   /** Passed through to Silero VAD (thresholds, frame sizes) — see tuning.js for the defaults. */
+--- a/src/tuning.js
++++ b/src/tuning.js
+@@ -100,7 +100,7 @@
+   // `prefetchMs` (deepgram flux: 0 — see stt.js).
+   PREFETCH_MS: 200,
+ 
+-  // Audio chunks (~256ms each at 16kHz/4096-sample frames; ~1s total at 4) kept BEFORE VAD fires and
++  // Legacy 256ms audio units (~1s total at 4; independent of transport chunk size) kept BEFORE VAD fires and
+   // replayed into STT when speech starts, so the first word isn't clipped. Raise if word-starts are
+   // getting cut; lower to shave a touch of latency/cost.
+   PREROLL_CHUNKS: 4,
+@@ -131,7 +131,7 @@
+   // words spoken right after clicking the mic are never silently dropped from the (size-capped)
+   // preroll buffer while waiting for Silero. Swapped out for Silero the moment it's ready, always at
+   // an utterance boundary (never mid-speech) — see _swapToSileroWhenReady().
+-  // NB: these frames are the raw ~256ms worklet capture chunks (4096 samples @16kHz) — much coarser
++  // NB: these frames are 256ms RMS analysis windows (4096 samples @16kHz), not transport chunks — much coarser
+   // than Silero's own ~32ms internal frames above, so the counts are on a different scale.
+   BOOTSTRAP_VAD: {
+     // RMS above this (0-1 scale, ~loudness of normal speech close to the mic) counts as speech.
+@@ -151,7 +151,7 @@
+   // ── Mic level (host visualisers) ──────────────────────────────────────────────────────────────
+   // The 'level' event: a 0..1 loudness of the mic, emitted off the frames capture already produces.
+   // Purely cosmetic — nothing in the pipeline reads it — so it's tuned for how a meter LOOKS.
+-  LEVEL_MIN_MS: 45,               // rate limit; capture chunks are ~256ms, so this never throttles today but bounds a finer-grained capture
++  LEVEL_MIN_MS: 45,               // rate limit; capture chunks are 32ms; rate-limit cosmetic updates
+   LEVEL_NOISE_FLOOR_RMS: 0.004,   // below this the meter reads 0 — a quiet room must look silent, not "restless"
+   LEVEL_FULL_SCALE_RMS: 0.28,     // RMS that reads as "full" — normal close speech peaks near 0.1-0.2, so this leaves headroom without pinning at 1
+ 
+--- /dev/null
++++ b/src/voice-agent.latency.test.js
+@@ -0,0 +1,129 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { VoiceAgent } from './voice-agent.js';
++
++const tick = () => new Promise(r => setImmediate(r));
++function agentWith(chunks, tts = {}) {
++  const warmed = [];
++  const agent = new VoiceAgent({
++    llm: async function* () { yield* chunks; },
++    tts: { presynth: t => warmed.push(t), stop() {}, ...tts },
++  });
++  agent.state = 'listening'; agent._turnText = 'hello';
++  return { agent, warmed };
++}
++
++for (const chunks of [[{ text: 'Hel' }, { text: 'lo' }, { text: ' world.' }], ['I', ' can ', 'help.']]) {
++  test(`presynth accumulates fragmented text and replays exactly: ${JSON.stringify(chunks)}`, async () => {
++    const { agent, warmed } = agentWith(chunks);
++    agent._startPrefetch('hello'); await tick();
++    assert.deepEqual(warmed, [chunks[0] === 'I' ? 'I can' : 'Hello']);
++    const stream = agent._takePrefetch('hello');
++    const got = []; for await (const x of stream.gen) got.push(x);
++    assert.deepEqual(got, chunks);
++  });
++}
++
++test('adoption during pending lookahead yields buffered text without waiting, with one reader', async () => {
++  let release, active = 0, max = 0;
++  const chunks = [{ text: 'Hel' }, { text: 'lo world.' }, { tool: 'test', args: {} }];
++  let i = 0;
++  const { agent, warmed } = agentWith([]);
++  agent.llm = () => ({
++    async next() {
++      active++; max = Math.max(max, active);
++      const n = i++;
++      if (n === 1) await new Promise(r => { release = r; });
++      active--; return n < chunks.length ? { value: chunks[n], done: false } : { done: true };
++    },
++    [Symbol.asyncIterator]() { return this; },
++  });
++  agent._startPrefetch('hello'); await tick();
++  assert.ok(release);
++  const adopted = agent._takePrefetch('hello');
++  assert.deepEqual((await adopted.gen.next()).value, chunks[0]);
++  release();
++  const got = []; for await (const c of adopted.gen) got.push(c);
++  assert.deepEqual(got, chunks.slice(1)); assert.equal(max, 1);
++  assert.deepEqual(warmed, [], 'adopted stream cannot presynth behind the turn');
++});
++
++test('dropping a pending lookahead closes it without stale synthesis', async () => {
++  let release, closed = false;
++  const { agent, warmed } = agentWith([]);
++  agent.llm = async function* () {
++    try { yield { text: 'Hel' }; await new Promise(r => { release = r; }); yield { text: 'lo world.' }; }
++    finally { closed = true; }
++  };
++  agent._startPrefetch('hello'); await tick(); agent._dropPrefetch(); release(); await tick();
++  assert.equal(closed, true); assert.deepEqual(warmed, []);
++});
++
++test('lookahead is bounded, preserves non-text chunks and never opens tool gate', async () => {
++  let ran = false;
++  const { agent } = agentWith([]);
++  agent.llm = async function* (_h, _s, _sig, { toolGate }) {
++    yield { text: 'I' }; await toolGate; ran = true; yield { tool: 'test', args: {} };
++  };
++  agent.llm.executesTools = true; agent.llm.acceptsToolGate = true;
++  agent._startPrefetch('hello'); await tick(); assert.equal(ran, false);
++  const adopted = agent._takePrefetch('hello'); const got = [];
++  for await (const c of adopted.gen) got.push(c);
++  assert.equal(ran, true); assert.equal(got[1].tool, 'test');
++  const chunks = Array.from({ length: 100 }, () => ({ text: 'x' }));
++  const other = agentWith(chunks); other.agent._startPrefetch('hello'); await tick();
++  assert.equal(other.agent._prefetch.buffer.length, 32);
++  const replay = other.agent._takePrefetch('hello'); const all = [];
++  for await (const c of replay.gen) all.push(c);
++  assert.deepEqual(all, chunks);
++});
++
++test('bootstrap RMS decisions identical for 4096 and 512 sample transport', () => {
++  function run(size) {
++    const { agent } = agentWith([]); agent._useBootstrap = true;
++    const events = []; let samples = 0;
++    agent._onSpeechStart = () => { events.push(['start', samples]); agent._speaking = true; };
++    agent._onSpeechEnd = () => { events.push(['end', samples]); agent._speaking = false; };
++    const audio = new Float32Array(4096 * 10);
++    // Vary energy inside the legacy window: checking each short RMS separately would differ.
++    audio.fill(.1, 4096, 4096 + 1024); audio.fill(.1, 8192, 12288);
++    for (let i = 0; i < audio.length; i += size) { samples += size; agent._bootstrapVadTick(audio.subarray(i, i + size)); }
++    return events;
++  }
++  assert.deepEqual(run(512), run(4096));
++  assert.deepEqual(run(512), [['start',8192], ['end',36864]]);
++});
++
++test('explicit legacy preroll units retain exact samples across mixed transport sizes', () => {
++  const { agent } = agentWith([]); agent.prerollMax = 1;
++  const fed = []; agent.stt = { feed: x => fed.push(...x) };
++  const expected = [];
++  for (const size of [512, 1600, 512, 4096, 512]) {
++    const x = new Float32Array(size).fill(size / 10000);
++    agent._feed(x); expected.push(...Array.from(x, v => new Int16Array([v * 32767])[0]));
++  }
++  assert.equal(agent._prerollSamples,4096);
++  agent._speaking = true; agent._feed(new Float32Array(512).fill(.5));
++  assert.deepEqual(fed.slice(0,4096),expected.slice(-4096));
++  assert.equal(fed.length,4608); assert.equal(agent._prerollSamples,0);
++  agent.prerollMax = 0; agent._speaking = false; agent._feed(new Float32Array(512));
++  assert.equal(agent._preroll.length,0);
++});
++
++test('lookahead rejection and early end replay without losing the opening delta', async()=>{
++ for(const fail of [false,true]) {
++  const {agent}=agentWith([]);
++  agent.llm=async function*(){yield {text:'I'};if(fail)throw new Error('stream failed');};
++  agent._startPrefetch('hello');await tick();
++  const adopted=agent._takePrefetch('hello');assert.deepEqual((await adopted.gen.next()).value,{text:'I'});
++  if(fail)await assert.rejects(adopted.gen.next(),/stream failed/);
++  else assert.equal((await adopted.gen.next()).done,true);
++ }
++});
++
++test('transport cadence does not lose or duplicate continuous STT samples',()=>{
++ const {agent}=agentWith([]);const fed=[];agent.stt={continuous:true,feed:x=>fed.push(...x)};
++ const input=Float32Array.from({length:16384},(_,i)=>Math.sin(i/13)*.5);
++ for(let i=0;i<input.length;i+=512)agent._feed(input.subarray(i,i+512));
++ assert.deepEqual(fed,Array.from(input,x=>new Int16Array([x*32767])[0]));
++});

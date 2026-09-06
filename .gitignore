@@ -9,3 +9,25 @@ bench/results/.rig.lock
 
 # transient screenshot copies of the demo (orb state captures)
 examples/_s_*.html
+
+# Local nested experiment evidence; retain curated Markdown/manifests/pooled comparisons.
+bench/results/**/*.agent.raw
+bench/results/**/bb-*.json
+bench/results/**/*.log
+bench/results/**/*-status.json
+bench/results/**/pooled-*.json
+
+# Python bytecode is not source.
+__pycache__/
+
+# Evidence bundles are privately backed up; only explicitly curated files below are versioned.
+bench/results/live-ab-2026-09-05/
+bench/results/quality-v2-2026-09-05/*
+!bench/results/quality-v2-2026-09-05/manifest.json
+!bench/results/quality-v2-2026-09-05/comparison.json
+!bench/results/quality-v2-2026-09-05/pooled-v2-smalltalk-baseline.md
+!bench/results/quality-v2-2026-09-05/pooled-v2-smalltalk-candidate.md
+!bench/results/quality-v2-2026-09-05/pooled-v2-hesitation-baseline.md
+!bench/results/quality-v2-2026-09-05/pooled-v2-hesitation-candidate.md
+!bench/results/quality-v2-2026-09-05/pooled-v2-echo-baseline.md
+!bench/results/quality-v2-2026-09-05/pooled-v2-echo-candidate.md

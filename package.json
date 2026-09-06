@@ -21,7 +21,7 @@
     "index.html"
   ],
   "scripts": {
-    "test": "node --test src/*.test.js"
+    "test": "node --test src/*.test.js bench/*.test.js bench/blackbox/energy.test.js"
   },
   "keywords": [
     "voice",

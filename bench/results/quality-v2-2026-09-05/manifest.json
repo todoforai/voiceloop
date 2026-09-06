@@ -1,0 +1,53 @@
+{
+  "baseline": "pre-optimization worktree (includes reviewed cancellation patch)",
+  "candidate": "512 transport, legacy RMS/preroll, fragmented presynth",
+  "scoring": "2.0",
+  "order": [
+    "baseline",
+    "candidate",
+    "candidate",
+    "baseline",
+    "baseline",
+    "candidate",
+    "candidate",
+    "baseline",
+    "baseline",
+    "candidate"
+  ],
+  "scenarios": [
+    "smalltalk",
+    "hesitation",
+    "echo"
+  ],
+  "sha256": {
+    "src/voice-agent.js": "5b7c1fd7fc2dfa552f112dfc318a96af5f1d8ae8f5380c48f874bf5a33d61e02",
+    "baseline-src/voice-agent.js": "7d2e851443716ebefba5dcc89b4e03bced7ffd6513fab2ff2db07901866a6cdb",
+    "bench/server.js": "12555e9468d0ba9f6b1764e39e274a37881307016e04530745a474d11575f943",
+    "bench/metrics-v2.js": "e00e92ea0c517fe1b122500c15d9666374e8595ab3ae8eba5dda473aaabc0a8d",
+    "bench/blackbox/run-n.js": "2318d755465cd73805abf76359ce675bf525515300686d02ce79a0564b757cfb",
+    "bench/blackbox/driver.js": "3c3252c7dabbeb26a31a33ec2c5e122cd773243571fbcd8bab7e249717325d9c",
+    "bench/blackbox/analyze-v2.js": "fdcc4d2aaf31dd52d712fbe16c1b0fcfd4f4d377fbd0f1df0cb92b53569a0941",
+    "run-quality.mjs": "baad2418baf5b0a18442c610520b257145576057ddc1e0d742e1d6c6a2ba7cb7",
+    "bench/audio/smalltalk/person-0.raw": "dfdd962f0e231a88e6f1b356cbda7738b230494043600472d3f01db1e2c7d5c1",
+    "bench/audio/smalltalk/person-1.raw": "7367e3d591447bfafaf00d4a29a72cfb82e0c652da5a53159f69f9477365c698",
+    "bench/audio/smalltalk/person-2.raw": "572d5aff242e63a569983b86686fdf851449914a0e64b8f8360518c389e06e80",
+    "bench/audio/smalltalk/person-3.raw": "511579e1d2cf6b8ab6e965a58a914cca3860191418e71c0816fc302ea9f7ede1",
+    "bench/audio/smalltalk/person-4.raw": "51bcf7584a368bce0bf9f95eb1152988b8025eeda01cc722d2d4831fec3d094f",
+    "bench/audio/smalltalk/person-5.raw": "3034e1b777aef7e962721ef9bc63a896cd3cdf7178d515c5ff6a0ed78e81ae0a",
+    "bench/audio/hesitation/person-0.raw": "8da910d10a20be1b66cce70341d1061c54eaa87db94bfc20a7f04a717f2d5152",
+    "bench/audio/hesitation/person-1.raw": "223dfd63039d126b1c0ec6ef71893730e0aaa2cf670a43b5ce16e99f29f60150",
+    "bench/audio/hesitation/person-2.raw": "8eb492e3ad06337b009169c767c6fc2754b1574a9f489b9bd02bac4a3fbaad96",
+    "bench/audio/hesitation/person-3.raw": "60387575ed108c11bce456846f75076dd31f02d7ec84fb7ea06e2b66484becb2",
+    "bench/audio/hesitation/person-4.raw": "df95517582e382b9393404c71e9609ff8f2f955356b205637df59c1bceb96eee",
+    "bench/audio/hesitation/person-5.raw": "5c0a725903ed1b2af1eaa0706e85e19cef87957db179b068475e78ef8a909df0"
+  },
+  "node": "v24.13.0",
+  "chrome": "Google Chrome 138.0.7204.168",
+  "transcription": "faster-whisper small.en CPU int8 after all live collection; all arms same engine, no reference prompt",
+  "decision": "REJECTED FOR PROMOTION: hesitation turn fragmentation shifts mock responses in 2/5 candidate runs; 4/30 replies off script. Runtime restored to pre-optimization baseline.",
+  "finalScorerSha256": {
+    "bench/metrics-v2.js": "d9e7733b8dabc20c1e050c9628c31243a8180700efc63dc5ba831225496d04ac",
+    "bench/blackbox/analyze-v2.js": "a9ecfd81503a66645baf95498f4aa9f2124fd51c912465416b06e2517cfe14a4",
+    "bench/blackbox/transcribe-v2.py": "b95d68843ef722decc1b313d6dca04320518d2331f0db3437840df790fee0ec6"
+  }
+}

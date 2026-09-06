@@ -1641,7 +1641,7 @@ export class StreamingTTS {
   // predict()s, and presynth() below may fire while a previous reply's chain is still draining.
   // Returns a promise that RESOLVES (wav or null-on-error) — callers surface errors per-entry.
   _enqueueSynth(text, signal) {
-    const run = this._synthQ.then(() => this._synth(stripMd(text) || text, signal), () => null);   // || raw: a pure-syntax chunk strips to empty — voice the raw rather than abort
+    const run = this._synthQ.then(() => signal?.aborted ? null : this._synth(stripMd(text) || text, signal), () => null);   // || raw: a pure-syntax chunk strips to empty — voice the raw rather than abort
     this._synthQ = run.catch(() => null);
     return run;
   }
@@ -1822,7 +1822,14 @@ export class StreamingTTS {
       catch (e) { if (e?.name !== 'AbortError') streamErr = e; }   // LLM/iterator failure → surface via awaitEntry, not a silent truncation
       finally { streamDone = true; bump(); }
     })();
-    if (signal) signal.addEventListener('abort', bump, { once: true });   // wake a parked consumer the instant we abort
+    // Stop waiting for an in-flight synth on abort, without releasing the serial synth queue:
+    // Piper inference (and speculative clips without a signal) can finish only in their own time.
+    let onAbort;
+    const aborted = signal && new Promise((resolve) => { onAbort = () => { resolve(null); bump(); }; });
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    }
     // Wait until the tape has an entry at `i` — or the stream ends, we abort, or a seek arrives (a
     // backward tap while we're parked waiting for a FUTURE clip must be honored now, not after the
     // stream advances). Producer runs ahead, so this usually returns immediately; it only blocks when
@@ -1859,7 +1866,7 @@ export class StreamingTTS {
       while (true) {
         if (idx >= tape.length) { await awaitEntry(idx); if (takePending()) continue; if (idx >= tape.length) break; }   // wait for the producer to reach this sentence (stream end → done)
         const e = tape[idx];
-        const buf = await e.blobP;
+        const buf = await (aborted ? Promise.race([e.blobP, aborted]) : e.blobP);
         // Barge-in while this clip was mid-synth: the abort cancels the synth fetch, which rejects with
         // AbortError ("signal is aborted without reason"). That's the cancellation we asked for, not a
         // failed render — stop quietly, exactly like an abort during playback.
@@ -1888,7 +1895,7 @@ export class StreamingTTS {
         idx++; startNw = 0;                                      // natural end → next sentence
       }
     } finally {
-      signal?.removeEventListener('abort', bump);
+      signal?.removeEventListener('abort', onAbort);
       // A finished stream is joined (it's already done — this just collects a trailing synth). An
       // ABORTED one is DETACHED: the producer sits in it.next() on the HOST's llm generator, which
       // may ignore the abort signal and never yield again, so awaiting it here would never return

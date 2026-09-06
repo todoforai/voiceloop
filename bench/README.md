@@ -1,5 +1,9 @@
 # voice-agent-bench
 
+**Scoring update:** new runners default to explicitly labeled [v2.0](SCORING_V2.md).
+Use `BENCH_SCORING=1` only to reproduce legacy results. Old leaderboard tables are v1;
+v2 reports are separate and do not trust instrumented UI text as delivered speech.
+
 A black-box latency benchmark for **any** voice agent: a scripted "person" (pre-generated
 speech, byte-identical every run) talks into a virtual mic, the agent's speaker output is
 recorded, and every score is derived from **audio alone** — voice→voice latency, barge-in stop

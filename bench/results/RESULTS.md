@@ -1,5 +1,11 @@
 # voiceloop benchmark results
 
+> **Historical scoring v1.** The tables below have not been rewritten or upgraded in place.
+> New runs default to [scoring v2.0](../SCORING_V2.md): sustained yielding, non-oracle STT
+> attribution, audio-transcribed delivery, and explicit unknown/failure counts. Compare rows
+> only within the same scoring version. New v2 A/B results are [published separately](QUALITY_V2_2026-09-05.md): the faster
+> capture/presynthesis candidate was rejected after failing hesitation reply fidelity.
+
 Black-box measurements: a scripted "person" (pre-generated ElevenLabs speech, byte-identical
 every run) talks into a virtual mic; we record the agent's speaker output and derive every
 number from **audio alone** — the same way a human would hear it. Internal milestones

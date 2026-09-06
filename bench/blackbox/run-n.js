@@ -10,6 +10,11 @@ import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { poolV2, formatV2 } from '../metrics-v2.js';
+const scoring = process.env.BENCH_SCORING ?? '2';
+if (!['1','2'].includes(scoring)) throw new Error('BENCH_SCORING must be 1 or 2');
+const useV2 = scoring === '2';
+console.log(`Scoring version: ${scoring}`);
 
 const BENCH = normalize(join(fileURLToPath(import.meta.url), '..', '..'));   // works nested (voiceloop/bench) or standalone
 const [scenario = 'smalltalk', label = 'sut', N = '5', port = '9223'] = process.argv.slice(2);
@@ -55,7 +60,7 @@ function runDriver(runLabel) {
 
 function analyze(runFile) {
   return new Promise((res, rej) => {
-    const p = spawn('node', [join(BENCH, 'blackbox', 'analyze.js'), runFile], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const p = spawn('node', [join(BENCH, 'blackbox', useV2 ? 'analyze-v2.js' : 'analyze.js'), runFile], { stdio: ['ignore', 'pipe', 'inherit'] });
     let out = ''; p.stdout.on('data', (c) => { out += c; });
     p.on('exit', (code) => (code === 0 ? res(out) : rej(new Error('analyze failed'))));
   });
@@ -109,10 +114,20 @@ function lockRig() {
     run.browserEvents = JSON.parse(inside || '[]');
     writeFileSync(abs, JSON.stringify(run, null, 2));
     await analyze(abs);
-    reports.push(JSON.parse(readFileSync(abs.replace(/\.json$/, '.report.json'), 'utf8')));
+    reports.push(JSON.parse(readFileSync(abs.replace(/\.json$/, useV2 ? '.v2.report.json' : '.report.json'), 'utf8')));
   }
   ws.close();
 
+  if (useV2) {
+    const spec = JSON.parse(readFileSync(join(BENCH, 'scenarios', `${scenario}.json`), 'utf8'));
+    const turns = reports.flatMap(r => r.metrics.turns);
+    const metrics = poolV2(reports, spec);
+    const md = formatV2(metrics, `${label} / ${scenario} — ${reports.length}/${N} runs`);
+    const out = join(BENCH, 'results', `pooled-v2-${scenario}-${label}-${new Date().toISOString().replace(/[:.]/g, '-')}.md`);
+    writeFileSync(out, md); writeFileSync(out.replace(/\.md$/, '.json'), JSON.stringify(metrics, null, 2)); console.log(md + `\nsaved → ${out}`);
+    if (reports.length !== +N) process.exitCode = 1;
+    return;
+  }
   const turns = reports.flatMap((r) => r.metrics.turns.filter((t) => !t.missing));
   const agg = reports.map((r) => r.metrics.aggregate);
   const pool = (k) => stats(turns.map((t) => t[k]));

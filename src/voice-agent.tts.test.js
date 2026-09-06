@@ -593,3 +593,27 @@ test('an all-failing reply terminates promptly (no spin)', async () => {
   assert.equal(out, long, 'all sentences still counted as delivered');
   assert.ok(Date.now() - t0 < 4000);
 });
+
+for (const speculative of [false, true]) {
+  test(`abort returns during ${speculative ? 'speculative' : 'normal'} synth without allowing concurrent inference`, async () => {
+    const tts = new GatedTTS('v', 0);
+    const ctl = new AbortController();
+    if (speculative) tts.presynth('Hello');
+    let done = false;
+    const p = tts.speak('Hello world.', ctl.signal).then(result => { done = true; return result; });
+    while (!tts._release) await settle();
+    ctl.abort();
+    await settle();
+    const returnedWhileGated = done;
+    // A new request must STILL queue behind the old inference, even though speak() returned.
+    const next = tts._enqueueSynth('Next reply.');
+    await settle();
+    const startedWhileGated = tts._n;
+    tts._release();
+    assert.equal(await p, '', 'no audio was played');
+    await next;
+    assert.equal(returnedWhileGated, true, 'barge-in must not wait for synthesis');
+    assert.equal(startedWhileGated, 1, 'the old synth still owns the serial inference queue');
+    assert.equal(tts._n, 2, 'only the new request runs after the aborted synth drains');
+  });
+}
