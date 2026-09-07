@@ -31,3 +31,12 @@ bench/results/quality-v2-2026-09-05/*
 !bench/results/quality-v2-2026-09-05/pooled-v2-hesitation-candidate.md
 !bench/results/quality-v2-2026-09-05/pooled-v2-echo-baseline.md
 !bench/results/quality-v2-2026-09-05/pooled-v2-echo-candidate.md
+
+# Four-arm raw evidence is backed up privately; curated comparison stays in Git.
+bench/results/ablation-2026-09-07/*
+!bench/results/ablation-2026-09-07/manifest.json
+!bench/results/ablation-2026-09-07/comparison.json
+!bench/results/ablation-2026-09-07/pooled-baseline.md
+!bench/results/ablation-2026-09-07/pooled-capture.md
+!bench/results/ablation-2026-09-07/pooled-presynth.md
+!bench/results/ablation-2026-09-07/pooled-combined.md
