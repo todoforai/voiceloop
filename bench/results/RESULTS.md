@@ -96,6 +96,31 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   (both are within run-to-run jitter).
 - **deepgram + EL flash** — best overall: human voice, lowest stall count of the fast configs,
   fastest barge-in of ours (mp3 clips need no un-cancellable local inference to drain).
+
+  **984 → 862ms came from a prefetch bug the 0.1.8 rows found.** The LLM's first token was
+  arriving *after* the commit on 21/30 deepgram turns: the speculative prefetch waits for the
+  interim to go stable for 200ms, which assumes a trailing-silence debounce to wait inside.
+  Flux ends turns semantically, a median **21ms** behind its own last interim (webspeech
+  leaves ~1.2s), so the timer never fired and every flux turn paid full LLM TTFT. Providers now
+  declare their own `prefetchMs` (flux: 0); adoption went 9/12 → 30/30. Cost, counted at the
+  bench server rather than reasoned about: **7.7 LLM requests/turn vs 7.25 before** — Flux
+  revises its interim often and each revision already replaced the running speculation, so the
+  fix adds ~6%. Only one request is ever live, but each is billed for the prompt it sent.
+
+  **commit→audio is a presynth *coverage* number, not a pipeline-speed number.** Splitting
+  turns by whether the first clip was pre-synthesized during the debounce: **~200ms with,
+  ~400–500ms without**, on every config measured. A config's commit→audio median mostly
+  reports how many of its 30 turns hit the fast path (webspeech+EL: 25/30 → 179ms; deepgram+EL:
+  17/30 → 419ms). The uncovered deepgram turns are not a time shortage (its first-partial→commit
+  window is longer, 6.2s vs 3.5s) and remain the obvious next ~150ms.
+
+  **`crossOriginIsolated` is not the Piper fix it looks like.** This rig runs isolated
+  (COOP+COEP, multi-threaded ONNX); an A/B of the same SUT with and without the headers
+  (`COI=1`) found **no median improvement** (1374 → 1446ms, inside jitter — EOT, which
+  isolation cannot touch, moved 504 → 329ms in the same pair). What reproduces is a tighter tail
+  (p90 2314 → 1867). An isolated ONNX microbench shows the ceiling: 1 thread 2644ms → 4 threads
+  1935ms (−27%), then flat (8: 2058, 32: 1999). Isolation buys tail behaviour at best; switching
+  TTS engine moves the median 240–500ms.
 - **deepgram + Piper** — same latency, zero TTS cost, fully offline voice. Piper's WASM synth
   runs in a worker (`ort.env.wasm.proxy`); first-word clip ~185ms on a 32-core box.
 - **webspeech + Piper — the zero-key path, and what the demo runs by default.**
@@ -163,92 +188,6 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   barge-in also means loud non-speech noise can cut the agent's output; voiceloop's word-based
   gate needs transcribed words (both showed 0 false barge-ins here — the scripted audio is
   clean speech).
-- **TODOforAI shared-voice** — NOT a competitor: our own product's shipped voice agent
-  (`todoforai/packages/shared-voice`), benchmarked via a thin SUT page + `/llm` wire shim
-  (`packages/shared-voice/bench/`). It no longer carries a fork of this library: it consumes
-  published voiceloop 0.1.8 and adds only the JARVIS persona, LLM adapter and todo tools, so
-  these rows now measure *integration overhead*, not a second implementation.
-
-  **Re-measured on 0.1.8 (Aug 31): deepgram+EL flash 808ms (EOT 292, 0 echo words/drops),
-  webspeech+Piper 1808ms (EOT 1544).** The deepgram+Piper and webspeech+EL rows are still the
-  0.1.6 measurements.
-  **Same-hour A/B on 0.1.10 (Sep 2), Jarvis vs the standalone voiceloop page, back-to-back on
-  one rig: 849 vs 862ms** (EOT 363 vs 398, TTS first audio 433 vs 430, barge-in 1111 vs 944,
-  0 echo on both; per-run medians 772–886 vs 827–939). The integration costs nothing; the
-  808-vs-900 spread seen across days is Deepgram/network day-to-day, not code.
-
-  **History — all four rows on 0.1.6.** The previous 2241/1801ms pair was taken on 0.1.5,
-  before the TTS pre-warm fix, and is superseded — quoting it against today's stack overstates
-  our latency by ~500ms. On 0.1.6 the shipped webspeech+Piper default is **1945ms** and
-  deepgram+Piper is **1246ms** (was 1801). The pre-warm fix is the whole difference:
-  commit→first-audio on deepgram+Piper drops to 801ms.
-
-  **STT and TTS fix different halves of the turn, and only both together reach ~1s:**
-
-  | | EOT | commit→audio | v→v |
-  |---|---|---|---|
-  | webspeech + Piper (shipped) | 1558 | 455 | 1945 |
-  | webspeech + EL flash | 1561 | 179 | 1749 |
-  | deepgram + Piper | 416 | 801 | 1246 |
-  | deepgram + EL flash | 346 | 693 | 1006 |
-  | deepgram + EL flash, 0.1.8 | 292 | 419 | **808** |
-
-  Deepgram buys the EOT (~1.2s: Chrome's endpointer, not our code — voiceloop measures the
-  same 1565ms on the same browser STT). EL flash buys the synthesis. Only both together reach
-  ~1s (**1006ms**), which lands on voiceloop·deepgram's own 984ms. With ±300ms run-to-run
-  jitter that 22ms difference is not a measurement: the honest claim is **no integration
-  overhead detectable at this rig's resolution**, and what separates our shipped default from
-  the top of the table is provider choice rather than a gap in our code.
-
-  **The last row is a library fix these rows found.** Chasing the remaining commit→audio time
-  showed the LLM's first token arriving *after* the commit on 21/30 deepgram turns — the
-  speculative prefetch was never being adopted. It was never being *started*: the speculation
-  waits for the interim to go stable for 200ms, which assumes a trailing-silence debounce to
-  wait inside. Flux ends turns semantically, a median **21ms** behind its own last interim
-  (webspeech leaves ~1.2s), so the timer never fired and every flux turn paid full LLM TTFT.
-  Providers now declare their own `prefetchMs` (flux: 0). Prefetch adoption goes 9/12 → 30/30
-  and deepgram + EL flash drops **1006 → ~820ms** (four runs: 827/814/861/808), now *below*
-  voiceloop's own 984ms because the fix ships in 0.1.8 and lifts that row too when re-measured.
-  Webspeech is unchanged (1808ms, within jitter of 1945) — it keeps the 200ms wait, since
-  speculating on its every interim tick would burn requests for no gain.
-
-  Speculating on the interim tick costs requests, so we counted them at the bench server rather
-  than reasoning about it: **7.7 LLM requests per turn, against 7.25 before the change** (2 runs,
-  12 turns). Flux revises its interim often and each revision already replaced the running
-  speculation; removing the wait adds ~6%, not a new order of magnitude. Only one request is ever
-  live (each revision aborts its predecessor), but they are billed for the prompt they sent, so a
-  metered LLM pays roughly turn-count × revisions in input tokens either way.
-
-  Caveat on the per-stage column: the `TTS first audio` metric is measured from the LLM's
-  first token, so it absorbs LLM streaming time and reads high (1294ms) for webspeech+EL even
-  though presynth hit on 25/30 turns there. Measured from turn commit — what the user actually
-  waits — the same config is **179ms**. Use commit→audio when comparing TTS engines; it is the
-  pooled median of `voiceToVoiceMs - eotMs` over all 30 turns (equivalently, commit→next
-  `clip_start` scanned from the raw events — both give the same figures above).
-
-  Barge-in is word-based like voiceloop (0 false barge-ins) at 700–1226ms across configs, but
-  with n=10 and overlapping ranges those differences are not separable from noise.
-
-  Not deployable as-is: **production has no TTS proxy route** (the backend serves STT tokens
-  only), so the EL flash rows measure a route that would have to be built, and EL TTS is
-  metered where Piper is free.
-
-  **`crossOriginIsolated` is not the Piper fix it looks like.** This rig runs isolated
-  (COOP+COEP, multi-threaded ONNX) and the SUT doesn't, which is the obvious suspect for the
-  Piper gap — so it was measured directly, A/B on the same SUT (`COI=1 node bench/serve.js`):
-
-  | | v→v median | p90 | max | TTS p90 |
-  |---|---|---|---|---|
-  | not isolated (production today) | **1374** | 2314 | 2768 | 1794 |
-  | isolated | **1446** | **1867** | **1973** | **1199** |
-
-  **No median improvement was detected** — the 72ms shift is well inside run-to-run jitter (and
-  EOT, which isolation cannot affect, moved 504→329ms in the same pair, showing how much of this
-  is noise). What does reproduce is a tighter tail. An isolated ONNX microbench shows the
-  mechanism and its ceiling: 1 thread 2644ms → 4 threads 1935ms (−27%), then flat (8: 2058,
-  32: 1999) — threading caps out around 4 and never touches the typical synth. So isolating the
-  origin buys tail behaviour at best, while switching TTS engine moves the median by 240–500ms;
-  the EL flash row above is the better lever.
 - **ConvAI** — measured through their standard `@elevenlabs/client` SDK with a default-config
   agent (scribe_realtime ASR, `turn_v3`/normal eagerness, `optimize_streaming_latency: 3`; we
   even upgraded its TTS from the default turbo_v2 to the faster flash_v2). Per-run medians were
