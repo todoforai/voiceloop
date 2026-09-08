@@ -118,9 +118,9 @@ counted again. Measured from turn commit → first audio, the same warm turns ar
   (COOP+COEP, multi-threaded ONNX); an A/B of the same SUT with and without the headers
   (`COI=1`) found **no median improvement** (1374 → 1446ms, inside jitter — EOT, which
   isolation cannot touch, moved 504 → 329ms in the same pair). What reproduces is a tighter tail
-  (p90 2314 → 1867). An isolated ONNX microbench shows the ceiling: 1 thread 2644ms → 4 threads
-  1935ms (−27%), then flat (8: 2058, 32: 1999). Isolation buys tail behaviour at best; switching
-  TTS engine moves the median 240–500ms.
+  (p95 2570 → 1956, max 2768 → 1973). An isolated ONNX microbench shows the ceiling: 1 thread
+  2644ms → 4 threads 1935ms (−27%), then flat (8: 2058, 32: 1999). Isolation buys tail
+  behaviour at best; switching TTS engine moves the median 240–500ms.
 - **deepgram + Piper** — same latency, zero TTS cost, fully offline voice. Piper's WASM synth
   runs in a worker (`ort.env.wasm.proxy`); first-word clip ~185ms on a 32-core box.
 - **webspeech + Piper — the zero-key path, and what the demo runs by default.**
