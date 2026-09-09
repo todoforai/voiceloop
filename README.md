@@ -17,7 +17,7 @@ A zero-dependency JavaScript library that runs the full voice loop — **VAD →
 - **Real barge-in** — triggers on transcribed *novel words*, not mic energy, so the agent's own voice never cuts it off.
 - **Self-echo filtering** — 0 self-interruptions with AEC off (Pipecat cut itself 20/30, OpenAI Realtime 17/30 [bench](bench/results/RESULTS.md#scenario-echo-smalltalk--speakermic-coupling-15db--30ms)).
 - **First audio <1s** — TTS speaks sentence 1 while the LLM writes sentence 2, and the LLM call starts speculatively during your end-of-turn pause.
-- **Serialized turns** — rapid-fire turns, tool results, holds and replays can never talk over each other. Locked in by 178 tests.
+- **Serialized turns** — rapid-fire turns, tool results, holds and replays can never talk over each other. Locked in by 184 tests.
 - **Local-first** — Silero VAD and Piper TTS run as WASM in the tab: free, no cloud round-trip (CDN, then cache).
 
 Extra:
@@ -169,7 +169,8 @@ const agent = new VoiceAgent({
     // toolGate: only for adapters that run tools themselves — see below; ignore it otherwise
     for await (const delta of myProvider.stream({ history, system, signal })) {
       yield { text: delta };                        // speech text → streamed into TTS
-      // yield { tool: 'name', args: {...} };       // tool call → fired during playback
+      // yield { tool: 'name', args: {...} };       // tool call → the agent runs it during playback;
+      //                                            // the NEXT user turn sees its tool_result
     }
   },
 });
@@ -190,13 +191,13 @@ const agent = new VoiceAgent({
 });
 ```
 
-Tool calls execute while the agent is still talking. Results are recorded in a per-turn ledger so the model never re-fires the same call, and `agent.notify('[TOOL RESULT get_weather] 22°C sunny')` relays an async outcome back for a spoken follow-up — bursts of results collapse into one reply instead of three interrupting monologues.
+Tool calls execute while the agent is still talking. The default adapter is a loop: it feeds each result back to the model inside the same reply, so the model keeps talking with the answer in hand (bounded to 6 model messages per turn). Results are recorded natively (tool_use / tool_result) so the model never re-fires the same call, and `agent.notify('[TOOL RESULT get_weather] 22°C sunny')` relays an async outcome back for a spoken follow-up — bursts of results collapse into one reply instead of three interrupting monologues.
 
 Tools are **dispatched, not awaited**: the turn completes when the agent stops speaking, whatever the tool is still doing. A slow or hung tool can never stall the conversation, and a tool is free to `await agent.notify(...)` with its own result. Long work belongs in a tool that returns promptly ("checking that now") and delivers the outcome later via `notify()`.
 
 ### Adapters that run tools themselves
 
-Some adapters (agent loops) execute tools **inside** the generator, feeding results back to the model so it keeps talking with the answer in hand — all within one turn. Declare two flags so voiceloop adapts:
+The default `makeOpenAILLM` and any agent loop execute tools **inside** the generator, feeding results back to the model so it keeps talking with the answer in hand — all within one turn. A custom loop declares two flags so voiceloop adapts, and yields `{ newMessage: true }` where the model's next message starts:
 
 ```js
 async function* myAgentLoop(history, system, signal, { toolGate } = {}) {
@@ -204,6 +205,7 @@ async function* myAgentLoop(history, system, signal, { toolGate } = {}) {
     if (ev.type === 'text')       yield { text: ev.delta };
     if (ev.type === 'tool_start') yield { tool: ev.name, id: ev.id, args: ev.args, running: true };
     if (ev.type === 'tool_end')   yield { tool: ev.name, id: ev.id, args: ev.args, result: ev.result };
+    if (ev.type === 'message_start' && !first) yield { newMessage: true };
   }
 }
 myAgentLoop.executesTools  = true;   // chunks carry the outcome — voiceloop reports, never re-runs

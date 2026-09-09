@@ -59,9 +59,10 @@ export type HistoryBlock =
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
 export type HistoryMessage = { role: string; content: string | HistoryBlock[] };
 // Pluggable LLM: lazy async generator over the chat history (fetch fires on first pull).
-// The default (makeOpenAILLM) yields bare tool chunks that the AGENT executes; their results are
-// recorded as tool_result and the agent starts a follow-up turn so the model reacts to them.
-// An agent LOOP that runs tools inside its own generator declares the two flags below.
+// The default (makeOpenAILLM) is a tool LOOP: it runs each call inside the generator, feeds the
+// result back to the model and marks the model's next message with { newMessage }. A plain adapter
+// (no flags) yields bare tool chunks that the AGENT executes and records; the NEXT user turn sees
+// the tool_result (no reaction turn is started).
 export interface LLM {
   (
     history: HistoryMessage[],
@@ -71,12 +72,12 @@ export interface LLM {
   ): AsyncIterable<LLMChunk>;
   /** This generator is a tool LOOP: it runs every call itself and feeds the result back inside the
    *  same reply (chunks carry `result`/`error`, optionally preceded by a `running` announcement).
-   *  The agent never executes its calls and never starts a reaction turn for them. */
+   *  The agent never executes its calls. */
   executesTools?: boolean;
   /** This generator awaits `options.toolGate` before ANY tool executes. Required to keep
    *  speculative prefetch on: prefetch starts from an uncommitted interim, and the gate is what
    *  stops a speculation from firing a real side effect. `executesTools` without this silently
-   *  disables prefetch (see voice-agent.js:793). */
+   *  disables prefetch (see _startPrefetch in voice-agent.js). */
   acceptsToolGate?: boolean;
 }
 

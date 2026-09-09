@@ -1,9 +1,10 @@
 // ── Default LLM: any OpenAI-compatible /chat/completions endpoint ───────────────────────────────
-// Normalizes the OpenAI streaming wire format to the VoiceAgent chunk contract:
-//   { text }          — one per content delta (streamed straight into the TTS)
-//   { tool, args, id }— one per COMPLETED tool call (arguments accumulate across deltas; a call
-//                       whose accumulated arguments never parse as JSON is DROPPED with a warning —
-//                       firing a side-effecting tool with guessed/empty args would be worse)
+// A LOOP adapter (executesTools + acceptsToolGate): one turn may span several model messages. Each
+// completion streams { text } deltas straight to the TTS; a COMPLETED tool call (arguments accumulate
+// across deltas; a call whose arguments never parse as JSON is DROPPED with a warning — firing a
+// side-effecting tool with guessed args would be worse) is announced ({ running: true }), executed
+// here, reported with its outcome, fed back to the model as a tool message, and the model's next
+// message starts after a { newMessage } boundary — bounded by MAX_ROUNDS per turn.
 //
 // Works against OpenAI, Groq, Cerebras, Together, OpenRouter, Ollama, vLLM, LiteLLM… anything that
 // speaks /chat/completions SSE. NEVER ship a provider secret key to a public page — in production
@@ -37,6 +38,19 @@ export const toOpenAIMessages = (history) => history.flatMap((m) => {
   return text ? [...results, { role: m.role, content: text }] : results;   // OpenAI has no is_error → text-marked
 });
 
+// Render a host tool's return value as model-facing text (the tool_result content in history, and
+// what adapters feed back to the model). Never throws: the side effect already RAN, so an
+// unserializable result must not retro-fail the call and invite a retry.
+export const toolResultText = (result) => {
+  if (result === undefined) return 'ok';
+  if (typeof result === 'string') return result;
+  if (result && typeof result.text === 'string' && typeof result.ok === 'boolean')
+    return result.ok ? result.text : `[failed] ${result.text}`;
+  try { return JSON.stringify(result) ?? 'ok'; } catch { return String(result); }
+};
+
+const MAX_ROUNDS = 6;   // model messages per user turn — a model that keeps calling tools then waits for the user
+
 export function makeOpenAILLM({ llmUrl, apiKey = '', model = '', maxTokens = 1024, tools = {}, fetchFn, extraBody = {} } = {}) {
   const toolSpecs = Object.entries(tools).map(([name, t]) => ({
     type: 'function',
@@ -47,15 +61,15 @@ export function makeOpenAILLM({ llmUrl, apiKey = '', model = '', maxTokens = 102
     },
   }));
 
-  return async function* (history, system, signal) {
-    if (!llmUrl) throw new Error('VoiceAgent: no `llm` generator and no `llmUrl` configured — pass one of them');
+  // One completion: streams { text } and COMPLETED { tool, args, id } chunks for a wire-shaped message list.
+  async function* streamOnce(messages, signal) {
     const doFetch = fetchFn ?? fetch;
     const r = await doFetch(llmUrl, {
       method: 'POST', signal,
       headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
       body: JSON.stringify({
         stream: true,
-        messages: [{ role: 'system', content: system }, ...toOpenAIMessages(history)],
+        messages,
         max_tokens: maxTokens,
         ...(model ? { model } : {}),
         ...(toolSpecs.length ? { tools: toolSpecs } : {}),
@@ -76,9 +90,6 @@ export function makeOpenAILLM({ llmUrl, apiKey = '', model = '', maxTokens = 102
       for (const c of pending.values()) {
         if (!c.name) continue;
         let args;
-        // Truncated/invalid argument JSON (aborted stream, provider bug) → DROP the call. The agent
-        // dispatches tools immediately, so guessing `{}` could fire a real side effect with the
-        // wrong arguments.
         try { args = c.args ? JSON.parse(c.args) : {}; }
         catch { console.warn(`makeOpenAILLM: dropping tool call "${c.name}" — arguments never parsed: ${c.args}`); continue; }
         yield { tool: c.name, args, ...(c.id ? { id: c.id } : {}) };
@@ -86,9 +97,8 @@ export function makeOpenAILLM({ llmUrl, apiKey = '', model = '', maxTokens = 102
       pending.clear();
     };
 
-    // One SSE data payload → zero or more chunks. Returns 'done' on [DONE].
+    // One SSE data payload → zero or more chunks.
     const handle = function* (payload) {
-      if (payload === '[DONE]') return;   // caller checks the sentinel itself
       let m; try { m = JSON.parse(payload); } catch { return; }   // tolerate keep-alive junk
       if (m.error) throw new Error(m.error.message ?? String(m.error));
       const choice = m.choices?.[0];
@@ -136,5 +146,46 @@ export function makeOpenAILLM({ llmUrl, apiKey = '', model = '', maxTokens = 102
     } finally {
       reader.cancel().catch(() => {});
     }
+  }
+
+  const gen = async function* (history, system, signal, { toolGate } = {}) {
+    if (!llmUrl) throw new Error('VoiceAgent: no `llm` generator and no `llmUrl` configured — pass one of them');
+    // Anthropic-shaped working history (what VoiceAgent keeps); re-serialized to the wire every round
+    // so tool_use/tool_result pairing stays in ONE place (toOpenAIMessages).
+    const hist = [...history];
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      let text = '';
+      const calls = [];   // { id, tool, args, outcome: Promise<{result}|{error}> }
+      const seen = new Set();
+      for await (const c of streamOnce([{ role: 'system', content: system }, ...toOpenAIMessages(hist)], signal)) {
+        if (c.text) { text += c.text; yield c; continue; }
+        const id = c.id || `call-${round}-${calls.length + 1}`;   // announcements need an id to be replaced in place
+        if (seen.has(id)) continue;
+        seen.add(id);
+        yield { tool: c.tool, id, args: c.args, running: true };
+        // Execute NOW, in parallel with TTS. A speculative run waits at the gate: it rejects when the
+        // speculation is dropped, so the tool never fires for a turn the user was still amending.
+        const outcome = (async () => {
+          if (toolGate) await toolGate;
+          try { return { result: await tools[c.tool]?.run?.(c.args) }; }
+          catch (e) { return { error: e?.message || String(e ?? 'failed') }; }
+        })();
+        calls.push({ id, tool: c.tool, args: c.args, outcome });
+      }
+      if (!calls.length) return;
+      const results = [];
+      for (const c of calls) {
+        const o = await c.outcome;
+        yield { tool: c.tool, id: c.id, args: c.args, ...o };
+        const failed = 'error' in o || (o.result && typeof o.result === 'object' && o.result.ok === false);
+        results.push({ type: 'tool_result', tool_use_id: c.id, content: 'error' in o ? String(o.error) : toolResultText(o.result), ...(failed ? { is_error: true } : {}) });
+      }
+      hist.push({ role: 'assistant', content: [...(text ? [{ type: 'text', text }] : []), ...calls.map((c) => ({ type: 'tool_use', id: c.id, name: c.tool, input: c.args ?? {} }))] });
+      hist.push({ role: 'user', content: results });
+      yield { newMessage: true };
+    }
   };
+  gen.executesTools = true;
+  gen.acceptsToolGate = true;
+  return gen;
 }

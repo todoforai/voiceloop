@@ -186,7 +186,9 @@ test('entering hold while a turn is queued does not LOSE the accepted utterance'
 
 // ── Tool calls: the create_todo spam regression ──────────────────────────────────────────────────
 // The loop that produced duplicate TODOs: the model re-called a tool whose result it never saw. With
-// NATIVE records the call and its tool_result are in history before the follow-up turn runs.
+// NATIVE records the call and its tool_result are in history before the next turn runs. (A plain
+// adapter's calls are run by the agent and seen by the NEXT user turn; a loop adapter — the default
+// makeOpenAILLM — feeds results back inside the same reply.)
 
 // An LLM that calls `create_todo` whenever it sees no tool_use of its own — i.e. exactly the naive
 // behaviour of a model reading its history.
@@ -196,7 +198,7 @@ async function* toolLLM(history) {
   yield { text: said ? 'already running' : "I'm on it" };
 }
 
-test('TOOL: the result is recorded natively and the follow-up turn never re-triggers the tool', async () => {
+test('TOOL: the result is recorded natively and the next turn never re-triggers the tool', async () => {
   const tts = makeFakeTTS();
   const runs = [];
   const { agent } = makeAgent({
@@ -208,15 +210,17 @@ test('TOOL: the result is recorded natively and the follow-up turn never re-trig
 
   agent.sendUserText('build me a landing page');
   for (let i = 0; i < 40; i++) await settle();
-
   assert.equal(runs.length, 1, 'the tool ran exactly once');
-  assert.equal(tts.maxConcurrent, 1, 'the follow-up never spoke over the turn that called it');
   const [use] = toolUses(agent.history, 'create_todo');
   assert.ok(use, 'the call is a native tool_use block');
   assert.deepEqual(use.input, { content: 'do the thing' });
   assert.equal(resultFor(agent.history, use.id)?.content, 'Created todo abc1234.', 'its tool_result pairs by id');
-  assert.match(spokenText(agent.history), /already running/, 'the model reacted to the result in a follow-up turn');
-  assert.equal(agent.history.at(-1).role, 'assistant', 'the conversation ends on the informed reply');
+  assert.equal(agent.history.at(-1).role, 'user', 'no reaction turn: the record waits for the next user turn');
+  agent.sendUserText('and?');
+  for (let i = 0; i < 40; i++) await settle();
+  assert.equal(runs.length, 1, 'the next turn saw the record and did not re-call');
+  assert.equal(tts.maxConcurrent, 1, 'never spoke over itself');
+  assert.match(spokenText(agent.history), /already running/, 'the model answered over the result');
   assert.ok(!JSON.stringify(agent.history).includes('[TOOL'), 'no textual tool notation anywhere in history');
 });
 
@@ -785,7 +789,7 @@ test('TEXT: history carries no textual tool notation — only native blocks', as
   assert.ok(!JSON.stringify(agent.history).includes('[TOOL'));
 });
 
-test('TEXT: a failing tool records an is_error tool_result the model can react to', async () => {
+test('TEXT: a failing tool records an is_error tool_result', async () => {
   const llm = async function* (history) {
     if (lastIsToolResult(history)) { yield { text: 'that failed.' }; return; }
     yield { tool: 'boom', args: {} };
@@ -795,18 +799,7 @@ test('TEXT: a failing tool records an is_error tool_result the model can react t
   for (let i = 0; i < 40; i++) await settle();
   const [r] = toolResults(agent.history);
   assert.deepEqual(r, { type: 'tool_result', tool_use_id: toolUses(agent.history)[0].id, content: 'kaput', is_error: true });
-  assert.match(spokenText(agent.history), /that failed/);
   assert.deepEqual(events.find((e) => e.type === 'tool').result, { text: 'kaput', ok: false });
-});
-
-test('TEXT: a runaway tool loop is bounded per user utterance', async () => {
-  let calls = 0;
-  const llm = async function* () { calls++; yield { tool: 'again', args: { n: calls } }; };
-  const { agent } = makeAgent({ llm, opts: { tools: { again: { description: '', params: {}, run: () => 'more' } } } });
-  agent.sendUserText('go');
-  for (let i = 0; i < 200; i++) await settle();
-  assert.ok(calls <= 8, `stopped after a bounded number of rounds (${calls})`);
-  assert.equal(agent.state, 'listening');
 });
 
 // ── Liveness: host code that never returns must not wedge the turn loop ─────────────────────────
@@ -1300,12 +1293,11 @@ test('EVENT ORDER: assistant events carry the turn they belong to (late events a
   }
 });
 
-test('RUNNING: an outcome landing AFTER a barge-in mid-execution is patched into its tool_result and the model reacts', async () => {
+test('RUNNING: an outcome landing AFTER a barge-in mid-execution is patched into its tool_result', async () => {
   let release;
   const done = new Promise((r) => { release = r; });
   const llm = async function* (history) {
     const last = history[history.length - 1].content;
-    if (typeof last === 'string' && last.startsWith('[EVENT tool_result]')) { yield { text: `it said ${resultFor(history, 'c1').content}.` }; return; }
     if (last !== 'run it') { yield { text: 'not yet.' }; return; }
     yield { text: 'running. ' };
     yield { tool: 'run_shell', id: 'c1', args: { cmd: 'sleep 8' }, running: true };
@@ -1338,12 +1330,10 @@ test('RUNNING: an outcome landing AFTER a barge-in mid-execution is patched into
   const tools = events.filter((e) => e.type === 'tool' && e.id === 'c1' && !e.running);
   assert.deepEqual(tools.at(-1).result, 'CHARLIE', 'the chip ends on the real outcome, not "interrupted"');
   assert.equal(resultFor(agent.history, 'c1').content, 'CHARLIE', 'the pending tool_result was filled in place');
-  assert.match(spokenText(agent.history), /it said CHARLIE/, 'and the model got to react to it');
-  const finals = events.filter((e) => e.type === 'assistant' && e.final).map((e) => e.text);
-  assert.ok(finals.includes('it said CHARLIE.'), `model replied over the result: ${JSON.stringify(finals)}`);
+  assert.equal(agent.history.filter((m) => m.role === 'assistant').length, 2, 'no reaction turn was spawned');
 });
 
-test('LATE: a result landing WHILE another reply streams gets its own reaction over the patched block', async () => {
+test('LATE: a result landing WHILE another reply streams is patched in place; the NEXT turn sees it', async () => {
   let release, releaseReply;
   const done = new Promise((r) => { release = r; });
   const replyGate = new Promise((r) => { releaseReply = r; });
@@ -1353,8 +1343,7 @@ test('LATE: a result landing WHILE another reply streams gets its own reaction o
     requests.push(last);
     if (last === 'go') { yield { text: 'running. ' }; yield { tool: 'slow', args: {} }; return; }
     if (last === 'anything else?') { await replyGate; yield { text: 'no.' }; return; }
-    if (typeof last === 'string' && last.startsWith('[EVENT tool_result]')) { yield { text: `got ${resultFor(history, 'call-1-1').content}.` }; return; }
-    yield { text: 'unexpected' };
+    yield { text: `got ${resultFor(history, 'call-1-1').content}.` };
   };
   const { agent } = makeAgent({ llm, opts: { tools: { slow: { run: () => done.then(() => 'ZULU') } } } });
   agent.sendUserText('go');
@@ -1367,8 +1356,10 @@ test('LATE: a result landing WHILE another reply streams gets its own reaction o
   releaseReply();
   for (let i = 0; i < 40; i++) await settle();
   assert.equal(resultFor(agent.history, 'call-1-1').content, 'ZULU', 'patched in place');
-  assert.match(spokenText(agent.history), /got ZULU/, 'a fresh request saw the patched result');
-  assert.equal(requests.length, 3, 'exactly one extra reaction');
+  assert.equal(requests.length, 2, 'no reaction turn');
+  agent.sendUserText('and?');
+  for (let i = 0; i < 40; i++) await settle();
+  assert.match(spokenText(agent.history), /got ZULU/, 'the next request carried the patched result');
 });
 
 test('ROUNDS: a loop adapter\'s parallel batch (start A, immediate fail A, start B, result B) is ONE model message', async () => {
