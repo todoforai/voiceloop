@@ -43,7 +43,10 @@ export interface VoiceTool {
 // reports it instead of running it again.
 export type LLMChunk =
   | { text: string }
-  | { tool: string; id?: string; args: Record<string, unknown>; result?: unknown; error?: string; running?: true };
+  | { tool: string; id?: string; args: Record<string, unknown>; result?: unknown; error?: string; running?: true }
+  /** Loop adapters only: the model's NEXT message starts here (after the results it fed back), so
+   *  the agent records text/calls before and after as separate assistant messages. */
+  | { newMessage: true };
 // The conversation as the model sees it, Anthropic-shaped. Plain turns are strings; a turn in which
 // the assistant called tools is recorded NATIVELY: an assistant message of text + tool_use blocks,
 // then a user message holding the matching tool_result blocks (content = the result text the model

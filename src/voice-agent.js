@@ -76,7 +76,8 @@ const withTimeout = (p, ms, fallback) => {
   ]);
 };
 
-const callArgs = (c) => JSON.stringify(c.args ?? {}, Object.keys(c.args ?? {}).sort());
+const callArgs = (c) => JSON.stringify(c.args ?? {}, (_k, v) =>
+  v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]])) : v);
 const callKey = (c) => c.id ? `id:${c.id}` : `${c.tool} ${callArgs(c)}`;
 // Render a host tool's return value as model-facing text (the tool_result content in history, and
 // what LLM adapters feed back to the model). Never throws: the side effect already RAN,
@@ -314,7 +315,7 @@ export class VoiceAgent {
     this._abort = null;            // aborts the in-flight LLM
     this._replySeq = 0;            // bumped per reply-generating turn; a queued turn drops itself if a newer one exists
     this._toolRounds = 0;          // tool-result reactions since the user last spoke (see _runTurn react)
-    this._late = [];               // outcomes landed after the last request was built (see _runTurn react)
+    this._unseenResults = false;   // a tool_result was patched after the last request was built (see _runTurn react)
     this._preroll = []; this._wasSpeaking = false; this._closed = false; this._destroyed = false;
     // Diagnostic tap: last ~30s of the exact i16 frames handed to STT + delivery-stall gaps, for
     // dumpAudio() (replay any "it misheard me" run and prove capture clean-or-not).
@@ -843,23 +844,23 @@ export class VoiceAgent {
       const pf = speech && text ? this._takePrefetch(text) : (this._dropPrefetch(), null);
       if (text) this.history.push({ role: 'user', content: text });
       // A reaction turn owes a reply only for results no request has carried yet: either the
-      // tool_result record is still the last message, or a late outcome landed after the last
-      // request was built (_late; cleared when a request starts) — then a short [EVENT] user turn,
-      // the host's channel for out-of-band facts, points the model at the patched block (a request
-      // can't end on an assistant message). Bounded per user utterance (_toolRounds, reset on
-      // every accepted user turn): a model that keeps calling tools gets MAX_TOOL_ROUNDS
-      // reactions, then waits for the user.
+      // tool_result record is still the last message, or a late outcome was patched in after the
+      // last request was built (_unseenResults; cleared when a request starts) — then a short
+      // [EVENT] user turn, the host's channel for out-of-band facts, points the model at the patched
+      // block (a request can't end on an assistant message). Bounded per user utterance
+      // (_toolRounds, reset on every accepted user turn): a model that keeps calling tools gets
+      // MAX_TOOL_ROUNDS reactions, then waits for the user.
       if (react) {
         const last = this.history[this.history.length - 1];
-        const owed = (last?.role === 'user' && Array.isArray(last.content)) || this._late.length;
-        if (!owed || this._toolRounds >= MAX_TOOL_ROUNDS) { this._late.length = 0; return; }
+        const owed = (last?.role === 'user' && Array.isArray(last.content)) || this._unseenResults;
+        if (!owed || this._toolRounds >= MAX_TOOL_ROUNDS) { this._unseenResults = false; return; }
         this._toolRounds++;
-        if (last?.role !== 'user') this.history.push({ role: 'user', content: `[EVENT tool_result] ${this._late.map((c) => c.tool).join(', ')} finished — see the tool_result above.` });
+        if (last?.role !== 'user') this.history.push({ role: 'user', content: '[EVENT tool_result] a pending tool finished — see its tool_result above.' });
       }
       // Reply only if the conversation now ends on a user turn (a raced turn may have already
       // replied). pf is always null here: if we pushed a user turn it IS the last entry.
       if (this.history[this.history.length - 1]?.role !== 'user') return;
-      this._late.length = 0;                        // this request carries every result landed so far
+      this._unseenResults = false;                  // this request carries every result landed so far
       this._set('thinking');                        // LLM stage
       this._abort = pf?.ctl ?? new AbortController();   // adopted prefetch keeps ITS controller so barge-in aborts the right fetch
       await this._speakTurn(this._abort.signal, pf?.gen, seq);   // _speakTurn never throws — errors surface via onEvent
@@ -889,33 +890,27 @@ export class VoiceAgent {
     //
     // Round boundary: the default adapter's stream is ONE model message (text + calls together;
     // the reaction to the results comes from _continue). A loop adapter feeds results back inside
-    // the stream, so anything after an outcome landed is the model's NEXT message.
+    // the stream and marks where the model's NEXT message starts with a { newMessage } chunk.
     let answer = '';
     const rounds = [], calls = [];   // calls: every act this turn saw, for dedup — outlives recording
     const loop = !!this.llm.executesTools;
-    const round = () => {
-      const r = rounds[rounds.length - 1];
-      if (r && !(loop && r.settled)) return r;
-      rounds.push({ text: '', calls: [] }); return rounds[rounds.length - 1];
-    };
+    const round = () => rounds[rounds.length - 1] ?? (rounds.push({ text: '', calls: [] }), rounds[rounds.length - 1]);
+    const newRound = () => { const r = rounds[rounds.length - 1]; if (r && (r.text || r.calls.length)) rounds.push({ text: '', calls: [] }); };
     let n = 0;
     // Accept a call once: identity is the provider id, else name+args (an id-less repeat is a
-    // provider re-emitting its buffered call). `owner` says who executes it — the adapter (the
-    // chunk announces or carries the outcome: it ran the tool itself and feeds the result back
-    // inside its own reply) or the agent (_runTool runs it) — fixed at acceptance.
+    // provider re-emitting its buffered call). A loop adapter owns execution AND feeds the result
+    // back inside its reply; anything else is agent-run (or agent-reported when the chunk already
+    // carries an outcome) and gets a reaction turn.
     const accept = (item) => {
       const key = callKey(item);
       let c = calls.find((x) => x.key === key);
       if (c) return c;
-      const adapterRan = loop || item.running || 'result' in item || 'error' in item;
-      c = { ...item, key, id: item.id || `call-${turn}-${++n}`, owner: adapterRan ? 'adapter' : 'agent' };
+      c = { ...item, key, id: item.id || `call-${turn}-${++n}`, owner: loop ? 'adapter' : 'agent' };
       calls.push(c); round().calls.push(c);
       return c;
     };
-    const outcome = (c, item) => {
-      if ('result' in item) c.result = item.result; else if ('error' in item) c.error = item.error;
-      const r = rounds.find((r) => r.calls.includes(c)); if (r) r.settled = true;   // already recorded → no round to close
-    };
+    const outcome = (c, item) => { if ('result' in item) c.result = item.result; else if ('error' in item) c.error = item.error; };
+    const hasOutcome = (c) => 'result' in c || 'error' in c;
     // An outcome may land AFTER the turn recorded the call (a hung tool, a barge-in mid-execution):
     // its tool_result block is patched IN PLACE so the next request carries the real result, and the
     // model gets to react to it (see _continue).
@@ -923,7 +918,7 @@ export class VoiceAgent {
       if (!c.block) return;                                  // not recorded yet — record() picks the outcome up
       if (!c.consumed) { Object.assign(c.block, toolResultBlock(c)); c.consumed = true; }
       this._dropPrefetch();                                  // a speculation serialized the pending block — stale
-      this._late.push(c); this._continue();
+      this._unseenResults = true; this._continue();
     });
     const record = (keptLen) => {
       let budget = keptLen;
@@ -951,42 +946,39 @@ export class VoiceAgent {
     // that the outcome chunk replaces in place (same id). A turn that dies before an announced call's
     // outcome arrives finalizes the CHIP as interrupted; the history keeps the call with a pending
     // tool_result, patched in place if the outcome still lands.
-    const announced = new Map();
-    // Latched once this turn has finalized its chips (finishInterrupted ran). A barge-in detaches the
-    // LLM producer from TTS, so it can wake AFTER we returned and keep pushing chunks: a late
+    // `finalized` latches once this turn has finalized its chips. A barge-in detaches the LLM
+    // producer from TTS, so it can wake AFTER we returned and keep pushing chunks: a late
     // announcement would open a spinner nothing will ever close, and a late UNEXECUTED call is work
     // the user cut off. Past the latch only outcomes flow (a tool the adapter really ran is truth).
     let finalized = false;
     const finishInterrupted = () => {
       finalized = true;
-      for (const r of announced.values())
-        this.onEvent({ type: 'tool', name: r.tool, id: r.id, args: r.args, result: { ok: false, text: 'interrupted — did not finish' } });
-      announced.clear();
+      for (const c of calls) if (c.announced && !hasOutcome(c))
+        this.onEvent({ type: 'tool', name: c.tool, id: c.id, args: c.args, result: { ok: false, text: 'interrupted — did not finish' } });
     };
     const tapped = (async function* (self, src) {
       for await (const item of src) {
         // tool_use → fire NOW, in parallel with TTS. Identical repeats within one turn are the SAME
         // act (a provider re-emitting its buffered call, or the model asking twice) — run it once.
+        if (item.newMessage) { newRound(); continue; }     // loop adapter: the model's next message starts here
         if (item.tool) {
-          const hasOutcome = 'result' in item || 'error' in item;
           const known = calls.find((x) => x.key === callKey(item));
-          if (item.running || (loop && !hasOutcome)) {   // announcement; the outcome chunk below does the work
+          if (item.running || (loop && !hasOutcome(item))) {   // announcement; the outcome chunk below does the work
             // An id-less announcement can never be replaced in place NOR finalized (both key on id),
             // so it could only ever become a stuck spinner — drop it. The outcome chunk still lands.
             if (finalized || !item.id || known) continue;
-            announced.set(item.id, item); accept(item);
+            accept(item).announced = true;
             self.onEvent({ type: 'tool', name: item.tool, id: item.id, args: item.args, running: true });
             continue;
           }
-          if (item.id) announced.delete(item.id);
           if (known) {                                     // the announced call's outcome, or a re-emit
-            if (known.ran || !hasOutcome) continue;
+            if (known.ran || !hasOutcome(item)) continue;
             outcome(known, item); settle(known);
             continue;
           }
-          if (finalized && !hasOutcome) continue;          // late bare call: the user cut this reply off
+          if (finalized && !hasOutcome(item)) continue;    // late bare call: the user cut this reply off
           const c = accept(item);
-          if (hasOutcome) outcome(c, item);
+          outcome(c, item);
           if (finalized) record(0);                        // late outcome of an unseen call: give it a record of its own (settle schedules the reaction)
           settle(c);
           continue;

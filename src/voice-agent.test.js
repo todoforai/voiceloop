@@ -947,6 +947,7 @@ test('RUNNING: announcement is reported, replaced by the outcome, and never exec
   const llm = async function* () {
     yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, running: true };    // adapter: executing now
     yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' };  // adapter: outcome attached
+    yield { newMessage: true };                                                    // adapter: the model's informed follow-up
     yield { text: 'one file.' };
   };
   llm.executesTools = true;
@@ -1104,8 +1105,10 @@ test('RUNNING: a re-emitted running/outcome pair does not resurrect a settled ch
     yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' };
     yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, running: true };    // adapter re-emits
     yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' };
+    yield { newMessage: true };
     yield { text: 'one file.' };
   };
+  llm.executesTools = true;
   const { agent, events } = makeAgent({ llm });
   agent.sendUserText('go');
   for (let i = 0; i < 40; i++) await settle();
@@ -1366,4 +1369,37 @@ test('LATE: a result landing WHILE another reply streams gets its own reaction o
   assert.equal(resultFor(agent.history, 'call-1-1').content, 'ZULU', 'patched in place');
   assert.match(spokenText(agent.history), /got ZULU/, 'a fresh request saw the patched result');
   assert.equal(requests.length, 3, 'exactly one extra reaction');
+});
+
+test('ROUNDS: a loop adapter\'s parallel batch (start A, immediate fail A, start B, result B) is ONE model message', async () => {
+  const llm = async function* () {
+    yield { text: 'doing both. ' };
+    yield { tool: 'a', id: 'a1', args: {}, running: true };
+    yield { tool: 'a', id: 'a1', args: {}, error: 'bad args' };        // validation failure lands before B is announced
+    yield { tool: 'b', id: 'b1', args: {}, running: true };
+    yield { tool: 'b', id: 'b1', args: {}, result: 'ok-b' };
+    yield { newMessage: true };
+    yield { text: 'a failed, b done.' };
+  };
+  llm.executesTools = true;
+  const { agent } = makeAgent({ llm });
+  agent.sendUserText('go');
+  for (let i = 0; i < 20; i++) await settle();
+  const [, call, results, follow] = agent.history;
+  assert.deepEqual(call.content.map((b) => b.type), ['text', 'tool_use', 'tool_use'], 'both calls in one assistant message');
+  assert.deepEqual(results.content.map((b) => [b.tool_use_id, !!b.is_error]), [['a1', true], ['b1', false]]);
+  assert.equal(follow.content, 'a failed, b done.');
+});
+
+test('DEDUP: id-less calls with different NESTED args are distinct acts', async () => {
+  const runs = [];
+  const llm = async function* (history) {
+    if (lastIsToolResult(history)) { yield { text: 'done.' }; return; }
+    yield { tool: 'q', args: { filter: { a: 1 } } };
+    yield { tool: 'q', args: { filter: { b: 2 } } };
+  };
+  const { agent } = makeAgent({ llm, opts: { tools: { q: { run: (a) => runs.push(a.filter) } } } });
+  agent.sendUserText('go');
+  for (let i = 0; i < 20; i++) await settle();
+  assert.deepEqual(runs, [{ a: 1 }, { b: 2 }]);
 });
