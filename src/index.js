@@ -11,5 +11,5 @@ export {
 } from './stt.js';
 export { ElevenLabsTTS } from './tts-elevenlabs.js';
 export { loadVoiceDeps, prewarmVoice } from './deps.js';
-export { makeOpenAILLM } from './llm-openai.js';
+export { makeOpenAILLM, toOpenAIMessages } from './llm-openai.js';
 export { TUNING } from './tuning.js';

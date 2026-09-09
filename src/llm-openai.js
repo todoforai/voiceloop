@@ -19,6 +19,24 @@
 //              keys, defaulting to all of them)
 //   fetchFn  — fetch override (tests, custom agents/headers); defaults to global fetch
 //   extraBody— merged into the request body (temperature, provider-specific knobs, …)
+// VoiceAgent history → OpenAI chat messages. Plain turns pass through; the agent's native tool
+// records (assistant text + tool_use blocks, then a user turn of tool_result blocks — the same
+// Anthropic-shaped blocks it keeps for every adapter) become `tool_calls` and `role:"tool"` messages.
+export const toOpenAIMessages = (history) => history.flatMap((m) => {
+  if (!Array.isArray(m.content)) return [m];
+  const text = m.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  if (m.role === 'assistant') {
+    const tool_calls = m.content.filter((b) => b.type === 'tool_use')
+      .map((b) => ({ id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) } }));
+    return [{ role: 'assistant', content: text || null, ...(tool_calls.length ? { tool_calls } : {}) }];
+  }
+  const results = m.content.filter((b) => b.type === 'tool_result').map((b) => {
+    const content = typeof b.content === 'string' ? b.content : String(b.content ?? '');
+    return { role: 'tool', tool_call_id: b.tool_use_id, content: b.is_error && !content.startsWith('[failed]') ? `[failed] ${content}` : content };
+  });
+  return text ? [...results, { role: m.role, content: text }] : results;   // OpenAI has no is_error → text-marked
+});
+
 export function makeOpenAILLM({ llmUrl, apiKey = '', model = '', maxTokens = 1024, tools = {}, fetchFn, extraBody = {} } = {}) {
   const toolSpecs = Object.entries(tools).map(([name, t]) => ({
     type: 'function',
@@ -37,7 +55,7 @@ export function makeOpenAILLM({ llmUrl, apiKey = '', model = '', maxTokens = 102
       headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
       body: JSON.stringify({
         stream: true,
-        messages: [{ role: 'system', content: system }, ...history],
+        messages: [{ role: 'system', content: system }, ...toOpenAIMessages(history)],
         max_tokens: maxTokens,
         ...(model ? { model } : {}),
         ...(toolSpecs.length ? { tools: toolSpecs } : {}),

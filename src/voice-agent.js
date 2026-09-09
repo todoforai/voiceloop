@@ -60,7 +60,7 @@ const langRule = (lang) => {
   return name ? `ALWAYS reply in ${name} — including tool-call acknowledgements.` : '';
 };
 // A tool call's arguments, key-sorted — so the SAME act always renders/compares identically no matter
-// what order a provider streamed the keys in (used both for dedup and for the [TOOL CALL] ledger).
+// what order a provider streamed the keys in (used for dedup).
 // Identity: the provider call id when present (two calls with identical args are DISTINCT acts,
 // e.g. a legit retry after an error result); name+args otherwise (an id-less identical repeat is a
 // provider re-emitting its buffered call).
@@ -78,8 +78,8 @@ const withTimeout = (p, ms, fallback) => {
 
 const callArgs = (c) => JSON.stringify(c.args ?? {}, Object.keys(c.args ?? {}).sort());
 const callKey = (c) => c.id ? `id:${c.id}` : `${c.tool} ${callArgs(c)}`;
-// Render a host tool's return value as model-facing text (used in the history ledger, and by LLM
-// adapters when feeding tool results back to the model). Never throws: the side effect already RAN,
+// Render a host tool's return value as model-facing text (the tool_result content in history, and
+// what LLM adapters feed back to the model). Never throws: the side effect already RAN,
 // so an unserializable result must not retro-fail the call and invite a retry.
 export const toolResultText = (result) => {
   if (result === undefined) return 'ok';
@@ -88,87 +88,22 @@ export const toolResultText = (result) => {
     return result.ok ? result.text : `[failed] ${result.text}`;
   try { return JSON.stringify(result) ?? 'ok'; } catch { return String(result); }
 };
-// Ledger suffix for a call whose outcome is attached to the chunk: keeps the RESULT in the
-// plain-text history so the NEXT turn still knows what the tool said. Bounded — history is
-// spoken-conversation-sized, not a log. Calls without an outcome field contribute nothing.
-const LEDGER_RESULT_MAX = 4000;
-const ledgerOutcome = (c) => {
-  if (c.error) return ` → error: ${String(c.error).slice(0, LEDGER_RESULT_MAX)}`;
-  if (!('result' in c)) return '';
-  let text = toolResultText(c.result);
-  if (text.length > LEDGER_RESULT_MAX) text = `${text.slice(0, LEDGER_RESULT_MAX)}… (${text.length} chars)`;
-  return ` → ${text}`;
+// One model-facing history record for a settled/pending tool call: the native tool_result block that
+// pairs with its tool_use. Bounded — history is spoken-conversation-sized, not a log. A call whose
+// outcome has not landed yet says so; _runTool patches the SAME block in place when it does.
+const RESULT_MAX = 4000;
+const MAX_TOOL_ROUNDS = 6;
+const PENDING_RESULT = 'still running — the result will follow in a later turn';
+const bound = (text) => text.length > RESULT_MAX ? `${text.slice(0, RESULT_MAX)}… (${text.length} chars)` : text;
+const toolResultBlock = (c) => {
+  const block = { type: 'tool_result', tool_use_id: c.id, content: PENDING_RESULT };
+  if ('error' in c) { block.content = bound(String(c.error) || 'failed'); block.is_error = true; }
+  else if ('result' in c) {
+    block.content = bound(toolResultText(c.result));
+    if (c.result && typeof c.result === 'object' && c.result.ok === false) block.is_error = true;
+  }
+  return block;
 };
-
-// ── [TOOL CALL] mimicry filter ──────────────────────────────────────────────────────────────────
-// The model sees `[TOOL CALL name] {...}` ledger lines in its own history turns, and sometimes
-// IMITATES the format instead of calling the tool natively: it types the line as reply text.
-// Untreated, the raw markup leaks into the spoken/visible reply and the tool never runs. This
-// transform strips such lines from the text stream: a bare call (no → outcome) is what the model
-// MEANT to do → re-emitted as a real { tool, args } chunk (the turn's dedup collapses it if the
-// native call also arrived); a line WITH an → outcome is a hallucinated memory of a past call →
-// dropped. Text before/after the line streams through untouched, held back only while a possible
-// marker/line is still forming so TTS latency is unaffected on normal replies.
-const MIMIC_MARK = '[TOOL CALL ';
-const parseMimicLine = (line) => {
-  const m = /^\[TOOL CALL ([\w.-]+)\]\s*(.*)$/.exec(line.trim());
-  if (!m) return null;                                   // not the format after all — caller emits it as text
-  const [, tool, rest] = m;
-  if (!rest) return { tool, args: {} };
-  if (!rest.startsWith('{')) return { drop: true };      // `→ outcome` (or junk) with no args — a remembered call
-  // Balanced-brace scan (string-aware): the args JSON may be followed by a ` → outcome` tail.
-  let depth = 0, inStr = false, escaped = false, end = -1;
-  for (let i = 0; i < rest.length; i++) {
-    const ch = rest[i];
-    if (escaped) { escaped = false; continue; }
-    if (inStr) { if (ch === '\\') escaped = true; else if (ch === '"') inStr = false; continue; }
-    if (ch === '"') inStr = true;
-    else if (ch === '{') depth++;
-    else if (ch === '}' && --depth === 0) { end = i + 1; break; }
-  }
-  if (end < 0) return { drop: true };                    // truncated JSON — can't run it faithfully
-  if (rest.slice(end).trim()) return { drop: true };     // has an → outcome: a memory, not a new call
-  try { return { tool, args: JSON.parse(rest.slice(0, end)) }; } catch { return { drop: true }; }
-};
-async function* stripToolCallMimicry(src) {
-  let carry = '';
-  // Longest tail of `carry` that could still grow into the marker — held back; the rest is safe to emit.
-  const heldLen = () => {
-    for (let n = Math.min(carry.length, MIMIC_MARK.length - 1); n > 0; n--)
-      if (MIMIC_MARK.startsWith(carry.slice(-n))) return n;
-    return 0;
-  };
-  function* pump(final) {
-    for (;;) {
-      const at = carry.indexOf(MIMIC_MARK);
-      if (at < 0) {
-        const hold = final ? 0 : heldLen();
-        const out = carry.slice(0, carry.length - hold);
-        carry = carry.slice(carry.length - hold);
-        if (out) yield { text: out };
-        return;
-      }
-      const nl = carry.indexOf('\n', at);
-      if (nl < 0 && !final) {                            // the line is still streaming — hold from the marker on
-        if (at > 0) { yield { text: carry.slice(0, at) }; carry = carry.slice(at); }
-        return;
-      }
-      const end = nl < 0 ? carry.length : nl;
-      const before = carry.slice(0, at), line = carry.slice(at, end);
-      carry = nl < 0 ? '' : carry.slice(nl + 1);         // the line (and its newline) leave the text stream
-      if (before) yield { text: before };
-      const parsed = parseMimicLine(line);
-      if (!parsed) yield { text: nl < 0 ? line : `${line}\n` };   // false alarm — pass it through untouched (newline included)
-      else if (parsed.tool) yield { tool: parsed.tool, args: parsed.args };
-    }
-  }
-  for await (const item of src) {
-    if (item.tool) { yield item; continue; }
-    carry += item.text ?? '';
-    yield* pump(false);
-  }
-  yield* pump(true);
-}
 
 // Persona (who the agent is) + language rule + the host's live context block (`sysmsg`, delimited
 // so the model never mistakes injected context for its own conversation).
@@ -378,6 +313,8 @@ export class VoiceAgent {
     this.state = 'idle';           // idle | listening | thinking | speaking
     this._abort = null;            // aborts the in-flight LLM
     this._replySeq = 0;            // bumped per reply-generating turn; a queued turn drops itself if a newer one exists
+    this._toolRounds = 0;          // tool-result reactions since the user last spoke (see _runTurn react)
+    this._late = [];               // outcomes landed after the last request was built (see _runTurn react)
     this._preroll = []; this._wasSpeaking = false; this._closed = false; this._destroyed = false;
     // Diagnostic tap: last ~30s of the exact i16 frames handed to STT + delivery-stall gaps, for
     // dumpAudio() (replay any "it misheard me" run and prove capture clean-or-not).
@@ -699,6 +636,7 @@ export class VoiceAgent {
   // history stays ordered (…, assistant-so-far, user, user). Held pushes NEVER start an LLM turn —
   // release (_flush) owns starting the single turn, and waits for all of these to settle first.
   _pushHeld(text) {
+    this._toolRounds = 0;
     const p = (async () => { await this._holdBarrier; this.history.push({ role: 'user', content: text }); })();
     this._heldPushes.add(p);
     p.finally(() => this._heldPushes.delete(p));
@@ -720,15 +658,14 @@ export class VoiceAgent {
   }
 
   // Inject an out-of-band turn: feed `text` to the LLM as if the user had said it, then speak the
-  // reply. Used by the host to surface external events (a tool result, a background job finishing)
+  // reply. Used by the host to surface external events (a background job finishing, a board change)
   // — only meaningful while the agent is running, so it's a no-op once stopped.
   //
   // SOFT turn (supersede: false): unlike a user utterance this must NOT cut the reply in flight.
-  // A tool result arrives WHILE the turn that called the tool is still streaming/speaking, so
-  // aborting here would kill that turn mid-answer and re-run the LLM over a history whose last
-  // entry is the request again — the model then re-calls the same tool (duplicate-action spam).
-  // Instead it queues behind the running turn, which by then has recorded both its answer and the
-  // [TOOL CALL] it made, so the model sees the work is already done.
+  // An event can arrive WHILE a turn is still streaming/speaking, so aborting here would kill that
+  // turn mid-answer and re-run the LLM over a history whose last entry is the request again — the
+  // model then re-calls the same tool (duplicate-action spam). Instead it queues behind the running
+  // turn, which by then has recorded its answer and its tool calls natively.
   async notify(text) { if (!this._closed) await this._runTurn(text, { supersede: false }); }
 
   // Send a TYPED user turn: like speaking, but the text comes from the host's input instead of STT.
@@ -762,6 +699,7 @@ export class VoiceAgent {
   // caller (errors surface via onEvent), so it's safe to call without awaiting/catching.
   _onUserTurn(text, { speech = false } = {}) {
     if (!text.trim()) return Promise.resolve();
+    this._toolRounds = 0;
     return this._runTurn(text, { speech });
   }
 
@@ -878,7 +816,7 @@ export class VoiceAgent {
   // if nothing newer has queued behind it, and never cut the reply in flight. Anything newer already
   // sees this message in history and answers over the fuller picture — so a burst of tool results
   // collapses into ONE reply instead of one interrupting monologue per result.
-  _runTurn(text, { supersede = true, speech = false } = {}) {
+  _runTurn(text, { supersede = true, speech = false, react = false } = {}) {
     const prev = this._turn;
     if (supersede) {
       this._abort?.abort();   // cut the in-flight reply NOW (barge-in / superseded)
@@ -904,9 +842,24 @@ export class VoiceAgent {
       // Only a SPOKEN final may adopt (it seeded the speculation); typed/notify/held turns drop it.
       const pf = speech && text ? this._takePrefetch(text) : (this._dropPrefetch(), null);
       if (text) this.history.push({ role: 'user', content: text });
+      // A reaction turn owes a reply only for results no request has carried yet: either the
+      // tool_result record is still the last message, or a late outcome landed after the last
+      // request was built (_late; cleared when a request starts) — then a short [EVENT] user turn,
+      // the host's channel for out-of-band facts, points the model at the patched block (a request
+      // can't end on an assistant message). Bounded per user utterance (_toolRounds, reset on
+      // every accepted user turn): a model that keeps calling tools gets MAX_TOOL_ROUNDS
+      // reactions, then waits for the user.
+      if (react) {
+        const last = this.history[this.history.length - 1];
+        const owed = (last?.role === 'user' && Array.isArray(last.content)) || this._late.length;
+        if (!owed || this._toolRounds >= MAX_TOOL_ROUNDS) { this._late.length = 0; return; }
+        this._toolRounds++;
+        if (last?.role !== 'user') this.history.push({ role: 'user', content: `[EVENT tool_result] ${this._late.map((c) => c.tool).join(', ')} finished — see the tool_result above.` });
+      }
       // Reply only if the conversation now ends on a user turn (a raced turn may have already
       // replied). pf is always null here: if we pushed a user turn it IS the last entry.
       if (this.history[this.history.length - 1]?.role !== 'user') return;
+      this._late.length = 0;                        // this request carries every result landed so far
       this._set('thinking');                        // LLM stage
       this._abort = pf?.ctl ?? new AbortController();   // adopted prefetch keeps ITS controller so barge-in aborts the right fetch
       await this._speakTurn(this._abort.signal, pf?.gen, seq);   // _speakTurn never throws — errors surface via onEvent
@@ -914,7 +867,7 @@ export class VoiceAgent {
   }
 
   // One assistant turn: stream the LLM → TTS, then record what was actually HEARD (the barge-in
-  // prefix, not the full generated answer) plus a ledger of the tools it dispatched. Stored as
+  // prefix, not the full generated answer) plus the tools it called, natively. Stored as
   // `this._turn` so the next user turn can await it. Never throws (errors surface via onEvent) so
   // the await is safe — and never awaits a tool, so a hung one can't hold the next turn hostage.
   // `turn` tags every assistant event with the reply it belongs to, so a host can tell a LATE
@@ -927,31 +880,82 @@ export class VoiceAgent {
     // repopulates _replyText with the audible prefix as playback advances.
     if (this._replyText) this._prevReplyText = this._replyEcho || this._replyText;
     this._replyText = ''; this._replyEcho = '';
-    // Tap the LLM stream once: yield speech text to TTS, and record the tool calls it makes (they
-    // fire on arrival; `calls` is the ledger). First delta flips us to 'speaking'; accumulate for the
-    // heard-vs-unheard report. `this.llm(...)` is a lazy generator — its fetch fires only when
+    // Tap the LLM stream once: yield speech text to TTS, and record what the model did as ROUNDS —
+    // each round is one assistant message (text + the tool_use blocks it emitted) followed by the
+    // user-role tool_result blocks for those calls. Recorded into history in that order on EVERY
+    // exit path, so the next request replays the model's own native tool history — never a text
+    // notation it could imitate. `this.llm(...)` is a lazy generator — its fetch fires only when
     // tts.speak first pulls, by which point any prior turn is aborted; keeps LLM streams serial.
-    let answer = '', calls = [];
-    // The tools this turn dispatched, as a ledger line recorded INTO its assistant message. The
-    // runtime's tool calls are fire-and-forget (no tool_use/tool_result pair on the wire, and history
-    // is provider-neutral {role, content} text), so without this the history reads as if it never
-    // called anything and the next turn happily calls it AGAIN — duplicate tool-call spam. Relayed
-    // calls: the outcome arrives separately as the host's `[TOOL RESULT <name>]` notify() turn.
-    // Custom LLMs that execute tools inside their own generator (llm.executesTools) attach the
-    // outcome directly, so the ledger line carries it — bounded — or the next turn would see the call with no result and lose what
-    // the model learned (a barge-in cuts the spoken follow-up but not the fact). Read late (the
-    // stream may still be appending) and on EVERY exit path, including a failed reply.
-    const toolNote = () => calls.map((c) => `[TOOL CALL ${c.tool}] ${callArgs(c)}${ledgerOutcome(c)}`).join('\n');
+    //
+    // Round boundary: the default adapter's stream is ONE model message (text + calls together;
+    // the reaction to the results comes from _continue). A loop adapter feeds results back inside
+    // the stream, so anything after an outcome landed is the model's NEXT message.
+    let answer = '';
+    const rounds = [], calls = [];   // calls: every act this turn saw, for dedup — outlives recording
+    const loop = !!this.llm.executesTools;
+    const round = () => {
+      const r = rounds[rounds.length - 1];
+      if (r && !(loop && r.settled)) return r;
+      rounds.push({ text: '', calls: [] }); return rounds[rounds.length - 1];
+    };
+    let n = 0;
+    // Accept a call once: identity is the provider id, else name+args (an id-less repeat is a
+    // provider re-emitting its buffered call). `owner` says who executes it — the adapter (the
+    // chunk announces or carries the outcome: it ran the tool itself and feeds the result back
+    // inside its own reply) or the agent (_runTool runs it) — fixed at acceptance.
+    const accept = (item) => {
+      const key = callKey(item);
+      let c = calls.find((x) => x.key === key);
+      if (c) return c;
+      const adapterRan = loop || item.running || 'result' in item || 'error' in item;
+      c = { ...item, key, id: item.id || `call-${turn}-${++n}`, owner: adapterRan ? 'adapter' : 'agent' };
+      calls.push(c); round().calls.push(c);
+      return c;
+    };
+    const outcome = (c, item) => {
+      if ('result' in item) c.result = item.result; else if ('error' in item) c.error = item.error;
+      const r = rounds.find((r) => r.calls.includes(c)); if (r) r.settled = true;   // already recorded → no round to close
+    };
+    // An outcome may land AFTER the turn recorded the call (a hung tool, a barge-in mid-execution):
+    // its tool_result block is patched IN PLACE so the next request carries the real result, and the
+    // model gets to react to it (see _continue).
+    const settle = (c) => this._runTool(c).then(() => {
+      if (!c.block) return;                                  // not recorded yet — record() picks the outcome up
+      if (!c.consumed) { Object.assign(c.block, toolResultBlock(c)); c.consumed = true; }
+      this._dropPrefetch();                                  // a speculation serialized the pending block — stale
+      this._late.push(c); this._continue();
+    });
+    const record = (keptLen) => {
+      let budget = keptLen;
+      for (const r of rounds) {
+        const text = r.text.slice(0, Math.max(0, budget)).trimEnd(); budget -= r.text.length;
+        if (!text && !r.calls.length) continue;
+        if (!r.calls.length) { this.history.push({ role: 'assistant', content: text }); continue; }
+        const blocks = text ? [{ type: 'text', text }] : [];
+        for (const c of r.calls) blocks.push({ type: 'tool_use', id: c.id, name: c.tool, input: c.args ?? {} });
+        this.history.push({ role: 'assistant', content: blocks });
+        this.history.push({ role: 'user', content: r.calls.map((c) => {
+          c.consumed = 'result' in c || 'error' in c;
+          return (c.block = toolResultBlock(c));
+        }) });
+      }
+      rounds.length = 0;
+    };
+    // Follow-up only for calls the AGENT ran: a loop adapter fed its results back inside the reply.
+    const recordAndContinue = (keptLen) => {
+      record(keptLen);
+      if (calls.some((c) => c.owner === 'agent' && c.consumed)) this._continue();
+    };
     // Pre-execution markers: an LLM that runs tools inside its own generator (executesTools) can
     // announce a call with `running: true` BEFORE it executes, so the host shows a live spinner chip
     // that the outcome chunk replaces in place (same id). A turn that dies before an announced call's
-    // outcome arrives finalizes it as interrupted — DISPLAY truth only: an announcement never reaches
-    // the ledger (`calls`), so the model treats it as never having happened.
+    // outcome arrives finalizes the CHIP as interrupted; the history keeps the call with a pending
+    // tool_result, patched in place if the outcome still lands.
     const announced = new Map();
     // Latched once this turn has finalized its chips (finishInterrupted ran). A barge-in detaches the
     // LLM producer from TTS, so it can wake AFTER we returned and keep pushing chunks: a late
-    // announcement would open a spinner nothing will ever close. Past the latch, announcements are
-    // dropped — outcomes still flow (a tool the adapter really ran is truth worth reporting).
+    // announcement would open a spinner nothing will ever close, and a late UNEXECUTED call is work
+    // the user cut off. Past the latch only outcomes flow (a tool the adapter really ran is truth).
     let finalized = false;
     const finishInterrupted = () => {
       finalized = true;
@@ -964,37 +968,31 @@ export class VoiceAgent {
         // tool_use → fire NOW, in parallel with TTS. Identical repeats within one turn are the SAME
         // act (a provider re-emitting its buffered call, or the model asking twice) — run it once.
         if (item.tool) {
-          if (item.running) {   // display-only announcement; the outcome chunk below does the work
+          const hasOutcome = 'result' in item || 'error' in item;
+          const known = calls.find((x) => x.key === callKey(item));
+          if (item.running || (loop && !hasOutcome)) {   // announcement; the outcome chunk below does the work
             // An id-less announcement can never be replaced in place NOR finalized (both key on id),
             // so it could only ever become a stuck spinner — drop it. The outcome chunk still lands.
-            if (finalized || !item.id) continue;
-            // Already settled this turn (adapter re-emitting its buffered pair): re-announcing would
-            // reopen a spinner over a finished chip, and the duplicate outcome is deduped below and
-            // never re-reported — so it would hang there, then finalize as falsely "interrupted".
-            if (calls.some((c) => c.id === item.id)) continue;
-            announced.set(item.id, item);
+            if (finalized || !item.id || known) continue;
+            announced.set(item.id, item); accept(item);
             self.onEvent({ type: 'tool', name: item.tool, id: item.id, args: item.args, running: true });
             continue;
           }
           if (item.id) announced.delete(item.id);
-          // Same key = same act (provider re-emit / model asking twice). A MIMIC chunk carries no id,
-          // so also match by name+args across the id boundary — a typed echo of an id-carrying native
-          // call (llm.executesTools mode) must collapse too, or it would execute the tool a second time.
-          const dup = calls.some((c) => callKey(c) === callKey(item) ||
-            ((!c.id || !item.id) && c.tool === item.tool && callArgs(c) === callArgs(item)));
-          if (!dup) {
-            calls.push(item); self._runTool(item);
-            // Late outcome: the turn already closed (barge-in mid-execution) and its ledger is
-            // written, so this result would reach the transcript chip but never the model. Relay it
-            // as a soft [TOOL RESULT] turn — the same channel out-of-band receipts use — so the next
-            // reply knows what the tool returned instead of seeing a call that vanished.
-            if (finalized && ('result' in item || 'error' in item))
-              self.notify(`[TOOL RESULT ${item.tool}] ${callArgs(item)}${ledgerOutcome(item)}`);
+          if (known) {                                     // the announced call's outcome, or a re-emit
+            if (known.ran || !hasOutcome) continue;
+            outcome(known, item); settle(known);
+            continue;
           }
+          if (finalized && !hasOutcome) continue;          // late bare call: the user cut this reply off
+          const c = accept(item);
+          if (hasOutcome) outcome(c, item);
+          if (finalized) record(0);                        // late outcome of an unseen call: give it a record of its own (settle schedules the reaction)
+          settle(c);
           continue;
         }
         if (self.state === 'thinking') self._set('speaking');  // first token → TTS stage
-        answer += item.text;
+        answer += item.text; round().text += item.text;
         // While audio plays, the TTS progress hook owns the draft (text = spoken-so-far, full = answer,
         // read live each tick), so streaming the whole answer here would yank the cursor to the end.
         // Once the cursor is live we only grow `answer` (the hook reads it); until then (muted, or the
@@ -1002,7 +1000,7 @@ export class VoiceAgent {
         if (!self._cursorLive) self.onEvent({ type: 'assistant', text: answer, final: false, turn });
         yield item.text;
       }
-    })(this, stripToolCallMimicry(prefetched ?? this.llm(this.history, this.sysmsg, signal)));   // prefetched stream already carries this turn's user text (see _startPrefetch)
+    })(this, prefetched ?? this.llm(this.history, this.sysmsg, signal));   // prefetched stream already carries this turn's user text (see _startPrefetch)
 
     let spoken = '';
     // Live spoken cursor: while a clip plays the TTS reports chars heard so far, which we mirror as a
@@ -1051,9 +1049,9 @@ export class VoiceAgent {
         // follows), and a host tracking bubbles per turn needs to know which one just died.
         this.onEvent({ type: 'error', error: e.message, turn });
         // Tools fire DURING streaming, so a reply that dies here may already have dispatched one.
-        // Record it anyway: the ledger is about what was DONE, not about what got spoken — dropping
-        // it would let the next turn call the same tool again.
-        if (toolNote()) this.history.push({ role: 'assistant', content: toolNote() });
+        // Record what was done and heard so far — dropping it would let the next turn call the
+        // same tool again.
+        recordAndContinue(signal.keepFull ? answer.length : this._replyText.length);
         finishInterrupted();                     // announced-but-unfinished → failed chip, not a stuck spinner
         if (this.state !== 'idle') this._set('listening');
         return;
@@ -1073,16 +1071,13 @@ export class VoiceAgent {
     // Normally we record only the HEARD prefix (barge-in: the user reacted to what they heard). But a
     // turn aborted on hold-entry was tagged signal.keepFull, so we keep the whole streamed answer —
     // on release the LLM sees everything it had formed. Per-turn tag → a quick Resume can't flip it.
-    const kept = signal.keepFull ? answer : spoken;
-    if (kept || toolNote()) {
-      this.history.push({ role: 'assistant', content: [kept, toolNote()].filter(Boolean).join('\n') });
-    }
+    // Both history and the EVENT use the raw prefix of `answer` (the host's full.slice(text.length)
+    // tail aligns). keepFull/normal-finish → whole answer (no tail); a barge-in → the heard prefix
+    // solid + the unspoken remainder dimmed, showing exactly where TTS got.
+    const kept = signal.keepFull ? answer : rawPrefix(spoken);
+    recordAndContinue(kept.length);
     if (kept) {
-      // History keeps the normalized `kept`; the EVENT emits a raw prefix of `answer` so the host's
-      // full.slice(text.length) tail aligns. keepFull/normal-finish → whole answer (no tail); a barge-in
-      // → the heard prefix solid + the unspoken remainder dimmed, showing exactly where TTS got.
-      const shown = signal.keepFull ? answer : rawPrefix(spoken);
-      this.onEvent({ type: 'assistant', text: shown, full: answer, final: true, turn });
+      this.onEvent({ type: 'assistant', text: kept, full: answer, final: true, turn });
     } else if (answer) {
       // Interrupted before anything was heard (nothing voiced yet): drop the streamed draft so the
       // transcript doesn't keep a dangling unfinished bubble. Empty text → host clears the draft.
@@ -1098,8 +1093,21 @@ export class VoiceAgent {
     if (!signal.aborted && this.state !== 'idle') this._set('listening');   // superseded turns don't touch state
   }
 
+  // Native tool semantics: once a tool_result is in history the model gets to react to it. Queues a
+  // SOFT reaction turn (behind the running one; dropped if a newer user turn supersedes it — that
+  // turn sees the result anyway) after the agent ran a call for the default adapter (its stream
+  // ends at the call; the result was never fed back), or when a LATE outcome (hung/slow tool,
+  // barge-in mid-execution) landed in a record. Whether a reply is still owed is decided when the
+  // turn RUNS (see _runTurn `react`), since the predecessor may already have carried the result.
+  // Loop adapters fed the result back inside the reply, so nothing fires for them. Silent while
+  // the user is speaking — their utterance will see the result in history anyway.
+  _continue() {
+    if (this._closed || this._speaking) return;
+    this._runTurn('', { supersede: false, react: true });
+  }
+
   // Run one chosen tool call and report it. Fired as soon as its tool_use arrives in the stream, in
-  // parallel with TTS, and NEVER joined: the turn records the dispatch in its ledger and finishes
+  // parallel with TTS, and NEVER joined: the turn records the call (tool_result pending) and finishes
   // when the speaking does (see _speakTurn), so a tool that hangs costs its own result and nothing
   // else. Its outcome reaches the host via onEvent; the model learns it via notify(). Must not
   // reject — nothing awaits it, so a rejection here would be unhandled (hence the catch-all).
@@ -1115,16 +1123,15 @@ export class VoiceAgent {
         // runtime/transport failures, not a handled domain-level tool miss.
         // `id` rides along on every tool event so a host can replace THIS call's running chip in
         // place, and two same-args calls (a legit retry) stay distinct acts in the transcript.
-        if ('result' in call || 'error' in call) {
-          const result = call.error ? { text: call.error, ok: false } : call.result;
-          this.onEvent({ type: 'tool', name: call.tool, id: call.id, args: call.args, result });
-          return;
+        if (!('result' in call || 'error' in call)) {
+          // Host tool code. Deliberately NOT bounded by a timeout: we cannot cancel a host promise, so
+          // a deadline could only stop WAITING — reporting "failed" for an operation still on its way
+          // to committing its side effect, inviting a duplicate retry. Nothing awaits this call
+          // (see _speakTurn), so a hung tool costs its own result, never the turn loop.
+          try { call.result = await this.tools[call.tool]?.run?.(call.args); }
+          catch (e) { call.error = e?.message || String(e ?? 'failed'); }
         }
-        // Host tool code. Deliberately NOT bounded by a timeout: we cannot cancel a host promise, so
-        // a deadline could only stop WAITING — reporting "failed" for an operation still on its way
-        // to committing its side effect, inviting a duplicate retry. Nothing awaits this call
-        // (see _speakTurn), so a hung tool costs its own result, never the turn loop.
-        const result = await this.tools[call.tool]?.run?.(call.args);
+        const result = call.error ? { text: call.error, ok: false } : call.result;
         this.onEvent({ type: 'tool', name: call.tool, id: call.id, args: call.args, result });
       } catch (e) {
         this.onEvent({ type: 'error', error: `tool ${call.tool}: ${e.message}` });

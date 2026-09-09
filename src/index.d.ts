@@ -44,19 +44,31 @@ export interface VoiceTool {
 export type LLMChunk =
   | { text: string }
   | { tool: string; id?: string; args: Record<string, unknown>; result?: unknown; error?: string; running?: true };
+// The conversation as the model sees it, Anthropic-shaped. Plain turns are strings; a turn in which
+// the assistant called tools is recorded NATIVELY: an assistant message of text + tool_use blocks,
+// then a user message holding the matching tool_result blocks (content = the result text the model
+// reads; `is_error` on a failure). The agent never writes a textual notation of a tool call into
+// history, so the model has nothing to imitate. Adapters project this onto their wire format
+// (see toOpenAIMessages).
+export type HistoryBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
+export type HistoryMessage = { role: string; content: string | HistoryBlock[] };
 // Pluggable LLM: lazy async generator over the chat history (fetch fires on first pull).
-// The default (makeOpenAILLM) yields bare tool chunks that the AGENT executes; the results are not
-// fed back into it mid-turn, so such calls are terminal for the turn. That is the low-level seam.
+// The default (makeOpenAILLM) yields bare tool chunks that the AGENT executes; their results are
+// recorded as tool_result and the agent starts a follow-up turn so the model reacts to them.
 // An agent LOOP that runs tools inside its own generator declares the two flags below.
 export interface LLM {
   (
-    history: Array<{ role: string; content: string }>,
+    history: HistoryMessage[],
     system: string,
     signal: AbortSignal,
     options?: { toolGate?: Promise<unknown> },
   ): AsyncIterable<LLMChunk>;
-  /** This generator ran the tool itself: chunks carry `result`/`error` and the agent REPORTS them
-   *  instead of executing again. Without it, an outcome-bearing chunk is re-run. */
+  /** This generator is a tool LOOP: it runs every call itself and feeds the result back inside the
+   *  same reply (chunks carry `result`/`error`, optionally preceded by a `running` announcement).
+   *  The agent never executes its calls and never starts a reaction turn for them. */
   executesTools?: boolean;
   /** This generator awaits `options.toolGate` before ANY tool executes. Required to keep
    *  speculative prefetch on: prefetch starts from an uncommitted interim, and the gate is what
@@ -190,7 +202,7 @@ export class VoiceAgent {
   constructor(options?: VoiceAgentOptions);
   /** The live conversation the LLM sees. A mutable reference the host may read and push into —
    *  carrying it over is how a hot-restart (e.g. a language switch) keeps the conversation. */
-  history: Array<{ role: string; content: string }>;
+  history: HistoryMessage[];
   start(deviceId?: string): Promise<void>;
   /** Pause: stop replying/listening but KEEP the mic stream + audio graph + VAD model warm, so a later
    *  start() of this same agent resumes instantly (no mic prompt, no VAD cold start). Use destroy() to
@@ -344,6 +356,8 @@ export function makeOpenAILLM(options?: {
   llmUrl?: string; apiKey?: string; model?: string; maxTokens?: number;
   tools?: Record<string, VoiceTool>; fetchFn?: typeof fetch; extraBody?: Record<string, unknown>;
 }): LLM;
+/** VoiceAgent history → OpenAI chat messages (tool_use → tool_calls, tool_result → role:"tool"). */
+export function toOpenAIMessages(history: HistoryMessage[]): Array<Record<string, unknown>>;
 
 // ── Warmup & helpers ─────────────────────────────────────────────────────────────────────────
 /** Load the VAD/ONNX runtime bundles (memoized). `prewarmVoice` additionally compiles the VAD

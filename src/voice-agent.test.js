@@ -50,6 +50,18 @@ function makeAgent(over = {}) {
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
+// History is Anthropic-shaped: an assistant turn that called tools holds text + tool_use blocks
+// and is followed by a user turn of tool_result blocks. These read it the way an adapter would.
+const toolUses = (history, name) => history.flatMap((m) => m.role === 'assistant' && Array.isArray(m.content)
+  ? m.content.filter((b) => b.type === 'tool_use' && (!name || b.name === name)) : []);
+const toolResults = (history) => history.flatMap((m) => m.role === 'user' && Array.isArray(m.content)
+  ? m.content.filter((b) => b.type === 'tool_result') : []);
+const resultFor = (history, id) => toolResults(history).find((b) => b.tool_use_id === id);
+const spokenText = (history) => history.filter((m) => m.role === 'assistant')
+  .map((m) => typeof m.content === 'string' ? m.content : m.content.filter((b) => b.type === 'text').map((b) => b.text).join(''))
+  .join('\n');
+const lastIsToolResult = (history) => { const l = history.at(-1); return l?.role === 'user' && Array.isArray(l.content); };
+
 // ── Tests ───────────────────────────────────────────────────────────────────────────────────────
 
 test('sendUserText accepts a live turn (true) and emits a finalized user stt event', async () => {
@@ -173,45 +185,45 @@ test('entering hold while a turn is queued does not LOSE the accepted utterance'
 });
 
 // ── Tool calls: the create_todo spam regression ──────────────────────────────────────────────────
-// The loop that produced duplicate TODOs: the tool's own result is relayed back with notify(), which
-// used to run as a full user turn — aborting the turn that was still speaking and re-running the LLM
-// over a history whose last entry was the request, so the model called the tool AGAIN.
+// The loop that produced duplicate TODOs: the model re-called a tool whose result it never saw. With
+// NATIVE records the call and its tool_result are in history before the follow-up turn runs.
 
-// An LLM that calls `create_todo` whenever the last user message isn't already answered by a
-// [TOOL CALL] of its own — i.e. exactly the naive behaviour of a model reading its history.
+// An LLM that calls `create_todo` whenever it sees no tool_use of its own — i.e. exactly the naive
+// behaviour of a model reading its history.
 async function* toolLLM(history) {
-  const said = history.some((m) => m.role === 'assistant' && m.content.includes('[TOOL CALL create_todo]'));
+  const said = toolUses(history, 'create_todo').length > 0;
   if (!said) yield { tool: 'create_todo', args: { content: 'do the thing' } };
   yield { text: said ? 'already running' : "I'm on it" };
 }
 
-test('TOOL: a relayed result never re-triggers the tool (no duplicate dispatch)', async () => {
+test('TOOL: the result is recorded natively and the follow-up turn never re-triggers the tool', async () => {
   const tts = makeFakeTTS();
   const runs = [];
   const { agent } = makeAgent({
     llm: toolLLM,
     tts,
-    opts: {
-      // The host relays the outcome back mid-turn via notify().
-      tools: { create_todo: { description: 'create a todo', params: { content: { type: 'string' } },
-        run: (args) => { runs.push(args); agent.notify('[TOOL RESULT create_todo] Created todo abc1234.'); } } },
-    },
+    opts: { tools: { create_todo: { description: 'create a todo', params: { content: { type: 'string' } },
+      run: (args) => { runs.push(args); return 'Created todo abc1234.'; } } } },
   });
 
   agent.sendUserText('build me a landing page');
   for (let i = 0; i < 40; i++) await settle();
 
   assert.equal(runs.length, 1, 'the tool ran exactly once');
-  assert.equal(tts.maxConcurrent, 1, 'the relayed result never spoke over the turn that called it');
-  assert.ok(
-    agent.history.some((m) => m.role === 'assistant' && m.content.includes('[TOOL CALL create_todo]')),
-    'the call it made is recorded in its own turn, so the next turn can see it already happened',
-  );
+  assert.equal(tts.maxConcurrent, 1, 'the follow-up never spoke over the turn that called it');
+  const [use] = toolUses(agent.history, 'create_todo');
+  assert.ok(use, 'the call is a native tool_use block');
+  assert.deepEqual(use.input, { content: 'do the thing' });
+  assert.equal(resultFor(agent.history, use.id)?.content, 'Created todo abc1234.', 'its tool_result pairs by id');
+  assert.match(spokenText(agent.history), /already running/, 'the model reacted to the result in a follow-up turn');
+  assert.equal(agent.history.at(-1).role, 'assistant', 'the conversation ends on the informed reply');
+  assert.ok(!JSON.stringify(agent.history).includes('[TOOL'), 'no textual tool notation anywhere in history');
 });
 
 test('TOOL: the same call repeated within one stream runs once', async () => {
   const runs = [];
-  const dupLLM = async function* () {
+  const dupLLM = async function* (history) {
+    if (lastIsToolResult(history)) { yield { text: 'done.' }; return; }
     yield { tool: 'create_todo', args: { content: 'x' } };
     yield { tool: 'create_todo', args: { content: 'x' } };   // provider re-emitted its buffered call
     yield { text: 'on it' };
@@ -224,7 +236,8 @@ test('TOOL: the same call repeated within one stream runs once', async () => {
 
 test('TOOL: distinct calls in one turn all run and are all recorded', async () => {
   const runs = [];
-  const twoLLM = async function* () {
+  const twoLLM = async function* (history) {
+    if (lastIsToolResult(history)) { yield { text: 'done.' }; return; }
     yield { tool: 'create_todo', args: { content: 'first' } };
     yield { tool: 'create_todo', args: { content: 'second' } };
     yield { text: 'both going' };
@@ -233,19 +246,18 @@ test('TOOL: distinct calls in one turn all run and are all recorded', async () =
   agent.sendUserText('go');
   for (let i = 0; i < 20; i++) await settle();
   assert.deepEqual(runs, ['first', 'second'], 'different args are different acts');
-  const note = agent.history.find((m) => m.role === 'assistant').content;
-  assert.ok(note.includes('"first"') && note.includes('"second"'), 'both calls recorded');
+  assert.deepEqual(toolUses(agent.history).map((b) => b.input.content), ['first', 'second'], 'both calls recorded');
 });
 
-test('TOOL: a burst of relayed results collapses into ONE reply', async () => {
+test('TOOL: a burst of notify() events collapses into ONE reply', async () => {
   const { agent, tts } = makeAgent();
   agent.sendUserText('hi');
   for (let i = 0; i < 20; i++) await settle();
   const before = agent.history.filter((m) => m.role === 'assistant').length;
 
-  agent.notify('[TOOL RESULT open_todo] Opened abc.');
-  agent.notify('[TOOL RESULT open_todo] Opened def.');
-  agent.notify('[TOOL RESULT open_todo] Opened ghi.');
+  agent.notify('[EVENT todo_opened] abc');
+  agent.notify('[EVENT todo_opened] def');
+  agent.notify('[EVENT todo_opened] ghi');
   for (let i = 0; i < 30; i++) await settle();
 
   const added = agent.history.filter((m) => m.role === 'assistant').length - before;
@@ -253,13 +265,13 @@ test('TOOL: a burst of relayed results collapses into ONE reply', async () => {
   assert.equal(tts.maxConcurrent, 1, 'never spoke over itself');
 });
 
-test('TOOL: a NEW request still dispatches (the ledger blocks repeats, not new work)', async () => {
+test('TOOL: a NEW request still dispatches (the record blocks repeats, not new work)', async () => {
   const runs = [];
   // Only refuses to re-call for a request it has ALREADY called for: it looks at the calls made
-  // since the last user message, which is what the persona rule actually says.
+  // since the user last spoke, which is what the persona rule actually says.
   async function* perRequestLLM(history) {
-    const lastUser = history.map((m) => m.role).lastIndexOf('user');
-    const alreadyCalled = history.slice(lastUser).some((m) => m.role === 'assistant' && m.content.includes('[TOOL CALL'));
+    const lastUser = history.findLastIndex((m) => m.role === 'user' && typeof m.content === 'string');
+    const alreadyCalled = toolUses(history.slice(lastUser)).length > 0;
     if (!alreadyCalled) yield { tool: 'create_todo', args: { content: history[lastUser].content } };
     yield { text: 'ok' };
   }
@@ -279,7 +291,10 @@ test('TOOL: a tool that ran is recorded even when the reply itself FAILS', async
     stop() {},
   };
   const { agent, events } = makeAgent({
-    llm: async function* () { yield { tool: 'create_todo', args: { content: 'x' } }; yield { text: 'on it' }; },
+    llm: async function* (history) {
+      if (lastIsToolResult(history)) { yield { text: 'done.' }; return; }
+      yield { tool: 'create_todo', args: { content: 'x' } }; yield { text: 'on it' };
+    },
     tts,
     opts: { tools: { create_todo: { run: (a) => runs.push(a.content) } } },
   });
@@ -287,10 +302,8 @@ test('TOOL: a tool that ran is recorded even when the reply itself FAILS', async
   for (let i = 0; i < 20; i++) await settle();
   assert.equal(runs.length, 1, 'the tool did run');
   assert.ok(events.some((e) => e.type === 'error'), 'the failure surfaced');
-  assert.ok(
-    agent.history.some((m) => m.role === 'assistant' && m.content.includes('[TOOL CALL create_todo]')),
-    'a failed reply still records what it dispatched — otherwise the next turn re-calls it',
-  );
+  assert.equal(toolUses(agent.history, 'create_todo').length, 1,
+    'a failed reply still records what it dispatched — otherwise the next turn re-calls it');
 });
 
 test('REPLAY: replaying a finished reply does not strand a queued notify', async () => {
@@ -300,7 +313,7 @@ test('REPLAY: replaying a finished reply does not strand a queued notify', async
 
   agent.sendUserText('hi');                            // turn A, held open inside speak()
   for (let i = 0; i < 10 && tts.speaking === 0; i++) await settle();
-  agent.notify('[TOOL RESULT open_todo] Opened abc.'); // queues behind A
+  agent.notify('[EVENT todo_opened] abc');             // queues behind A
   agent.replay('some earlier reply');                  // pure TTS — must NOT claim the pending reply
   tts.gate = false; tts.release?.();
   for (let i = 0; i < 40; i++) await settle();
@@ -740,107 +753,60 @@ test('PREFETCH: a provider without prefetchMs keeps the default stability wait',
   } finally { STT_PROVIDERS.elevenlabs = orig; }
 });
 
-// ── [TOOL CALL] mimicry filter ──────────────────────────────────────────────────────────────────
-// The model sometimes TYPES a `[TOOL CALL name] {...}` ledger line into its reply instead of
-// calling the tool natively (it learned the format from its own history). The stream filter must
-// convert a bare typed call into a REAL tool run, drop remembered ones (with → outcome), and never
-// leak the markup into the spoken/visible text.
+// ── Text is never executable ────────────────────────────────────────────────────────────────────
+// Whatever the model TYPES is speech. A tool runs only from a native tool chunk. History records
+// tool use natively (tool_use / tool_result blocks), so there is no notation to imitate — and if a
+// model still prints something that looks like one, it is read aloud, never run.
 
-test('MIMICRY: a typed [TOOL CALL] line runs the tool and never reaches the reply text', async () => {
+test('TEXT: a typed pseudo tool call is plain text — never executed, never stripped', async () => {
   const runs = [];
   const llm = async function* () {
     yield { text: 'Megkeresem.\n' };
-    yield { text: '[TOOL CALL run_shell] {"cmd":"tfa-memory search \\"builtin\\""}' };
-    yield { text: '\nMindjárt megvan.' };
+    yield { text: '[TOOL CALL run_shell] {"cmd":"rm -rf /"}\n' };
+    yield { text: '[TOOL_CALL run_shell] {"cmd":"ls"}' };
   };
-  const { agent, tts } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: (a) => { runs.push(a); return 'ok'; } } } } });
+  const { agent } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: (a) => { runs.push(a); return 'ok'; } } } } });
   agent.sendUserText('keresd meg');
   for (let i = 0; i < 40; i++) await settle();
-  assert.equal(runs.length, 1, 'the typed call became a real tool run');
-  assert.equal(runs[0].cmd, 'tfa-memory search "builtin"');
-  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
-  // History keeps ONE ledger line (from the real run), but the spoken text is markup-free.
-  assert.ok(!said.split('\n').some((l) => !l.startsWith('[TOOL CALL') && l.includes('[TOOL CALL')), 'no markup inside spoken lines');
-  assert.ok(said.includes('Megkeresem.'), 'surrounding prose survived');
-  assert.ok(said.includes('Mindjárt megvan.'), 'text after the line survived');
+  assert.equal(runs.length, 0, 'printed text has no side effects');
+  assert.equal(toolUses(agent.history).length, 0, 'and is not a tool record either');
+  assert.match(spokenText(agent.history), /rm -rf/, 'it is just what the model said');
 });
 
-test('MIMICRY: a remembered call (with → outcome) is dropped, not re-executed', async () => {
-  const runs = [];
-  const llm = async function* () {
-    yield { text: 'Ezt már megnéztem.\n[TOOL CALL run_shell] {"cmd":"ls"} → file1 file2\nNincs benne.' };
-  };
-  const { agent } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: (a) => { runs.push(a); return 'ok'; } } } } });
-  agent.sendUserText('nézd meg');
-  for (let i = 0; i < 40; i++) await settle();
-  assert.equal(runs.length, 0, 'a hallucinated past call never re-executes');
-  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
-  assert.ok(!said.includes('[TOOL CALL'), 'the remembered line is gone');
-  assert.ok(said.includes('Ezt már megnéztem.') && said.includes('Nincs benne.'));
-});
-
-test('MIMICRY: a typed call duplicated by the native tool_use runs once', async () => {
-  const runs = [];
-  const llm = async function* () {
-    yield { tool: 'run_shell', args: { cmd: 'ls' } };
-    yield { text: '[TOOL CALL run_shell] {"cmd":"ls"}\ndone' };
-  };
-  const { agent } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: (a) => { runs.push(a); return 'ok'; } } } } });
+test('TEXT: history carries no textual tool notation — only native blocks', async () => {
+  const llm = async function* () { yield { tool: 'run_shell', args: { cmd: 'ls' } }; yield { text: 'listing.' }; };
+  const { agent } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: () => 'file1' } } } });
   agent.sendUserText('go');
   for (let i = 0; i < 40; i++) await settle();
-  assert.equal(runs.length, 1, 'dedup collapsed the typed echo of the native call');
+  const [asst, results] = agent.history.slice(1, 3);
+  assert.deepEqual(asst.content.map((b) => b.type), ['text', 'tool_use']);
+  assert.equal(asst.content[1].name, 'run_shell');
+  assert.deepEqual(results, { role: 'user', content: [{ type: 'tool_result', tool_use_id: asst.content[1].id, content: 'file1' }] });
+  assert.ok(!JSON.stringify(agent.history).includes('[TOOL'));
 });
 
-test('MIMICRY: marker split across stream chunks is still caught; plain brackets pass through', async () => {
-  const runs = [];
-  const llm = async function* () {
-    yield { text: 'ok [TOO' };
-    yield { text: 'L CALL run_shell] {"cmd":"pwd"}\n' };
-    yield { text: 'see [brackets] stay' };
+test('TEXT: a failing tool records an is_error tool_result the model can react to', async () => {
+  const llm = async function* (history) {
+    if (lastIsToolResult(history)) { yield { text: 'that failed.' }; return; }
+    yield { tool: 'boom', args: {} };
   };
-  const { agent } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: (a) => { runs.push(a); return 'ok'; } } } } });
+  const { agent, events } = makeAgent({ llm, opts: { tools: { boom: { description: '', params: {}, run: () => { throw new Error('kaput'); } } } } });
   agent.sendUserText('go');
   for (let i = 0; i < 40; i++) await settle();
-  assert.equal(runs.length, 1, 'split marker reassembled into a real run');
-  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
-  assert.ok(said.includes('[brackets] stay'), 'ordinary bracketed text is untouched');
+  const [r] = toolResults(agent.history);
+  assert.deepEqual(r, { type: 'tool_result', tool_use_id: toolUses(agent.history)[0].id, content: 'kaput', is_error: true });
+  assert.match(spokenText(agent.history), /that failed/);
+  assert.deepEqual(events.find((e) => e.type === 'tool').result, { text: 'kaput', ok: false });
 });
 
-test('MIMICRY: typed echo of an id-carrying native call (agent-loop) does not re-execute', async () => {
-  const runs = [];
-  const llm = async function* () {
-    // Loop-mode chunk: id + attached result — the loop already executed it.
-    yield { tool: 'run_shell', id: 'call-1', args: { cmd: 'ls' }, result: 'file1' };
-    yield { text: 'Lefuttattam.\n[TOOL CALL run_shell] {"cmd":"ls"}\n' };
-  };
-  const { agent } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: (a) => { runs.push(a); return 'ok'; } } } } });
+test('TEXT: a runaway tool loop is bounded per user utterance', async () => {
+  let calls = 0;
+  const llm = async function* () { calls++; yield { tool: 'again', args: { n: calls } }; };
+  const { agent } = makeAgent({ llm, opts: { tools: { again: { description: '', params: {}, run: () => 'more' } } } });
   agent.sendUserText('go');
-  for (let i = 0; i < 40; i++) await settle();
-  assert.equal(runs.length, 0, 'the typed echo must not execute what the loop already ran');
-});
-
-test('MIMICRY: a false-alarm line keeps its newline when passed through', async () => {
-  const llm = async function* () {
-    yield { text: '[TOOL CALL bad name] not the format\nnext line' };   // space in name → not the ledger format
-  };
-  const { agent } = makeAgent({ llm, opts: {} });
-  agent.sendUserText('go');
-  for (let i = 0; i < 40; i++) await settle();
-  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
-  assert.ok(said.includes('[TOOL CALL bad name] not the format\nnext line'), 'line boundary preserved on passthrough');
-});
-
-test('MIMICRY: a truncated/unparseable typed call is dropped silently', async () => {
-  const runs = [];
-  const llm = async function* () {
-    yield { text: '[TOOL CALL run_shell] {"cmd":"tfa-memory search \\"cut off' };  // stream died mid-JSON
-  };
-  const { agent } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: (a) => { runs.push(a); return 'ok'; } } } } });
-  agent.sendUserText('go');
-  for (let i = 0; i < 40; i++) await settle();
-  assert.equal(runs.length, 0, 'half a command must not execute');
-  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
-  assert.ok(!said.includes('[TOOL CALL'), 'the broken markup did not leak');
+  for (let i = 0; i < 200; i++) await settle();
+  assert.ok(calls <= 8, `stopped after a bounded number of rounds (${calls})`);
+  assert.equal(agent.state, 'listening');
 });
 
 // ── Liveness: host code that never returns must not wedge the turn loop ─────────────────────────
@@ -906,15 +872,15 @@ test('LIVENESS: a hung tool does not block the turn (tools are dispatched, never
   agent.sendUserText('go');
   await before(2000, agent._turn, 'the turn');             // the bug was this never resolving
   assert.equal(agent.state, 'listening', 'the agent is ready for the next turn');
-  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
-  assert.ok(said.includes('[TOOL CALL stuck]'), 'the dispatch is recorded even though the tool never returned');
+  assert.equal(toolUses(agent.history, 'stuck').length, 1, 'the dispatch is recorded even though the tool never returned');
+  assert.match(resultFor(agent.history, toolUses(agent.history)[0].id).content, /still running/, 'with a pending tool_result');
 });
 
-test('LIVENESS: a hung tool is not re-called by the next turn (the ledger stands in for its result)', async () => {
+test('LIVENESS: a hung tool is not re-called by the next turn (the pending record stands in for its result)', async () => {
   let runs = 0;
   // Re-calls the tool unless the history already shows it was dispatched.
   const llm = async function* (history) {
-    if (history.some((m) => m.content?.includes('[TOOL CALL stuck]'))) { yield { text: 'Still waiting.' }; return; }
+    if (toolUses(history, 'stuck').length) { yield { text: 'Still waiting.' }; return; }
     yield { tool: 'stuck', args: {} }; yield { text: 'On it.' };
   };
   const { agent } = makeAgent({ llm, opts: { tools: { stuck: { description: '', params: {}, run: () => { runs++; return new Promise(() => {}); } } } } });
@@ -938,19 +904,18 @@ test('LIVENESS: a hung tool does not block the turn on the TTS-ERROR exit path e
   // reply died — a host tracking bubbles per turn releases that turn's entry on it.
   assert.equal(typeof err.turn, 'number', 'the reply-killing error carries its turn id');
   assert.ok(!events.some((e) => e.type === 'assistant' && e.final), 'no assistant final follows — the error was terminal');
-  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
-  assert.ok(said.includes('[TOOL CALL stuck]'), 'the dispatch is still ledgered on the error path');
+  assert.equal(toolUses(agent.history, 'stuck').length, 1, 'the dispatch is still recorded on the error path');
 });
 
 test('LIVENESS: a tool that awaits notify() completes instead of deadlocking against its own turn', async () => {
   const llm = async function* (history) {
-    if (history.some((m) => m.content?.includes('[TOOL RESULT'))) { yield { text: 'It is sunny.' }; return; }
+    if (history.some((m) => typeof m.content === 'string' && m.content.includes('[EVENT'))) { yield { text: 'It is sunny.' }; return; }
     yield { tool: 'weather', args: {} }; yield { text: 'Checking.' };
   };
   let settled = false;
   const { agent } = makeAgent({ llm, opts: {} });
   agent.tools = { weather: { description: '', params: {}, run: async () => {
-    await agent.notify('[TOOL RESULT weather] sunny');     // queues behind the turn that dispatched us
+    await agent.notify('[EVENT weather] sunny');            // queues behind the turn that dispatched us
     settled = true; return 'sunny';
   } } };
   agent.sendUserText('weather?');
@@ -984,6 +949,7 @@ test('RUNNING: announcement is reported, replaced by the outcome, and never exec
     yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' };  // adapter: outcome attached
     yield { text: 'one file.' };
   };
+  llm.executesTools = true;
   const { agent, events } = makeAgent({ llm, opts: { tools: { run_shell: { description: '', params: {}, run: (a) => { runs.push(a); return 'never'; } } } } });
   agent.sendUserText('go');
   for (let i = 0; i < 40; i++) await settle();
@@ -991,10 +957,10 @@ test('RUNNING: announcement is reported, replaced by the outcome, and never exec
   const tools = events.filter((e) => e.type === 'tool');
   assert.deepEqual(tools[0], { type: 'tool', name: 'run_shell', id: 'c1', args: { cmd: 'ls' }, running: true });
   assert.deepEqual(tools[1], { type: 'tool', name: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' });
-  // Ledger records the call ONCE, with its outcome (the running marker adds nothing).
-  const said = agent.history[agent.history.length - 1].content;
-  assert.equal((said.match(/\[TOOL CALL run_shell\]/g) || []).length, 1);
-  assert.match(said, /→ file1/);
+  // History records the call ONCE, with its outcome (the running marker adds nothing).
+  assert.equal(toolUses(agent.history, 'run_shell').length, 1);
+  assert.equal(resultFor(agent.history, 'c1').content, 'file1');
+  assert.equal(agent.history.at(-1).content, 'one file.', 'the informed follow-up is its own assistant message');
 });
 
 test('RUNNING: a turn dying mid-execution finalizes the announced call as interrupted', async () => {
@@ -1009,9 +975,9 @@ test('RUNNING: a turn dying mid-execution finalizes the announced call as interr
   assert.ok(final, 'the announced call got a resolving event');
   assert.deepEqual(final.result, { ok: false, text: 'interrupted — did not finish' });
   assert.equal(final.id, 'c9', 'resolves the SAME chip the announcement opened');
-  // Never executed and never observed → not in the ledger; the next turn may call it fresh.
-  const said = agent.history.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n');
-  assert.ok(!said.includes('[TOOL CALL run_shell]'));
+  // Announced but never observed → recorded with a pending tool_result, so the next turn knows it
+  // was attempted (and the model is not nudged: the turn was cut by an error, not a result).
+  assert.match(resultFor(agent.history, 'c9').content, /still running/);
 });
 
 test('GATE: an executesTools adapter without acceptsToolGate is never speculated on', async () => {
@@ -1331,14 +1297,12 @@ test('EVENT ORDER: assistant events carry the turn they belong to (late events a
   }
 });
 
-test('RUNNING: an outcome landing AFTER a barge-in mid-execution reaches the model as a [TOOL RESULT] turn', async () => {
+test('RUNNING: an outcome landing AFTER a barge-in mid-execution is patched into its tool_result and the model reacts', async () => {
   let release;
   const done = new Promise((r) => { release = r; });
-  const seen = [];
   const llm = async function* (history) {
-    seen.push(history.map((m) => `${m.role}:${m.content}`));
     const last = history[history.length - 1].content;
-    if (last.startsWith('[TOOL RESULT')) { yield { text: 'it said CHARLIE.' }; return; }
+    if (typeof last === 'string' && last.startsWith('[EVENT tool_result]')) { yield { text: `it said ${resultFor(history, 'c1').content}.` }; return; }
     if (last !== 'run it') { yield { text: 'not yet.' }; return; }
     yield { text: 'running. ' };
     yield { tool: 'run_shell', id: 'c1', args: { cmd: 'sleep 8' }, running: true };
@@ -1370,9 +1334,36 @@ test('RUNNING: an outcome landing AFTER a barge-in mid-execution reaches the mod
   for (let i = 0; i < 40; i++) await settle();
   const tools = events.filter((e) => e.type === 'tool' && e.id === 'c1' && !e.running);
   assert.deepEqual(tools.at(-1).result, 'CHARLIE', 'the chip ends on the real outcome, not "interrupted"');
-  const relay = agent.history.find((m) => m.role === 'user' && m.content.startsWith('[TOOL RESULT run_shell]'));
-  assert.ok(relay, 'late outcome recorded as a soft turn');
-  assert.match(relay.content, /→ CHARLIE/);
+  assert.equal(resultFor(agent.history, 'c1').content, 'CHARLIE', 'the pending tool_result was filled in place');
+  assert.match(spokenText(agent.history), /it said CHARLIE/, 'and the model got to react to it');
   const finals = events.filter((e) => e.type === 'assistant' && e.final).map((e) => e.text);
   assert.ok(finals.includes('it said CHARLIE.'), `model replied over the result: ${JSON.stringify(finals)}`);
+});
+
+test('LATE: a result landing WHILE another reply streams gets its own reaction over the patched block', async () => {
+  let release, releaseReply;
+  const done = new Promise((r) => { release = r; });
+  const replyGate = new Promise((r) => { releaseReply = r; });
+  const requests = [];
+  const llm = async function* (history) {
+    const last = history.at(-1).content;
+    requests.push(last);
+    if (last === 'go') { yield { text: 'running. ' }; yield { tool: 'slow', args: {} }; return; }
+    if (last === 'anything else?') { await replyGate; yield { text: 'no.' }; return; }
+    if (typeof last === 'string' && last.startsWith('[EVENT tool_result]')) { yield { text: `got ${resultFor(history, 'call-1-1').content}.` }; return; }
+    yield { text: 'unexpected' };
+  };
+  const { agent } = makeAgent({ llm, opts: { tools: { slow: { run: () => done.then(() => 'ZULU') } } } });
+  agent.sendUserText('go');
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(requests.length, 1, 'no follow-up over a still-pending result');
+  agent.sendUserText('anything else?');
+  for (let i = 0; i < 10; i++) await settle();
+  release();                                                       // result lands while "anything else?" streams
+  for (let i = 0; i < 10; i++) await settle();
+  releaseReply();
+  for (let i = 0; i < 40; i++) await settle();
+  assert.equal(resultFor(agent.history, 'call-1-1').content, 'ZULU', 'patched in place');
+  assert.match(spokenText(agent.history), /got ZULU/, 'a fresh request saw the patched result');
+  assert.equal(requests.length, 3, 'exactly one extra reaction');
 });

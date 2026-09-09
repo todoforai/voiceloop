@@ -187,3 +187,25 @@ test('abort mid-stream surfaces as AbortError', async () => {
   ctl.abort();
   await assert.rejects(gen.next(), (e) => e.name === 'AbortError');
 });
+
+import { toOpenAIMessages } from './llm-openai.js';
+
+test('toOpenAIMessages: native tool blocks → tool_calls + role:tool; text kept; is_error text-marked', () => {
+  const out = toOpenAIMessages([
+    { role: 'user', content: 'go' },
+    { role: 'assistant', content: [{ type: 'text', text: 'on it' }, { type: 'tool_use', id: 'c1', name: 'ls', input: { p: '.' } }, { type: 'tool_use', id: 'c2', name: 'rm', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'a b' }, { type: 'tool_result', tool_use_id: 'c2', content: 'denied', is_error: true }, { type: 'text', text: 'hurry' }] },
+    { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+  ]);
+  assert.deepEqual(out, [
+    { role: 'user', content: 'go' },
+    { role: 'assistant', content: 'on it', tool_calls: [
+      { id: 'c1', type: 'function', function: { name: 'ls', arguments: '{"p":"."}' } },
+      { id: 'c2', type: 'function', function: { name: 'rm', arguments: '{}' } },
+    ] },
+    { role: 'tool', tool_call_id: 'c1', content: 'a b' },
+    { role: 'tool', tool_call_id: 'c2', content: '[failed] denied' },
+    { role: 'user', content: 'hurry' },
+    { role: 'user', content: 'hello' },
+  ]);
+});
