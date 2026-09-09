@@ -982,7 +982,15 @@ export class VoiceAgent {
           // call (llm.executesTools mode) must collapse too, or it would execute the tool a second time.
           const dup = calls.some((c) => callKey(c) === callKey(item) ||
             ((!c.id || !item.id) && c.tool === item.tool && callArgs(c) === callArgs(item)));
-          if (!dup) { calls.push(item); self._runTool(item); }
+          if (!dup) {
+            calls.push(item); self._runTool(item);
+            // Late outcome: the turn already closed (barge-in mid-execution) and its ledger is
+            // written, so this result would reach the transcript chip but never the model. Relay it
+            // as a soft [TOOL RESULT] turn — the same channel out-of-band receipts use — so the next
+            // reply knows what the tool returned instead of seeing a call that vanished.
+            if (finalized && ('result' in item || 'error' in item))
+              self.notify(`[TOOL RESULT ${item.tool}] ${callArgs(item)}${ledgerOutcome(item)}`);
+          }
           continue;
         }
         if (self.state === 'thinking') self._set('speaking');  // first token → TTS stage

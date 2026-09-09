@@ -1330,3 +1330,49 @@ test('EVENT ORDER: assistant events carry the turn they belong to (late events a
     assert.ok(finals.length <= 1, 'a turn emits at most one final');
   }
 });
+
+test('RUNNING: an outcome landing AFTER a barge-in mid-execution reaches the model as a [TOOL RESULT] turn', async () => {
+  let release;
+  const done = new Promise((r) => { release = r; });
+  const seen = [];
+  const llm = async function* (history) {
+    seen.push(history.map((m) => `${m.role}:${m.content}`));
+    const last = history[history.length - 1].content;
+    if (last.startsWith('[TOOL RESULT')) { yield { text: 'it said CHARLIE.' }; return; }
+    if (last !== 'run it') { yield { text: 'not yet.' }; return; }
+    yield { text: 'running. ' };
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'sleep 8' }, running: true };
+    await done;                                                        // tool still executing when the turn is cut
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'sleep 8' }, result: 'CHARLIE' };
+  };
+  llm.executesTools = true; llm.acceptsToolGate = true;
+  const tts = {   // barge-in TTS: returns the heard prefix on abort but leaves the producer draining (what speak() does)
+    setOnProgress() {},
+    async speak(stream, signal) {
+      const it = stream[Symbol.asyncIterator]();
+      let heard = '';
+      while (!signal.aborted) {
+        const r = await Promise.race([it.next(), new Promise((res) => signal.addEventListener('abort', () => res({ done: true }), { once: true }))]);
+        if (r.done) break;
+        heard += r.value;
+      }
+      (async () => { while (!(await it.next()).done); })().catch(() => {});
+      return heard;
+    },
+    stop() {},
+  };
+  const { agent, events } = makeAgent({ llm, tts });
+  agent.sendUserText('run it');
+  for (let i = 0; i < 10; i++) await settle();
+  agent._onUserTurn('did you get it?', { speech: true });               // barge-in while the tool runs
+  for (let i = 0; i < 20; i++) await settle();
+  release();
+  for (let i = 0; i < 40; i++) await settle();
+  const tools = events.filter((e) => e.type === 'tool' && e.id === 'c1' && !e.running);
+  assert.deepEqual(tools.at(-1).result, 'CHARLIE', 'the chip ends on the real outcome, not "interrupted"');
+  const relay = agent.history.find((m) => m.role === 'user' && m.content.startsWith('[TOOL RESULT run_shell]'));
+  assert.ok(relay, 'late outcome recorded as a soft turn');
+  assert.match(relay.content, /→ CHARLIE/);
+  const finals = events.filter((e) => e.type === 'assistant' && e.final).map((e) => e.text);
+  assert.ok(finals.includes('it said CHARLIE.'), `model replied over the result: ${JSON.stringify(finals)}`);
+});
