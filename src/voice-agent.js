@@ -202,7 +202,7 @@ export class VoiceAgent {
       // `getSttToken` is called with the provider actually running — the RESOLVED one, so a host
       // whose credential differs per provider never has to re-derive the webspeech downgrade
       // (that rule lives here, in resolveSttProvider, and must not be mirrored host-side).
-      sttTokenUrl, getToken: getSttToken && (() => getSttToken(this.sttProvider)), sttUsageUrl, eotThreshold: sttEotThreshold,
+      sttTokenUrl, getToken: getSttToken && (() => getSttToken(this.sttProvider)), sttUsageUrl, fetchFn, eotThreshold: sttEotThreshold,
       onPartial: (text, ms, committed = '') => {
         const interim = `${committed} ${text}`.trim();
         this._turnText = interim;   // latest interim (committed prefix + live tail) for the turn detector

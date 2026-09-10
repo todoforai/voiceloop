@@ -48,7 +48,7 @@ const newSocket = (url, protocols) => {
 };
 
 // Common opts shape (provided by the VoiceAgent):
-//   { apiKey, sttUrl, sttModel, sttLang, keyterms, sttTokenUrl, getToken, sttUsageUrl,
+//   { apiKey, sttUrl, sttModel, sttLang, keyterms, sttTokenUrl, getToken, sttUsageUrl, fetchFn (usage POSTs),
 //     onPartial, onFinal, onError, onClose, isClosed }
 //
 // AUTH (cloud providers): the raw provider key must stay server-side. Either
@@ -107,12 +107,12 @@ async function mintSttToken(url, apiKey, onFatal, getToken) {
 // Accumulate streamed samples and flush them to /stt/usage — inline once USAGE_FLUSH_SECONDS is
 // crossed, and again whenever the caller flushes on close (billing is trust-but-verify: the client
 // reports what it streamed since the backend can't meter a direct browser↔provider socket).
-function makeUsageReporter(sttUsageUrl, apiKey, provider, extra = {}) {
+function makeUsageReporter(sttUsageUrl, apiKey, provider, extra = {}, fetchFn = fetch) {
   let samples = 0;
   const flush = () => {
     const seconds = samples / 16000; samples = 0;
     if (seconds <= 0 || !sttUsageUrl) return;
-    fetch(sttUsageUrl, {
+    fetchFn(sttUsageUrl, {
       method: 'POST', keepalive: true,
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
       body: JSON.stringify({ seconds, provider, ...extra }),
@@ -133,7 +133,7 @@ export function makeElevenLabsSTT(opts) {
   const sttUrl = opts.sttUrl || 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
   const sttModel = opts.sttModel || 'scribe_v2_realtime';
   let ws = null, opening = false, outbox = [], sentSinceCommit = false, sttStart = 0;
-  const usage = makeUsageReporter(sttUsageUrl, apiKey, 'elevenlabs');
+  const usage = makeUsageReporter(sttUsageUrl, apiKey, 'elevenlabs', {}, opts.fetchFn);
 
   const sendAudio = (i16) => {
     if (!ws || ws.readyState !== 1) { outbox.push(i16); return; }
@@ -277,7 +277,7 @@ export function makeSpeechmaticsSTT(opts) {
     flushFinal(true);
   }, ms); };
 
-  const usage = makeUsageReporter(sttUsageUrl, apiKey, 'speechmatics', { model: sttModel || 'standard' });
+  const usage = makeUsageReporter(sttUsageUrl, apiKey, 'speechmatics', { model: sttModel || 'standard' }, opts.fetchFn);
 
   const sendAudio = (i16) => {
     if (!ws || ws.readyState !== 1 || !started) { outbox.push(i16); return; }
@@ -485,7 +485,7 @@ export function makeDeepgramSTT(opts) {
   // TurnInfo.transcript is cumulative for the CURRENT turn (Flux restarts it on each new turn_index),
   // so `turnText` is simply the latest transcript — no committed/tail split needed.
   let turnText = '', audioSinceFinal = false, awaitingFinal = false, safetyTimer = null;
-  const usage = makeUsageReporter(sttUsageUrl, apiKey, 'deepgram', { model });
+  const usage = makeUsageReporter(sttUsageUrl, apiKey, 'deepgram', { model }, opts.fetchFn);
 
   // Pre-open buffer is a bounded PREROLL (~1s), not a backlog: Flux is a real-time model — burst-
   // sending seconds of buffered audio after a slow token fetch/handshake makes its whole timeline lag

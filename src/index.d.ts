@@ -131,8 +131,8 @@ export interface VoiceAgentOptions {
   /** LLM model id sent to the backend `/llm` route; empty → the backend's VOICE_MODEL default. */
   model?: string;
   llm?: LLM;
-  /** Transport seam for the built-in LLM adapter; defaults to global fetch. For tests and hosts
-   *  that must wrap every request (auth refresh, tracing). Unused when you pass your own `llm`. */
+  /** Transport seam for the built-in LLM adapter AND the STT usage reports; defaults to global
+   *  fetch. For tests and hosts that must wrap every request (auth refresh, tracing). */
   fetchFn?: typeof fetch;
   apiKey?: string;
   /** Full endpoint URLs, not a base: voiceloop composes no routes, so a host can point the LLM and
