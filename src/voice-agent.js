@@ -172,7 +172,13 @@ export class VoiceAgent {
                 tts, speed, sttLang = 'en', micDeviceId = '', sttProvider = 'webspeech', sttEotThreshold,
                 sttTokenUrl = '', getSttToken, sttUsageUrl = '', sttUrl = '', sttModel = '',
                 tools = {}, keyterms = [], preroll = TUNING.PREROLL_CHUNKS, vadOptions = {}, turnDetector = null,
-                maxPauseMs = TUNING.MAX_PAUSE_MS, bargeInMinChars, onEvent = () => {} } = {}) {
+                maxPauseMs = TUNING.MAX_PAUSE_MS, bargeInMinChars, audioIO = null, onEvent = () => {} } = {}) {
+    // Host-supplied mic capture (React Native, Electron main, tests): `startCapture(onFrame)` delivers
+    // 16 kHz mono Float32 frames (~256 ms) and resolves a handle with stop()/setMuted(). Replaces the
+    // whole getUserMedia + AudioWorklet + Silero path — the bootstrap energy-VAD then runs for the
+    // session (no ONNX/WASM on native), which is fine with a continuous STT (Deepgram Flux) that
+    // does end-of-turn itself; VAD only drives state events + barge-in reset there.
+    this.audioIO = audioIO; this._capture = null;
     // Each agent gets its own PiperTTS (it owns an AudioContext + playing node) — a shared
     // module-level default would make two agents fight over one audio output. `speed` scales
     // playback rate (1.2 → 20% faster) on the default TTS; ignored if a custom `tts` is passed.
@@ -356,6 +362,7 @@ export class VoiceAgent {
       setTimeout(() => { if (gen === this._pipelineGen && !this._closed) this.tts.warm?.().catch(() => {}); }, TUNING.TTS_WARM_DELAY_MS);
       return;
     }
+    if (this.audioIO) return this._startNative();
     // WARM RESUME: stop() pauses (not tears down) the pipeline, so a resume of the SAME agent finds the
     // mic stream + audio graph + VAD model still alive — just re-arm them. This skips the getUserMedia
     // permission round-trip AND the MicVAD.new() Silero/ONNX cold start (the bulk of "open→listening"
@@ -463,6 +470,27 @@ export class VoiceAgent {
     })();
   }
 
+  // Native capture path (see `audioIO`): same optimistic 'listening' flip + gen guard as the browser
+  // path, minus the audio graph and Silero. Warm resume reuses the live capture handle.
+  async _startNative() {
+    if (this._capture) {   // warm resume — capture kept alive across stop()
+      this._capture.setMuted?.(this._muted);
+      this.stt.open?.(); this.tts.warm?.().catch(() => {});
+      this._set('listening');
+      return;
+    }
+    const gen = ++this._pipelineGen;
+    this._set('listening');
+    let cap;
+    try { cap = await this.audioIO.startCapture((f32) => { if (gen === this._pipelineGen && !this._closed) this._onCapture(f32); }); }
+    catch (e) { if (gen === this._pipelineGen) { this.stop(); this.onEvent({ type: 'error', error: e?.message || 'Microphone access failed' }); } return; }
+    if (gen !== this._pipelineGen || this._closed) { cap.stop(); return; }
+    this._capture = cap; cap.setMuted?.(this._muted);
+    this._useBootstrap = true; this._sileroPending = false;   // energy-VAD for the whole session
+    this.stt.open?.();
+    setTimeout(() => { if (gen === this._pipelineGen && !this._closed) this.tts.warm?.().catch(() => {}); }, TUNING.TTS_WARM_DELAY_MS);
+  }
+
   // True once the pipeline has been torn down (stop() / a fatal STT error). The host reconciles its
   // own "running" flag against this after an error so a self-stopped agent isn't treated as live.
   get closed() { return this._closed; }
@@ -490,6 +518,7 @@ export class VoiceAgent {
   // session) and before a cold rebuild (mic device switch). After this, start() pays the full cold
   // cost again. Split out so stop() can pause cheaply without duplicating this.
   _teardownPipeline() {
+    this._capture?.stop(); this._capture = null;
     this._vad?.destroy?.(); this._vad = null;
     this._node?.disconnect(); this._node = null;
     this._ctx?.close(); this._ctx = null;
@@ -578,7 +607,7 @@ export class VoiceAgent {
   // VAD and STT, so nothing the user says reaches the agent — without dropping the mic permission
   // or tearing down the pipeline. Stored so a mute toggled while paused applies on the next start().
   setMuted(muted) {
-    this._muted = muted; this._stream?.getAudioTracks().forEach(t => t.enabled = !muted);
+    this._muted = muted; this._stream?.getAudioTracks().forEach(t => t.enabled = !muted); this._capture?.setMuted?.(muted);
     if (muted) this._dropPrefetch();   // the utterance that seeded it just got cut off — no final will claim it
     // A self-capturing STT (Web Speech) has no agent stream to gate — it listens on its OWN mic, so
     // stop it explicitly via setEnabled or a "muted" agent keeps transcribing.
@@ -1476,6 +1505,11 @@ function sentenceEnd(s) {
 // context from the host's mic-button click (unlockAudio) and reuse it for all later playback.
 let sharedCtx = null;
 const audioCtx = () => (sharedCtx ??= new (window.AudioContext || window.webkitAudioContext)());
+// Host-supplied TTS playout (React Native etc.): `load(blob) → { duration, start(offsetSec) → clip }`
+// where clip has the WebAudioClip surface below (currentTime/duration/paused/ended/onended/onpause/pause).
+// Set once per process via setPlaybackIO(); null → shared Web Audio context + AEC loopback sink.
+let playbackIO = null;
+export function setPlaybackIO(io) { playbackIO = io; }
 
 // ── AEC loopback sink ────────────────────────────────────────────────────────
 // THE self-interruption root cause: the browser's echo canceller (getUserMedia
@@ -1630,6 +1664,7 @@ export class StreamingTTS {
   // forward/backward tap inside it), as a non-whitespace offset into `text`. abort always dominates seek.
   async _playBuf(wav, text, signal, prefix = '', startNw = 0) {
     if (signal?.aborted || !wav) return { reason: 'abort', heard: prefix };
+    if (playbackIO) return this._playNative(wav, text, signal, prefix, startNw);
     const ctx = audioCtx();
     // Decode first (works while suspended) so we don't block synthesis on resume.
     let buffer;
@@ -1658,7 +1693,21 @@ export class StreamingTTS {
     if (signal?.aborted) return { reason: 'abort', heard: prefix + sliceNw(text, startNw) };
     const dur = buffer.duration;
     const offsetSec = startNw > 0 ? (startNw / (nw(text) || 1)) * dur : 0;   // tap-into-clip → start offset
-    const clip = new WebAudioClip(ctx, buffer, offsetSec);
+    return this._awaitClip(new WebAudioClip(ctx, buffer, offsetSec), text, signal, prefix, startNw, dur);
+  }
+
+  async _playNative(wav, text, signal, prefix, startNw) {
+    let src;
+    try { src = await playbackIO.load(wav); }
+    catch (e) { throw new Error(`Audio decode: ${e?.message || e}`); }
+    if (signal?.aborted) return { reason: 'abort', heard: prefix + sliceNw(text, startNw) };
+    if (this._seekPending) return { reason: 'seek', heard: prefix + sliceNw(text, startNw) };
+    const dur = src.duration;
+    return this._awaitClip(src.start(startNw > 0 ? (startNw / (nw(text) || 1)) * dur : 0), text, signal, prefix, startNw, dur);
+  }
+
+  // Drive one started clip to a settled {reason, heard}: abort/seek/ended + the spoken-cursor ticks.
+  _awaitClip(clip, text, signal, prefix, startNw, dur) {
     this._audio = clip;
     return new Promise((resolve) => {
       // Proportional position in NON-WHITESPACE space (the same domain seek() uses) → slice `text` to that

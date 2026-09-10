@@ -1,6 +1,6 @@
 export {
   VoiceAgent, StreamingTTS, PiperTTS,
-  unlockAudio, warmVad,
+  unlockAudio, warmVad, setPlaybackIO,
   isSelfEcho, novelChars, toolResultText,
   VOICE_SYSMSG, LANG_NAMES,
 } from './voice-agent.js';

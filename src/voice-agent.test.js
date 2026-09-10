@@ -1394,3 +1394,36 @@ test('DEDUP: id-less calls with different NESTED args are distinct acts', async 
   for (let i = 0; i < 20; i++) await settle();
   assert.deepEqual(runs, [{ a: 1 }, { b: 2 }]);
 });
+
+// ── audioIO seam (native hosts) ─────────────────────────────────────────────────────────────────
+// A host-supplied capture replaces getUserMedia/AudioWorklet/Silero entirely: start() must reach
+// 'listening', frames must flow to the STT (continuous provider gets the raw stream), mute/stop must
+// hit the capture handle, and the bootstrap energy-VAD must drive vad events for the whole session.
+test('audioIO: native capture feeds STT, mute/stop reach the handle, energy-VAD emits vad events', async () => {
+  let onFrame, muted = null, stopped = 0;
+  const audioIO = { startCapture: async (fn) => { onFrame = fn; return { stop: () => stopped++, setMuted: (m) => { muted = m; } }; } };
+  const { agent, events } = makeAgent({ opts: { audioIO } });
+  const fed = [];
+  agent.stt = { continuous: true, open() {}, close() {}, feed: (i16) => fed.push(i16.length), commit() {}, reset() {} };
+  await agent.start();
+  assert.equal(agent.state, 'listening');
+  const loud = new Float32Array(4096).fill(0.5), quiet = new Float32Array(4096);
+  onFrame(loud);
+  assert.deepEqual(fed, [4096]);
+  assert.ok(events.some((e) => e.type === 'vad' && e.active === true), 'energy-VAD fires speech-start');
+  for (let i = 0; i < 10; i++) onFrame(quiet);
+  assert.ok(events.some((e) => e.type === 'vad' && e.active === false), 'energy-VAD fires speech-end');
+  agent.setMuted(true); assert.equal(muted, true);
+  agent.stop(); assert.equal(stopped, 0, 'stop() pauses, keeps capture warm');
+  await agent.start(); assert.equal(agent.state, 'listening');
+  agent.destroy(); assert.equal(stopped, 1);
+});
+
+test('audioIO: capture failure self-stops with an error event', async () => {
+  const audioIO = { startCapture: async () => { throw new Error('mic denied'); } };
+  const { agent, events } = makeAgent({ opts: { audioIO } });
+  agent.stt = { continuous: true, open() {}, close() {}, feed() {}, commit() {}, reset() {} };
+  await agent.start();
+  assert.equal(agent.state, 'idle');
+  assert.ok(events.some((e) => e.type === 'error' && /mic denied/.test(e.error)));
+});

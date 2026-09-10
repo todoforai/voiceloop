@@ -617,3 +617,29 @@ for (const speculative of [false, true]) {
     assert.equal(tts._n, 2, 'only the new request runs after the aborted synth drains');
   });
 }
+
+// ── setPlaybackIO seam (native hosts) ───────────────────────────────────────────────────────────
+// With a host playout registered, _playBuf must never touch the Web Audio context: load() gets the
+// synth blob, start(offset) yields a clip, and abort → clip.pause() + 'abort'; natural end → 'ended'.
+test('setPlaybackIO: routes playback through the host clip, honors abort and natural end', async () => {
+  const { setPlaybackIO } = await import('./voice-agent.js');
+  const clips = [];
+  const io = { load: async (b) => ({ duration: 2, start: (off) => {
+    const c = { currentTime: off, duration: 2, paused: false, ended: false, onended: null, onpause: null, pause() { this.paused = true; this.onpause?.(); } };
+    clips.push({ text: b.text, off, c }); return c; } }) };
+  setPlaybackIO(io);
+  try {
+    const tts = new FakeTTS('v');
+    const ac = new AbortController();
+    const p = tts.speak('First one. Second one.', ac.signal);
+    await settle(); await settle();
+    assert.equal(clips.length, 1, 'first clip started via host playout');
+    clips[0].c.currentTime = 2; clips[0].c.ended = true; clips[0].c.onended();   // natural end → next clip
+    await settle(); await settle();
+    assert.equal(clips.length, 2, 'natural end advanced to the next clip');
+    ac.abort();                                                                  // barge-in mid-clip
+    assert.equal(clips[1].c.paused, true, 'abort pauses the host clip');
+    await p;
+    assert.equal(clips.length, 2, 'nothing played after abort');
+  } finally { setPlaybackIO(null); }
+});

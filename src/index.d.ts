@@ -101,7 +101,29 @@ export interface VoiceTTS {
   setOnProgress?(fn: TtsProgress | null): void;
 }
 
+/** Host-supplied mic capture (React Native, Electron, tests) — replaces getUserMedia + AudioWorklet +
+ *  Silero. Frames: 16 kHz mono Float32, ~256 ms (4096 samples). The bootstrap energy-VAD runs for
+ *  the whole session; pair with a continuous STT (Deepgram Flux) for server-side end-of-turn. */
+export interface AudioIO {
+  startCapture(onFrame: (f32: Float32Array) => void): Promise<{ stop(): void; setMuted?(muted: boolean): void }>;
+}
+/** Minimal clip surface StreamingTTS drives: position for the spoken cursor, pause() for barge-in,
+ *  onended (natural end) / onpause (stopped) callbacks. */
+export interface PlaybackClip {
+  readonly currentTime: number; readonly duration: number; paused: boolean; ended: boolean;
+  onended: (() => void) | null; onpause: (() => void) | null;
+  pause(): void;
+}
+/** Host-supplied TTS playout — replaces the shared Web Audio context + AEC loopback sink. */
+export interface PlaybackIO {
+  load(blob: Blob): Promise<{ duration: number; start(offsetSec: number): PlaybackClip }>;
+}
+/** Route ALL StreamingTTS playback through `io` (process-wide); null restores Web Audio. */
+export function setPlaybackIO(io: PlaybackIO | null): void;
+
 export interface VoiceAgentOptions {
+  /** Native mic capture; omit for the browser pipeline. See AudioIO. */
+  audioIO?: AudioIO;
   sysmsg?: string;
   /** Persona/system prompt prepended to the conversation context. Defaults to the built-in
    *  voice persona (VOICE_SYSMSG); pass your own agent's system message to override it. */
