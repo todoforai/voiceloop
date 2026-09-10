@@ -47,9 +47,10 @@ registerProcessor('capture-processor', class extends AudioWorkletProcessor {
     return true;
   }
 });`;
-const CAPTURE_WORKLET_URL = typeof URL !== 'undefined' && URL.createObjectURL
-  ? URL.createObjectURL(new Blob([CAPTURE_WORKLET_SRC], { type: 'text/javascript' }))
-  : '';
+// Built lazily: React Native ships a URL.createObjectURL that throws ("not implemented"), and a
+// native host (audioIO) never loads the worklet at all — so nothing may run at import time.
+let captureWorkletUrl = null;
+const CAPTURE_WORKLET_URL_GET = () => captureWorkletUrl ??= URL.createObjectURL(new Blob([CAPTURE_WORKLET_SRC], { type: 'text/javascript' }));
 
 // Compose the full system prompt: a persona (base voice persona by default, or a host-supplied one)
 // + the host's conversation context (if any).
@@ -438,7 +439,7 @@ export class VoiceAgent {
       try {
         ctx = new AudioContext({ sampleRate: 16000 });
         const src = ctx.createMediaStreamSource(stream);
-        await ctx.audioWorklet.addModule(CAPTURE_WORKLET_URL);
+        await ctx.audioWorklet.addModule(CAPTURE_WORKLET_URL_GET());
         if (gen !== this._pipelineGen || this._closed) { stream.getTracks().forEach(t => t.stop()); ctx.close(); return; }   // superseded/stopped while loading
         const node = new AudioWorkletNode(ctx, 'capture-processor');
         node.port.onmessage = e => this._onCapture(e.data);   // Float32Array chunk from the audio thread
