@@ -604,6 +604,19 @@ export class VoiceAgent {
   // turn on. Keeps the running session/history alive — no restart needed.
   setSysmsg(sysmsg) { this.sysmsg = composeSysmsg(sysmsg, this._persona, this.sttLang); this._dropPrefetch(); }   // a running speculation was built with the OLD sysmsg
 
+  // Feed the agent something it "looked up" WITHOUT rewriting the system prompt: a tool_use +
+  // tool_result pair appended to history, in the same shape as its own past calls. For live host
+  // context (a watched chat that keeps producing output) this beats setSysmsg(): the prompt prefix
+  // stays byte-identical (provider prompt cache holds), and the model reads it as a fresh
+  // observation rather than a silently mutated system message. `name` should be a tool the agent
+  // really has, so a later "check again" is a natural call, not an imitation of a phantom.
+  pushToolRecord(name, args = {}, result = '') {
+    const id = `host_${Date.now().toString(36)}_${(this._hostRecSeq = (this._hostRecSeq ?? 0) + 1)}`;
+    this.history.push({ role: 'assistant', content: [{ type: 'tool_use', id, name, input: args }] });
+    this.history.push({ role: 'user', content: [toolResultBlock({ id, result })] });
+    this._dropPrefetch();   // the speculation's history base is stale (histLen check would refuse it anyway)
+  }
+
   // Mute/unmute the mic by disabling the stream's audio tracks: the browser then feeds silence to
   // VAD and STT, so nothing the user says reaches the agent — without dropping the mic permission
   // or tearing down the pipeline. Stored so a mute toggled while paused applies on the next start().

@@ -1427,3 +1427,16 @@ test('audioIO: capture failure self-stops with an error event', async () => {
   assert.equal(agent.state, 'idle');
   assert.ok(events.some((e) => e.type === 'error' && /mic denied/.test(e.error)));
 });
+
+test('pushToolRecord: host context lands as a tool_use/tool_result pair, sysmsg untouched', () => {
+  const { agent } = makeAgent({ opts: { sysmsg: 'ctx' } });
+  const before = agent.sysmsg;
+  agent.pushToolRecord('inspect_todo', { ref: 'x' }, 'agent wrote file.ts');
+  assert.equal(agent.sysmsg, before);
+  assert.equal(agent.history.length, 2);
+  const [use] = toolUses(agent.history, 'inspect_todo');
+  assert.deepEqual(use.input, { ref: 'x' });
+  assert.equal(resultFor(agent.history, use.id).content, 'agent wrote file.ts');
+  agent.pushToolRecord('inspect_todo', {}, 'more');
+  assert.notEqual(toolUses(agent.history)[0].id, toolUses(agent.history)[1].id);
+});

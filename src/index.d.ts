@@ -242,6 +242,10 @@ export class VoiceAgent {
   setSpeed(speed: number): void;
   /** Update the host context (e.g. a re-opened chat); applies from the next turn — no restart. */
   setSysmsg(sysmsg?: string): void;
+  /** Append a synthetic tool_use/tool_result pair to history — live host context as an observation
+   *  the agent "made", keeping the system prompt (and its cache prefix) untouched. `name` should be a
+   *  tool the agent really has. Result text is bounded like real tool results. */
+  pushToolRecord(name: string, args?: Record<string, unknown>, result?: unknown): void;
   /** Mute/unmute the mic (disables the stream's audio tracks → silence to VAD+STT); keeps the pipeline live. */
   setMuted(muted: boolean): void;
   /** Mute/unmute the AI's spoken output (TTS): the reply still streams as text but is never voiced. */
