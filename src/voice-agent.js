@@ -1963,7 +1963,9 @@ const CDN_PIPER_WASM = `${CDN}@diffusionstudio/piper-wasm@1.0.0/build/piper_phon
 const ORT_SPECIFIER = 'onnxruntime-web';
 // Dynamic import by URL, hidden from bundlers: Hermes (React Native) rejects `import(expr)` at
 // bytecode compile time, so the syntax can't appear in this file even on paths RN never takes.
-const importUrl = new Function('u', 'return import(u)');
+// Hermes's runtime parser rejects it too, so the Function is built LAZILY — a top-level
+// `new Function(...)` would throw at module load and take the whole import down with it.
+const importUrl = (u) => new Function('u', 'return import(u)')(u);
 
 // OPFS blob cache — same 'piper' directory and url-basename filenames as the lib's own cache, so
 // models already downloaded through the lib are reused (and vice versa).
