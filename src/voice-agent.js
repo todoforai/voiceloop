@@ -1961,6 +1961,9 @@ const CDN_PIPER_WASM = `${CDN}@diffusionstudio/piper-wasm@1.0.0/build/piper_phon
 // literal specifier is resolved by Vite's import analysis BEFORE it checks /* @vite-ignore */ —
 // which fails since onnxruntime-web isn't installed as a dependency.
 const ORT_SPECIFIER = 'onnxruntime-web';
+// Dynamic import by URL, hidden from bundlers: Hermes (React Native) rejects `import(expr)` at
+// bytecode compile time, so the syntax can't appear in this file even on paths RN never takes.
+const importUrl = new Function('u', 'return import(u)');
 
 // OPFS blob cache — same 'piper' directory and url-basename filenames as the lib's own cache, so
 // models already downloaded through the lib are reused (and vice versa).
@@ -2013,7 +2016,7 @@ export class PiperTTS extends StreamingTTS {
       if (typeof document !== 'undefined' && !document.getElementById('vl-importmap')) {
         const { loadVoiceDeps } = await import('./deps.js'); await loadVoiceDeps();
       }
-      return import(/* webpackIgnore: true */ /* @vite-ignore */ CDN_PIPER);
+      return importUrl(CDN_PIPER);
     })();
   }
 
@@ -2043,8 +2046,8 @@ export class PiperTTS extends StreamingTTS {
       const path = lib.PATH_MAP[voiceId];
       if (!path) throw new Error(`unknown Piper voice: ${voiceId}`);
       const [ort, phonMod, cfgBlob, modelBlob] = await Promise.all([
-        import(/* webpackIgnore: true */ /* @vite-ignore */ ORT_SPECIFIER),
-        import(/* webpackIgnore: true */ /* @vite-ignore */ CDN_PIPER_PHONEMIZE),
+        importUrl(ORT_SPECIFIER),
+        importUrl(CDN_PIPER_PHONEMIZE),
         opfsCachedFetch(`${lib.HF_BASE}/${path}.json`),
         opfsCachedFetch(`${lib.HF_BASE}/${path}`, this._onModelProgress),
       ]);
