@@ -156,6 +156,7 @@ iOS ducks the speakers while the recognizer holds the mic — which is exactly w
 | `elevenlabs` | VAD-gated | Scribe v2 realtime, great accuracy |
 | `deepgram` | **Native** (Flux) | Provider's own turn model hears the full stream |
 | `speechmatics` | VAD-gated | Cheapest per second, locked-words-only finals |
+| `soniox` | **Native** (stt-rt-v5) | Provider's own endpointing, 60+ languages incl. Hungarian, $0.12/hr |
 
 ## Bring your own LLM
 

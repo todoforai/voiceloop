@@ -149,7 +149,7 @@ export interface VoiceAgentOptions {
   /** STT backend: 'webspeech' (default — the browser's own on-device SpeechRecognition; free, no
    *  token, no socket, captures its own mic) | 'speechmatics' | 'elevenlabs' (Scribe) | 'deepgram'
    *  (Flux — native model-based end-of-turn detection; the agent feeds it the full mic stream and
-   *  lets it close turns itself). The cloud ones connect the browser DIRECTLY to the provider with a
+   *  lets it close turns itself) | 'soniox' (stt-rt-v5 — same native-endpointing shape as Flux). The cloud ones connect the browser DIRECTLY to the provider with a
    *  short-TTL token the backend mints (raw key stays server-side).
    *  'webspeech' auto-downgrades to a cloud provider in browsers with no SpeechRecognition (Firefox,
    *  the Linux WebKitGTK desktop webview) — read `agent.sttProvider` for what's actually running. */
@@ -175,6 +175,8 @@ export interface VoiceAgentOptions {
    *  confidence the user is done exceeds this threshold. Lower = snappier turn ends, higher = more
    *  patient across mid-thought pauses. Deepgram-only; default from tuning.js (0.7). */
   sttEotThreshold?: number;
+  /** Provider-specific extras forwarded to the STT factory (Soniox: endpointLatencyLevel 0–3, endpointSensitivity −1..1). */
+  sttOptions?: Record<string, unknown>;
   /** Every tool the model may call. voiceloop ships NO built-in tools — a voice library has no
    *  business knowing what a "todo" is — so product tools (and their `run`) are supplied here. */
   tools?: Record<string, VoiceTool>;
@@ -281,7 +283,7 @@ export class VoiceAgent {
   state: 'idle' | 'listening' | 'thinking' | 'speaking';
   /** The STT provider actually in use — differs from the requested one when 'webspeech' was
    *  downgraded to a cloud provider (browser without SpeechRecognition). */
-  readonly sttProvider: 'webspeech' | 'speechmatics' | 'elevenlabs' | 'deepgram';
+  readonly sttProvider: 'webspeech' | 'speechmatics' | 'elevenlabs' | 'deepgram' | 'soniox';
   /** True once the pipeline has been torn down (stop() or a fatal STT error self-stopped it). */
   readonly closed: boolean;
 }
@@ -332,7 +334,7 @@ export interface STTSession {
 export type STTFactory = (opts: STTCallbacks & Record<string, unknown>) => STTSession;
 
 /** The built-in STT provider ids — the keys of STT_PROVIDERS. */
-export type SttProvider = 'webspeech' | 'speechmatics' | 'elevenlabs' | 'deepgram';
+export type SttProvider = 'webspeech' | 'speechmatics' | 'elevenlabs' | 'deepgram' | 'soniox';
 /** What a token minter returns: the short-TTL credential, plus its lifetime in seconds when the
  *  provider reports one (used to cache and pre-mint just before expiry). */
 export interface SttToken { token: string; expires_in?: number }
@@ -343,6 +345,7 @@ export const STT_PROVIDERS: Record<SttProvider, STTFactory>;
  *  wasted download. Answerable without constructing a session, so a host can decide both up front. */
 export function sttSelfCaptures(provider: string): boolean;
 export function makeDeepgramSTT(opts: STTCallbacks & Record<string, unknown>): STTSession;
+export function makeSonioxSTT(opts: STTCallbacks & Record<string, unknown>): STTSession;
 export function makeElevenLabsSTT(opts: STTCallbacks & Record<string, unknown>): STTSession;
 export function makeSpeechmaticsSTT(opts: STTCallbacks & Record<string, unknown>): STTSession;
 export function makeWebSpeechSTT(opts: STTCallbacks & Record<string, unknown>): STTSession;

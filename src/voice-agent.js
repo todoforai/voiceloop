@@ -161,6 +161,7 @@ export class VoiceAgent {
   //   `sttLang` — STT language code ('en'); also pins the reply language.
   //   `keyterms` — domain words to bias STT towards (cloud providers; max 50, ≤20 chars each).
   //   `sttUrl`/`sttModel`/`sttTokenUrl`/`sttUsageUrl`/`sttEotThreshold` — STT provider knobs (stt.js).
+  //   `sttOptions` — provider-specific extras passed through as-is (e.g. Soniox endpointLatencyLevel/endpointSensitivity).
   //   `maxTokens`, `preroll` (chunks kept before VAD fires), `vadOptions` (Silero overrides).
   //   `turnDetector(text)` — async/sync predicate run when VAD hears end-of-speech: return false to
   //     KEEP listening (the user only paused mid-thought), true (default) to close the turn.
@@ -170,7 +171,7 @@ export class VoiceAgent {
   //     barge-in; higher ignores short backchannels ("mhm","yeah"). Defaults live in tuning.js.
   //   `onEvent(e)` — the event tap: { type: 'state'|'stt'|'assistant'|'tool'|'vad'|'level'|'echo'|'error'|'diag', … }.
   constructor({ sysmsg = '', persona, model = '', llm, fetchFn, apiKey = '', llmUrl = '', maxTokens = TUNING.MAX_TOKENS,
-                tts, speed, sttLang = 'en', micDeviceId = '', sttProvider = 'webspeech', sttEotThreshold,
+                tts, speed, sttLang = 'en', micDeviceId = '', sttProvider = 'webspeech', sttEotThreshold, sttOptions = {},
                 sttTokenUrl = '', getSttToken, sttUsageUrl = '', sttUrl = '', sttModel = '',
                 tools = {}, keyterms = [], preroll = TUNING.PREROLL_CHUNKS, vadOptions = {}, turnDetector = null,
                 maxPauseMs = TUNING.MAX_PAUSE_MS, bargeInMinChars, audioIO = null, onEvent = () => {} } = {}) {
@@ -199,7 +200,7 @@ export class VoiceAgent {
     this.sttProvider = resolveSttProvider(sttProvider);
     const makeStt = STT_PROVIDERS[this.sttProvider] ?? STT_PROVIDERS.webspeech;
     this.stt = makeStt({
-      apiKey, sttUrl, sttModel: this.sttProvider === sttProvider ? sttModel : '', sttLang, micDeviceId, keyterms: keyterms.filter(k => k && k.length <= 20).slice(0, 50),
+      ...sttOptions, apiKey, sttUrl, sttModel: this.sttProvider === sttProvider ? sttModel : '', sttLang, micDeviceId, keyterms: keyterms.filter(k => k && k.length <= 20).slice(0, 50),
       // `getSttToken` is called with the provider actually running — the RESOLVED one, so a host
       // whose credential differs per provider never has to re-derive the webspeech downgrade
       // (that rule lives here, in resolveSttProvider, and must not be mirrored host-side).

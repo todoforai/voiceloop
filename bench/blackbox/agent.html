@@ -15,6 +15,9 @@
 
   const q = new URLSearchParams(location.search);
   const sttProvider = q.get('stt') || 'deepgram';
+  const sttOptions = {};   // ?eplat=0..3 ?epsens=-1..1 — Soniox endpoint tuning
+  if (q.has('eplat')) sttOptions.endpointLatencyLevel = +q.get('eplat');
+  if (q.has('epsens')) sttOptions.endpointSensitivity = +q.get('epsens');
   const ttsProvider = q.get('tts') || 'piper';
   const log = (s) => { const d = document.createElement('div'); d.textContent = s; document.getElementById('log').prepend(d); };
 
@@ -52,9 +55,9 @@
     llmUrl: `${location.origin}/v1/chat/completions`,   // the bench server's FIXED mock LLM
     model: 'bench',
     persona: 'irrelevant — the mock LLM ignores the prompt',
-    sttProvider,
+    sttProvider, sttOptions,
     // Each provider mints its token differently — pick the matching bench route.
-    sttTokenUrl: `${location.origin}/bench/${{ elevenlabs: 'el-stt-token', speechmatics: 'sm-stt-token' }[sttProvider] ?? 'stt-token'}`,
+    sttTokenUrl: `${location.origin}/bench/${{ elevenlabs: 'el-stt-token', speechmatics: 'sm-stt-token', soniox: 'sx-stt-token' }[sttProvider] ?? 'stt-token'}`,
     tts: ttsProvider === 'elevenlabs' ? new ElevenLabsTTS({ ttsUrl: `${location.origin}/bench/el-tts` }) : undefined,
     onEvent: (e) => {
       if (e.type === 'state') {

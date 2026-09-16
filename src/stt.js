@@ -607,6 +607,158 @@ export function makeDeepgramSTT(opts) {
   };
 }
 
+// ── Soniox realtime (stt-rt-v5) ──────────────────────────────────────────────
+// Browser↔Soniox direct WS. Auth: the backend mints a temporary API key (POST /v1/auth/temporary-api-key,
+// usage_type transcribe_websocket) and the browser sends it in the FIRST JSON config message — no
+// URL/subprotocol auth. Audio is raw binary pcm_s16le @16k after the config frame.
+//
+// Turn model — TOKENS, not transcripts: every message carries a `tokens` array; `is_final: true`
+// tokens arrive exactly once and are appended, `is_final: false` tokens are the whole current
+// provisional tail and REPLACE the previous tail. Token text carries its own leading space (subword
+// units), so the transcript is a plain concatenation. With enable_endpoint_detection the model does
+// native end-of-turn (semantic + acoustic) and emits a final `<end>` token at the boundary — so like
+// Flux this provider is `continuous` (must hear the silences) + `nativeEOT` (turn closes itself).
+// commit() is the VAD-gated fallback ({"type":"finalize"} → tokens flush final + a `<fin>` marker).
+const SONIOX_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
+const SONIOX_KEEPALIVE_MS = 10000;   // server closes after >20s with no audio/keepalive
+// Soniox errors arrive as { error_code: <http status>, error_type, error_message }. 4xx won't fix
+// itself with a reconnect (bad key/config, balance exhausted — seen live as 402): fatal, so the host
+// stops instead of the continuous feed re-minting + reconnecting forever. 5xx/429 stay recoverable.
+const sonioxFatal = (code) => code >= 400 && code < 500 && code !== 429;
+export function makeSonioxSTT(opts) {
+  const { apiKey, sttModel, sttLang = 'en', keyterms = [], sttTokenUrl, getToken, sttUsageUrl,
+          onPartial, onFinal, onError, onFatal, onClose, isClosed } = opts;
+  const sttUrl = opts.sttUrl || SONIOX_URL;
+  const model = sttModel || 'stt-rt-v5';
+  let ws = null, opening = false, outbox = [], outboxSamples = 0, keepalive = null;
+  // Turn state. Soniox finals are APPEND-ONLY (no cumulative restatement like Flux), so a socket
+  // boundary must wipe them: a stale prefix can't be repaired by the next stream.
+  let finalText = '', tail = '', lastInterim = '', turnStart = 0;
+  let audioSinceFinal = false, awaitingFinal = false, safetyTimer = null;
+  const usage = makeUsageReporter(sttUsageUrl, apiKey, 'soniox', { model }, opts.fetchFn);
+  const OUTBOX_MAX_SAMPLES = 32000;   // ~2s preroll across the token mint + handshake (see Deepgram)
+
+  const sendAudio = (i16) => {
+    if (!ws || ws.readyState !== 1) {
+      outbox.push(i16); outboxSamples += i16.length;
+      while (outboxSamples > OUTBOX_MAX_SAMPLES && outbox.length > 1) outboxSamples -= outbox.shift().length;
+      return;
+    }
+    ws.send(i16.buffer.slice(i16.byteOffset, i16.byteOffset + i16.byteLength));
+    usage.add(i16.length);
+  };
+  const resetText = () => { finalText = ''; tail = ''; lastInterim = ''; turnStart = 0; };
+  const resetTurn = () => { resetText(); clearTimeout(safetyTimer); safetyTimer = null; awaitingFinal = false; };
+  const ms = () => Math.round(performance.now() - (turnStart || performance.now()));
+  const closeTurn = () => {
+    const t = (finalText + tail).trim(), at = ms();
+    resetTurn(); audioSinceFinal = false;
+    onFinal(t, at);
+  };
+  // A partial that retracts to EMPTY must still reach the host (it drops a speculation built on
+  // withdrawn words) — but idle responses with nothing to say shouldn't spam empty callbacks.
+  const emitPartial = () => {
+    const interim = (finalText + tail).trim();
+    if (interim === lastInterim) return;
+    lastInterim = interim;
+    onPartial(interim, ms());
+  };
+
+  const open = async () => {
+    if (opening) return;
+    opening = true;
+    try {
+      const body = await mintSttToken(sttTokenUrl, apiKey, onFatal, getToken);
+      if (!body) { outbox = []; outboxSamples = 0; return; }
+      if (isClosed()) return;
+      // NEW SOCKET = NEW STREAM: whatever the old one left half-finalized is gone with it. A pending
+      // commit() survives (its finalize is re-sent on open, its safety timer still closes the turn)
+      // so the host's closing latch always resolves.
+      resetText();
+      clearInterval(keepalive); keepalive = null;   // the superseded socket's timer must not outlive it
+      const sock = ws = newSocket(sttUrl);
+      sock.binaryType = 'arraybuffer';
+      sock.onopen = () => {
+        if (sock !== ws) return;
+        const config = {
+          api_key: body.token, model, audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1,
+          enable_endpoint_detection: true,
+          // Level 2 measured (bench smalltalk, 5 runs): 1042 → 768 ms voice→voice, 0 mid-sentence
+          // splits; level 3 was faster still (726) but split "Hey there. | Can you hear me?" every run.
+          endpoint_latency_adjustment_level: opts.endpointLatencyLevel ?? 2,
+          ...(opts.endpointSensitivity != null && { endpoint_sensitivity: opts.endpointSensitivity }),
+        };
+        if (sttLang) config.language_hints = [sttLang.slice(0, 2)];
+        if (keyterms.length) config.context = { terms: keyterms };
+        sock.send(JSON.stringify(config));
+        const q = outbox; outbox = []; outboxSamples = 0; for (const c of q) sendAudio(c);
+        if (awaitingFinal) sock.send(JSON.stringify({ type: 'finalize' }));   // a commit() that landed while connecting
+        keepalive = setInterval(() => { if (sock.readyState === 1) sock.send(JSON.stringify({ type: 'keepalive' })); }, SONIOX_KEEPALIVE_MS);
+      };
+      sock.onerror = ev => { if (sock === ws && !isClosed()) { onError('STT socket error'); console.error('Soniox ws error', ev); } };
+      sock.onclose = ev => {
+        usage.flush(); onClose?.();
+        if (sock !== ws) return;   // superseded socket's late close: the new one's state is untouched
+        clearInterval(keepalive); keepalive = null;
+        if (!isClosed() && ev.code !== 1000) onError(`STT closed ${ev.code}: ${ev.reason || 'no reason'}`);
+      };
+      sock.onmessage = ev => {
+        if (sock !== ws || isClosed() || typeof ev.data !== 'string') return;
+        const m = JSON.parse(ev.data);
+        if (m.error_code || m.error_message) {
+          const msg = `${m.error_type || m.error_code || 'error'}: ${m.error_message || ''}`;
+          console.error('Soniox error msg', m);
+          if (sonioxFatal(+m.error_code)) onFatal(`STT ${msg}`); else onError(msg);
+          return;
+        }
+        if (!Array.isArray(m.tokens)) return;
+        // Tokens are chronological and a response may straddle a boundary (…, <end>, next-turn
+        // tokens): handle the markers at their POSITION, so text after one belongs to the next turn.
+        let newTail = '';
+        for (const t of m.tokens) {
+          if (t.text === '<end>' || t.text === '<fin>') { tail = newTail; newTail = ''; closeTurn(); continue; }
+          if (!turnStart) turnStart = performance.now();   // turn's ms clock anchors at its first token
+          if (t.is_final) finalText += t.text; else newTail += t.text;
+        }
+        tail = newTail;
+        emitPartial();
+      };
+    } catch (e) {
+      if (!isClosed()) onFatal(`STT open failed: ${e?.message || e}`);
+    } finally {
+      opening = false;
+    }
+  };
+
+  return {
+    continuous: true,   // native endpointing needs the real silences
+    nativeEOT: true,    // `<end>` token → unsolicited onFinal closes the turn
+    open() { if (!isClosed() && (!ws || ws.readyState >= 2)) open(); },
+    feed(i16) {
+      if (!isClosed() && (!ws || ws.readyState >= 2)) open();
+      sendAudio(i16); audioSinceFinal = true;
+    },
+    reset() { resetTurn(); },
+    // VAD-gated fallback (the agent never calls this in native mode): ask for a manual finalize and
+    // close on the `<fin>` marker, or on the safety timer if it never comes.
+    commit() {
+      if (awaitingFinal) return;
+      if (!audioSinceFinal) { onFinal('', ms()); return; }
+      awaitingFinal = true;
+      if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'finalize' }));   // else onopen sends it
+      clearTimeout(safetyTimer); safetyTimer = setTimeout(closeTurn, TUNING.STT.forceEndSafetyMs);
+    },
+    close() {
+      resetTurn(); audioSinceFinal = false;
+      clearInterval(keepalive); keepalive = null; outbox = []; outboxSamples = 0;
+      usage.flush();
+      const sock = ws; ws = null;
+      if (sock?.readyState === 1) { try { sock.send(''); } catch { /* closing anyway */ } }   // empty frame = end of stream
+      sock?.close();
+    },
+  };
+}
+
 // ── Browser Web Speech API (browser-managed, no token) ───────────────────────
 // "Browser-native" is not "on-device": Chrome may route recognition through a vendor speech
 // service. The win here is zero setup (no key, no token endpoint), not guaranteed privacy.
@@ -877,6 +1029,7 @@ export const STT_PROVIDERS = {
   speechmatics: makeSpeechmaticsSTT,
   elevenlabs: makeElevenLabsSTT,
   deepgram: makeDeepgramSTT,
+  soniox: makeSonioxSTT,
 };
 
 // Self-capturing providers own the mic AND their end-of-turn, so the agent builds no capture

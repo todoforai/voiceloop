@@ -545,6 +545,133 @@ test('deepgram: native EndOfTurn during the commit safety window wins (no duplic
   assert.deepEqual(events.finals, ['race words'], 'exactly one final');
 }));
 
+// ── Soniox realtime provider ─────────────────────────────────────────────────────────────────────
+// Token-based wire: final tokens append once, non-final tokens replace the tail, `<end>` closes the
+// turn (native endpointing → nativeEOT, continuous like Flux). Auth rides in the first JSON frame.
+
+import { makeSonioxSTT } from './stt.js';
+
+async function makeSX() {
+  const events = { partials: [], finals: [] };
+  const stt = makeSonioxSTT({
+    apiKey: 'k', sttTokenUrl: 'http://x/api/v1/stt/soniox-token', sttLang: 'en', keyterms: ['TODOforAI'],
+    onPartial: (text) => events.partials.push(text),
+    onFinal: (text) => events.finals.push(text),
+    onError: () => {}, onFatal: () => {}, onClose: () => {}, isClosed: () => false,
+  });
+  const frame = new Int16Array(1600);
+  stt.feed(frame);
+  await new Promise((r) => setTimeout(r, 0));
+  FakeWS.last.onopen?.();
+  return { stt, events, ws: () => FakeWS.last, frame };
+}
+const tok = (text, is_final) => ({ text, is_final });
+const toks = (ws, ...tokens) => ws.recv({ tokens });
+
+test('soniox: continuous + nativeEOT, config frame first with api_key/model/endpointing/terms, then buffered audio', () => withStubs(async () => {
+  const { stt, ws } = await makeSX();
+  assert.equal(stt.continuous, true);
+  assert.equal(stt.nativeEOT, true);
+  const cfg = JSON.parse(ws().sent[0]);
+  assert.equal(cfg.api_key, 'tok');
+  assert.equal(cfg.model, 'stt-rt-v5');
+  assert.equal(cfg.audio_format, 'pcm_s16le');
+  assert.equal(cfg.sample_rate, 16000);
+  assert.equal(cfg.enable_endpoint_detection, true);
+  assert.equal(cfg.endpoint_latency_adjustment_level, 2);
+  assert.deepEqual(cfg.language_hints, ['en']);
+  assert.deepEqual(cfg.context, { terms: ['TODOforAI'] });
+  assert.ok(ws().sent[1] instanceof ArrayBuffer, 'preroll audio flushed after the config frame');
+  stt.close();
+}));
+
+test('soniox: finals append once, non-finals replace the tail, <end> closes the turn', () => withStubs(async () => {
+  const { stt, events, ws } = await makeSX();
+  toks(ws(), tok('How', false), tok("'re", false));
+  toks(ws(), tok('How', true), tok(' are', true), tok(' y', false));
+  toks(ws(), tok(' you', true), tok('<end>', true));
+  toks(ws(), tok('Second', false));
+  toks(ws(), tok('Second', true), tok(' turn', true), tok('<end>', true));
+  assert.deepEqual(events.partials, ["How're", 'How are y', 'Second']);
+  assert.deepEqual(events.finals, ['How are you', 'Second turn']);
+  stt.close();
+}));
+
+test('soniox: VAD-gated fallback commit() sends finalize and closes on <fin> (no duplicate on safety timer)', () => withStubs(async () => {
+  const { stt, events, ws, frame } = await makeSX();
+  stt.feed(frame);
+  toks(ws(), tok('fallback', true), tok(' words', false));
+  stt.commit();
+  assert.ok(ws().sent.some((s) => typeof s === 'string' && JSON.parse(s).type === 'finalize'));
+  toks(ws(), tok(' words', true), tok('<fin>', true));
+  await new Promise((r) => setTimeout(r, 850));
+  assert.deepEqual(events.finals, ['fallback words'], 'exactly one final');
+  stt.commit();   // nothing fed since → empty close
+  assert.deepEqual(events.finals, ['fallback words', '']);
+  stt.close();
+}));
+
+test('soniox: an empty tail retraction reaches the host once (drops a speculation on withdrawn words)', () => withStubs(async () => {
+  const { stt, events, ws } = await makeSX();
+  toks(ws(), tok('phantom', false), tok(' words', false));
+  toks(ws());          // provisional tail withdrawn
+  toks(ws());          // idle — no repeat
+  assert.deepEqual(events.partials, ['phantom words', '']);
+  stt.close();
+}));
+
+test('soniox: a boundary mid-response splits turns at its position', () => withStubs(async () => {
+  const { stt, events, ws } = await makeSX();
+  toks(ws(), tok('A', true), tok('<end>', true), tok('B', true), tok(' c', false));
+  assert.deepEqual(events.finals, ['A']);
+  assert.deepEqual(events.partials, ['B c']);
+  stt.close();
+}));
+
+test('soniox: reconnect wipes the old stream\'s locked tokens and ignores the stale socket', () => withStubs(async () => {
+  const { stt, events, ws, frame } = await makeSX();
+  const old = ws();
+  toks(old, tok('Hello', true));
+  old.readyState = 3;                       // dropped mid-turn
+  stt.feed(frame);                          // → reopen
+  await new Promise((r) => setTimeout(r, 0));
+  const fresh = ws();
+  assert.notEqual(fresh, old);
+  fresh.onopen?.();
+  toks(old, tok(' stale', true), tok('<end>', true));   // late message from the dead socket
+  toks(fresh, tok('Goodbye', true), tok('<end>', true));
+  assert.deepEqual(events.finals, ['Goodbye']);
+  stt.close();
+}));
+
+test('soniox: a 4xx error (auth/balance) is fatal, 429/5xx are not', () => withStubs(async () => {
+  const errs = [], fatals = [];
+  const stt = makeSonioxSTT({
+    apiKey: 'k', sttTokenUrl: 'http://x/t', onPartial() {}, onFinal() {}, onClose() {}, isClosed: () => false,
+    onError: (e) => errs.push(e), onFatal: (e) => fatals.push(e),
+  });
+  stt.feed(new Int16Array(160));
+  await new Promise((r) => setTimeout(r, 0));
+  FakeWS.last.onopen?.();
+  FakeWS.last.recv({ error_code: 429, error_type: 'rate_limit_exceeded', error_message: 'slow down' });
+  FakeWS.last.recv({ error_code: 402, error_type: 'organization_balance_exhausted', error_message: 'add funds' });
+  assert.equal(errs.length, 1); assert.equal(fatals.length, 1);
+  stt.close();
+}));
+
+test('soniox: commit() while still connecting queues the finalize for onopen', () => withStubs(async () => {
+  const events = { finals: [] };
+  const stt = makeSonioxSTT({
+    apiKey: 'k', sttTokenUrl: 'http://x/t', onPartial() {}, onFinal: (t) => events.finals.push(t), onError() {}, onFatal() {}, onClose() {}, isClosed: () => false,
+  });
+  stt.feed(new Int16Array(160));
+  stt.commit();                              // socket not open yet (token fetch pending)
+  await new Promise((r) => setTimeout(r, 0));
+  FakeWS.last.readyState = 1; FakeWS.last.onopen?.();
+  assert.ok(FakeWS.last.sent.some((x) => typeof x === 'string' && JSON.parse(x).type === 'finalize'));
+  stt.close();
+}));
+
 // ── Web Speech (browser SpeechRecognition) ──────────────────────────────────────────────────────
 // No cloud/token/socket: the provider wraps the browser SpeechRecognition engine, and it OWNS its own
 // mic + end-of-turn (selfCapture + nativeEOT). We stub a fake recognition global + fake timers and

@@ -110,6 +110,15 @@ http.createServer(async (req, res) => {
         res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
         return res.end(JSON.stringify({ token: b.key_value, error: b.detail }));
       }
+      if (url.pathname === '/bench/sx-stt-token') {   // Soniox temporary API key (ttl 300s, rides in the first WS frame)
+        const r = await fetch('https://api.soniox.com/v1/auth/temporary-api-key', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.SONIOX_API_KEY}` },
+          body: JSON.stringify({ usage_type: 'transcribe_websocket', expires_in_seconds: 300 }),
+        });
+        const b = await r.json();
+        res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        return res.end(JSON.stringify({ token: b.api_key, expires_in: 300, error: b.message || b.error }));
+      }
       if (url.pathname === '/bench/el-stt-token') {   // ElevenLabs Scribe realtime single-use token
         const r = await fetch('https://api.elevenlabs.io/v1/single-use-token/realtime_scribe', { method: 'POST', headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY } });
         const b = await r.json();
