@@ -1083,3 +1083,25 @@ test('a getToken that never settles fatals on the timeout instead of hanging for
   ]);
   assert.match(fatals[0], /timed out/);
 });
+
+test('soniox: a turn cut on a continuation cue (em-dash / filler) is merged with the next segment', () => withStubs(async () => {
+  const { stt, events, ws } = await makeSX();
+  toks(ws(), tok('Hi, I need some help with—', true), tok('<end>', true));
+  assert.deepEqual(events.finals, []);
+  toks(ws(), tok('Um.', true), tok('<end>', true));
+  assert.deepEqual(events.finals, []);
+  toks(ws(), tok(' with a dinner', false));
+  assert.equal(events.partials.at(-1), 'Hi, I need some help with— Um. with a dinner');
+  toks(ws(), tok(' with a dinner reservation.', true), tok('<end>', true));
+  assert.deepEqual(events.finals, ['Hi, I need some help with— Um. with a dinner reservation.']);
+  stt.close();
+}));
+
+test('soniox: a held continuation is flushed alone when nothing follows within the hold cap', () => withStubs(async () => {
+  const { stt, events, ws } = await makeSX();
+  toks(ws(), tok('Oh wait—', true), tok('<end>', true));
+  assert.deepEqual(events.finals, []);
+  await new Promise((r) => setTimeout(r, 1600));
+  assert.deepEqual(events.finals, ['Oh wait—']);
+  stt.close();
+}));

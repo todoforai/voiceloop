@@ -625,6 +625,14 @@ const SONIOX_KEEPALIVE_MS = 10000;   // server closes after >20s with no audio/k
 // itself with a reconnect (bad key/config, balance exhausted — seen live as 402): fatal, so the host
 // stops instead of the continuous feed re-minting + reconnecting forever. 5xx/429 stay recoverable.
 const sonioxFatal = (code) => code >= 400 && code < 500 && code !== 429;
+// Soniox's `<end>` is ACOUSTIC-LEANING: it fires ~250ms into any pause, including mid-sentence
+// ones — measured on the bench hesitation audio it closed "Hi, I need some help with—" / "Um." /
+// "with a dinner reservation." as three turns (Flux keeps that as one). Its own signal for "not
+// done" is the em-dash it appends to a cut-off phrase, so: a turn ending in one is held open and
+// merged with what follows; anything else is trusted unless it's a bare filler ("Um."), which is
+// also a continuation. The hold has a cap so a user who genuinely trails off still gets an answer.
+const SONIOX_HOLD_MS = 1500;
+const sonioxContinues = (t) => /[—–-]$/.test(t) || /^(um+|uh+|hmm+|er+|ah+)[.,]?$/i.test(t);
 export function makeSonioxSTT(opts) {
   const { apiKey, sttModel, sttLang = 'en', keyterms = [], sttTokenUrl, getToken, sttUsageUrl,
           onPartial, onFinal, onError, onFatal, onClose, isClosed } = opts;
@@ -635,6 +643,7 @@ export function makeSonioxSTT(opts) {
   // boundary must wipe them: a stale prefix can't be repaired by the next stream.
   let finalText = '', tail = '', lastInterim = '', turnStart = 0;
   let audioSinceFinal = false, awaitingFinal = false, safetyTimer = null;
+  let held = '', holdTimer = null;   // turn closed on a continuation cue, waiting for the rest
   const usage = makeUsageReporter(sttUsageUrl, apiKey, 'soniox', { model }, opts.fetchFn);
   const OUTBOX_MAX_SAMPLES = 32000;   // ~2s preroll across the token mint + handshake (see Deepgram)
 
@@ -648,17 +657,28 @@ export function makeSonioxSTT(opts) {
     usage.add(i16.length);
   };
   const resetText = () => { finalText = ''; tail = ''; lastInterim = ''; turnStart = 0; };
-  const resetTurn = () => { resetText(); clearTimeout(safetyTimer); safetyTimer = null; awaitingFinal = false; };
+  const dropHold = () => { held = ''; clearTimeout(holdTimer); holdTimer = null; };
+  const resetTurn = () => { resetText(); dropHold(); clearTimeout(safetyTimer); safetyTimer = null; awaitingFinal = false; };
   const ms = () => Math.round(performance.now() - (turnStart || performance.now()));
-  const closeTurn = () => {
-    const t = (finalText + tail).trim(), at = ms();
+  const withHeld = (t) => (held ? `${held} ${t.trim()}` : t).trim();
+  const flushHeld = () => {   // hold cap: nothing followed → the cut-off phrase was the whole turn
+    if ((finalText + tail).trim()) { holdTimer = setTimeout(flushHeld, SONIOX_HOLD_MS); return; }   // continuation in progress: its <end> merges
+    const t = held, at = ms(); resetTurn(); audioSinceFinal = false; onFinal(t, at);
+  };
+  const closeTurn = (force = false) => {
+    const seg = (finalText + tail).trim(), t = withHeld(seg), at = ms();
+    if (!force && sonioxContinues(seg)) {   // cut mid-thought: keep it as the prefix of the next segment
+      resetText(); held = t;
+      clearTimeout(holdTimer); holdTimer = setTimeout(flushHeld, SONIOX_HOLD_MS);
+      return;
+    }
     resetTurn(); audioSinceFinal = false;
     onFinal(t, at);
   };
   // A partial that retracts to EMPTY must still reach the host (it drops a speculation built on
   // withdrawn words) — but idle responses with nothing to say shouldn't spam empty callbacks.
   const emitPartial = () => {
-    const interim = (finalText + tail).trim();
+    const interim = withHeld(finalText + tail);
     if (interim === lastInterim) return;
     lastInterim = interim;
     onPartial(interim, ms());
@@ -716,7 +736,7 @@ export function makeSonioxSTT(opts) {
         // tokens): handle the markers at their POSITION, so text after one belongs to the next turn.
         let newTail = '';
         for (const t of m.tokens) {
-          if (t.text === '<end>' || t.text === '<fin>') { tail = newTail; newTail = ''; closeTurn(); continue; }
+          if (t.text === '<end>' || t.text === '<fin>') { tail = newTail; newTail = ''; closeTurn(t.text === '<fin>'); continue; }
           if (!turnStart) turnStart = performance.now();   // turn's ms clock anchors at its first token
           if (t.is_final) finalText += t.text; else newTail += t.text;
         }
@@ -746,7 +766,7 @@ export function makeSonioxSTT(opts) {
       if (!audioSinceFinal) { onFinal('', ms()); return; }
       awaitingFinal = true;
       if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'finalize' }));   // else onopen sends it
-      clearTimeout(safetyTimer); safetyTimer = setTimeout(closeTurn, TUNING.STT.forceEndSafetyMs);
+      clearTimeout(safetyTimer); safetyTimer = setTimeout(() => closeTurn(true), TUNING.STT.forceEndSafetyMs);
     },
     close() {
       resetTurn(); audioSinceFinal = false;
