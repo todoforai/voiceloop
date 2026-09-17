@@ -1105,3 +1105,16 @@ test('soniox: a held continuation is flushed alone when nothing follows within t
   assert.deepEqual(events.finals, ['Oh wait—']);
   stt.close();
 }));
+
+test('soniox: a held continuation does not survive a reconnect (no cross-stream merge, no stale flush)', () => withStubs(async () => {
+  const { stt, events, ws, frame } = await makeSX();
+  const old = ws();
+  toks(old, tok('Book a—', true), tok('<end>', true));
+  old.readyState = 3; stt.feed(frame);   // dropped → reopen
+  await new Promise((r) => setTimeout(r, 0));
+  const fresh = ws(); assert.notEqual(fresh, old); fresh.onopen?.();
+  toks(fresh, tok('Cancel that.', true), tok('<end>', true));
+  await new Promise((r) => setTimeout(r, 1600));
+  assert.deepEqual(events.finals, ['Cancel that.']);
+  stt.close();
+}));

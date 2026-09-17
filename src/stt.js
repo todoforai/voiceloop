@@ -635,12 +635,18 @@ const SONIOX_HOLD_MS = 1500;
 // Same token cache/prewarm as Deepgram (see dgToken): the temporary-key mint + WS open cost ~2s on
 // the first utterance when paid cold on the mic click.
 let sxToken = null, sxTokenExp = 0, sxMintPromise = null;
-export function warmSonioxToken(sttTokenUrl, apiKey, getToken) {
-  if (sxToken && performance.now() < sxTokenExp - 30000) return Promise.resolve();
+// One acquisition path for prewarm AND open(): a click landing mid-prewarm joins that mint
+// instead of starting a second one. `slackMs` = how much life the cached key must have left.
+function acquireSonioxToken(sttTokenUrl, apiKey, onFatal, getToken, slackMs) {
+  if (sxToken && performance.now() < sxTokenExp - slackMs) return Promise.resolve(sxToken);
   return (sxMintPromise ??= (async () => {
-    const body = await mintSttToken(sttTokenUrl, apiKey, () => {}, getToken);
+    const body = await mintSttToken(sttTokenUrl, apiKey, onFatal, getToken);
     if (body) { sxToken = body.token; sxTokenExp = performance.now() + (body.expires_in ?? 300) * 1000; }
+    return body?.token ?? null;
   })().finally(() => { sxMintPromise = null; }));
+}
+export function warmSonioxToken(sttTokenUrl, apiKey, getToken) {
+  return acquireSonioxToken(sttTokenUrl, apiKey, () => {}, getToken, 30000).then(() => {});   // best-effort: open() re-mints
 }
 const sonioxContinues = (t) => /[—–-]$/.test(t) || /^(um+|uh+|hmm+|er+|ah+)[.,]?$/i.test(t);
 export function makeSonioxSTT(opts) {
@@ -698,17 +704,13 @@ export function makeSonioxSTT(opts) {
     if (opening) return;
     opening = true;
     try {
-      let token = (sxToken && performance.now() < sxTokenExp - 15000) ? sxToken : null;
-      if (!token) {
-        const body = await mintSttToken(sttTokenUrl, apiKey, onFatal, getToken);
-        if (!body) { outbox = []; outboxSamples = 0; return; }
-        token = sxToken = body.token; sxTokenExp = performance.now() + (body.expires_in ?? 300) * 1000;
-      }
+      const token = await acquireSonioxToken(sttTokenUrl, apiKey, onFatal, getToken, 15000);
+      if (!token) { outbox = []; outboxSamples = 0; return; }
       if (isClosed()) return;
       // NEW SOCKET = NEW STREAM: whatever the old one left half-finalized is gone with it. A pending
       // commit() survives (its finalize is re-sent on open, its safety timer still closes the turn)
       // so the host's closing latch always resolves.
-      resetText();
+      resetText(); dropHold();   // a held cut-off phrase belongs to the dead stream too
       clearInterval(keepalive); keepalive = null;   // the superseded socket's timer must not outlive it
       const sock = ws = newSocket(sttUrl);
       sock.binaryType = 'arraybuffer';
