@@ -25,11 +25,14 @@ talked over the user (hesitation) / cut its own reply (echo), out of 30 turns.
 | system | clean | hesitation | overlap → talked through | echo | cut itself |
 |---|---|---|---|---|---|
 | OpenAI Realtime * | 870ms | 1290ms | 12/30 → **0** (yields in 130ms) | 790ms | **17/30** |
+| **voiceloop** · soniox + EL flash † | **770ms** | **1010ms** | 15/30 → 7 (660ms) | 1150ms | **0** |
 | **voiceloop** · deepgram + EL flash | 860ms | 1400ms | 2/30 → **0** (420ms) | 930ms | **0** |
 | **voiceloop** · deepgram + Piper (free TTS, local) | 970ms | 1400ms | 0/30 → **0** | — | — |
 | **voiceloop** · webspeech + Piper (zero-key, browser STT) | 2110ms | — | — | — | — |
 | Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 12/30 → **2** (200ms) | 1320ms | **20/30** |
 | ElevenLabs ConvAI | 1450ms | 1810ms | 2/30 → **0** (490ms) | 1410ms | 0 |
+
+† Soniox rows: 2026-09-16, scoring v2, 5 runs each — see [SONIOX-VS-DEEPGRAM.md](SONIOX-VS-DEEPGRAM.md) for the same-day Flux re-run and the tuning story.
 
 **Overlapping the user is not a failure** — people do it constantly, and an agent that jumps in
 during a pause and backs off the moment you keep talking is behaving correctly. So we score the
@@ -254,6 +257,7 @@ other constantly. What separates a natural overlap from steamrolling is whether 
 |---|---|---|---|---|---|---|
 | OpenAI Realtime (gpt-realtime) * | 1285ms (p95 1686) | 1325ms | 12 / 30 | **0** | 130ms | +419ms |
 | Pipecat 1.8.1 · deepgram + EL flash | 1288ms (p95 1860) | 1815ms | 12 / 30 | **2** | 200ms | +242ms |
+| **voiceloop** · soniox + EL flash † | **1014ms** (p95 1661) | — | 15 / 30 | 7 | 660ms | +246ms |
 | **voiceloop** · deepgram + EL flash | 1396ms (p95 1709) | 1457ms | 2 / 30 | **0** | 420ms | +412ms |
 | **voiceloop** · deepgram + Piper | 1400ms (p95 2006) | 1400ms | 0 / 30 | **0** | — | +~350ms |
 | ElevenLabs ConvAI | 1807ms (p95 2069) | 1838ms | 2 / 30 | **0** | 490ms | +353ms |
@@ -310,6 +314,7 @@ to each stack's own echo strategy. Same smalltalk turns; brain comparability as 
 
 | configuration | voice→voice | self-interruptions | echo words in transcript | barge-in stop |
 |---|---|---|---|---|
+| **voiceloop** · soniox + EL flash † | 1147ms (p95 2838) | **0** / 30 turns | 10 | 1695ms |
 | **voiceloop** · deepgram + EL flash | **931ms** (p95 2035) | **0** / 30 turns | 14 | 1460ms |
 | Pipecat 1.8.1 · deepgram + EL flash | 1317ms (p95 1893) | **20** / 30 turns | n/a (no transcript events) | 767ms |
 | OpenAI Realtime (gpt-realtime) * | 793ms (p95 1429) | **17** / 30 turns | 289 | 347ms |
