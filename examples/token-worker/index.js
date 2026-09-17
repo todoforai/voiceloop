@@ -4,10 +4,11 @@
 // never reach the page, so this Worker holds them and hands out only what each hop needs:
 //
 //   POST /stt/token  → { token, expires_in }   short-TTL Deepgram key (browser opens the WS itself)
+//   POST /stt/soniox-token → same shape        short-TTL Soniox key
 //   POST /tts        → audio/mpeg bytes        ElevenLabs proxy (the xi-api-key stays here)
 //   POST /llm        → OpenAI-format SSE       Anthropic proxy (there is no short-TTL key to mint)
 //
-// Secrets (wrangler secret put): DEEPGRAM_API_KEY, ELEVENLABS_API_KEY, ANTHROPIC_API_KEY.
+// Secrets (wrangler secret put): DEEPGRAM_API_KEY, SONIOX_API_KEY, ELEVENLABS_API_KEY, ANTHROPIC_API_KEY.
 // ALLOWED_ORIGINS (var) is a comma-separated allowlist — these routes spend real money, so an
 // open CORS policy is an open wallet.
 //
@@ -99,7 +100,7 @@ export default {
     // Everything below mints a credential or bills a provider. /stt/token mints at most one
     // credential per 5 min so it takes the tight limiter; /tts fires once per spoken SENTENCE and
     // /llm once per turn plus prefetch, so the conversation hot path gets its own, roomier window.
-    const limiter = url.pathname === '/stt/token' ? env.PAID_RATE_LIMITER : env.CONVO_RATE_LIMITER;
+    const limiter = url.pathname.startsWith('/stt/') ? env.PAID_RATE_LIMITER : env.CONVO_RATE_LIMITER;
     if (await rateLimited(req, env, limiter)) return json({ error: 'rate limited — try again in a minute' }, 429, origin);
 
     if (url.pathname === '/stt/token') {
@@ -113,6 +114,18 @@ export default {
       const body = await r.json().catch(() => ({}));
       if (!r.ok || !body.access_token) return json({ error: body.err_msg || body.error || 'grant failed' }, 502, origin);
       return json({ token: body.access_token, expires_in: body.expires_in ?? 300 }, 200, origin);
+    }
+
+    if (url.pathname === '/stt/soniox-token') {
+      if (!env.SONIOX_API_KEY) return json({ error: 'SONIOX_API_KEY not configured' }, 500, origin);
+      const r = await fetch('https://api.soniox.com/v1/auth/temporary-api-key', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${env.SONIOX_API_KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ usage_type: 'transcribe_websocket', expires_in_seconds: 300 }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body.api_key) return json({ error: body.message || body.error || 'mint failed' }, 502, origin);
+      return json({ token: body.api_key, expires_in: 300 }, 200, origin);
     }
 
     if (url.pathname === '/tts') {

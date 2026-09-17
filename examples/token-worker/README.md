@@ -7,6 +7,7 @@ out only what each hop needs.
 | route | returns | why |
 |---|---|---|
 | `POST /stt/token` | `{ token, expires_in }` | short-TTL Deepgram key; the browser opens the WS itself |
+| `POST /stt/soniox-token` | `{ token, expires_in }` | short-TTL Soniox key (same shape) |
 | `POST /tts` | `audio/mpeg` | ElevenLabs proxy — the `xi-api-key` stays server-side |
 | `POST /llm` | OpenAI-format SSE | Anthropic proxy — Claude has no short-TTL key to mint, so the key stays here |
 
@@ -17,6 +18,7 @@ out only what each hop needs.
 ```sh
 wrangler deploy
 wrangler secret put DEEPGRAM_API_KEY
+wrangler secret put SONIOX_API_KEY
 wrangler secret put ELEVENLABS_API_KEY
 wrangler secret put ANTHROPIC_API_KEY
 ```
