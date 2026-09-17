@@ -8,6 +8,7 @@ export {
   STT_PROVIDERS, WEBSPEECH_FALLBACK, resolveSttProvider, webSpeechSupported,
   makeWebSpeechSTT, makeElevenLabsSTT, makeSpeechmaticsSTT, makeDeepgramSTT, makeSonioxSTT, sttSelfCaptures,
   warmDeepgramToken,
+  warmSonioxToken,
 } from './stt.js';
 export { ElevenLabsTTS } from './tts-elevenlabs.js';
 export { loadVoiceDeps, prewarmVoice } from './deps.js';

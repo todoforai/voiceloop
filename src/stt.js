@@ -632,6 +632,16 @@ const sonioxFatal = (code) => code >= 400 && code < 500 && code !== 429;
 // merged with what follows; anything else is trusted unless it's a bare filler ("Um."), which is
 // also a continuation. The hold has a cap so a user who genuinely trails off still gets an answer.
 const SONIOX_HOLD_MS = 1500;
+// Same token cache/prewarm as Deepgram (see dgToken): the temporary-key mint + WS open cost ~2s on
+// the first utterance when paid cold on the mic click.
+let sxToken = null, sxTokenExp = 0, sxMintPromise = null;
+export function warmSonioxToken(sttTokenUrl, apiKey, getToken) {
+  if (sxToken && performance.now() < sxTokenExp - 30000) return Promise.resolve();
+  return (sxMintPromise ??= (async () => {
+    const body = await mintSttToken(sttTokenUrl, apiKey, () => {}, getToken);
+    if (body) { sxToken = body.token; sxTokenExp = performance.now() + (body.expires_in ?? 300) * 1000; }
+  })().finally(() => { sxMintPromise = null; }));
+}
 const sonioxContinues = (t) => /[—–-]$/.test(t) || /^(um+|uh+|hmm+|er+|ah+)[.,]?$/i.test(t);
 export function makeSonioxSTT(opts) {
   const { apiKey, sttModel, sttLang = 'en', keyterms = [], sttTokenUrl, getToken, sttUsageUrl,
@@ -688,8 +698,12 @@ export function makeSonioxSTT(opts) {
     if (opening) return;
     opening = true;
     try {
-      const body = await mintSttToken(sttTokenUrl, apiKey, onFatal, getToken);
-      if (!body) { outbox = []; outboxSamples = 0; return; }
+      let token = (sxToken && performance.now() < sxTokenExp - 15000) ? sxToken : null;
+      if (!token) {
+        const body = await mintSttToken(sttTokenUrl, apiKey, onFatal, getToken);
+        if (!body) { outbox = []; outboxSamples = 0; return; }
+        token = sxToken = body.token; sxTokenExp = performance.now() + (body.expires_in ?? 300) * 1000;
+      }
       if (isClosed()) return;
       // NEW SOCKET = NEW STREAM: whatever the old one left half-finalized is gone with it. A pending
       // commit() survives (its finalize is re-sent on open, its safety timer still closes the turn)
@@ -701,7 +715,7 @@ export function makeSonioxSTT(opts) {
       sock.onopen = () => {
         if (sock !== ws) return;
         const config = {
-          api_key: body.token, model, audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1,
+          api_key: token, model, audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1,
           enable_endpoint_detection: true,
           // Level 2 measured (bench smalltalk, 5 runs): 1042 → 768 ms voice→voice, 0 mid-sentence
           // splits; level 3 was faster still (726) but split "Hey there. | Can you hear me?" every run.
@@ -728,6 +742,7 @@ export function makeSonioxSTT(opts) {
         if (m.error_code || m.error_message) {
           const msg = `${m.error_type || m.error_code || 'error'}: ${m.error_message || ''}`;
           console.error('Soniox error msg', m);
+          if (+m.error_code === 401) { sxToken = null; sxTokenExp = 0; }   // a cached key the server rejects is dead
           if (sonioxFatal(+m.error_code)) onFatal(`STT ${msg}`); else onError(msg);
           return;
         }

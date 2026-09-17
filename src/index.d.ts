@@ -217,6 +217,8 @@ export function warmVad(): Promise<void>;
  *  provider it will actually run: `() => getSttToken('deepgram')`). Warming with the wrong URL
  *  silently no-ops the optimization: the real session just mints again on click. */
 export function warmDeepgramToken(sttTokenUrl?: string, apiKey?: string, getToken?: () => Promise<SttToken>): Promise<void>;
+/** Soniox counterpart of warmDeepgramToken: pre-mints and caches the temporary key. */
+export function warmSonioxToken(sttTokenUrl?: string, apiKey?: string, getToken?: () => Promise<SttToken>): Promise<void>;
 /** The built-in default voice persona (system prompt): terse, speakable answers. Exported so a
  *  host can reuse or extend it instead of restating the "you are being spoken aloud" rules. */
 export const VOICE_SYSMSG: string;
