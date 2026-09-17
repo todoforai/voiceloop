@@ -318,12 +318,23 @@
 </main>
 
 <script type="module">
-import { VoiceAgent, PiperTTS, ElevenLabsTTS, makeOpenAILLM, unlockAudio, prewarmVoice, STT_PROVIDERS, sttSelfCaptures, LANG_NAMES } from './src/index.js';
+import { VoiceAgent, PiperTTS, ElevenLabsTTS, makeOpenAILLM, unlockAudio, prewarmVoice, warmDeepgramToken, warmSonioxToken, STT_PROVIDERS, sttSelfCaptures, LANG_NAMES } from './src/index.js';
 
 // Load VAD/WASM + build the Silero session while the page sits idle — but ONLY for a provider that
 // will actually use it. A selfCapture provider (webspeech) builds no pipeline, so prewarming there
 // downloads an ONNX model to feed a detector that never runs.
 const prewarmIfPipelined = () => { if (!sttSelfCaptures($('sttProvider').value)) prewarmVoice(); };
+
+// Pay the per-hop cold costs while idle, not on ▶: the STT token mint (0.6–2.7s when it races the
+// mic/VAD start) and the LLM route's DNS+TLS. Both keyed on the current field values so a change
+// re-warms the NEW target; all best-effort — open() re-mints and the first turn reconnects on miss.
+const STT_TOKEN_WARMERS = { deepgram: warmDeepgramToken, soniox: warmSonioxToken };
+const prewarmRoutes = () => {
+  const warm = STT_TOKEN_WARMERS[$('sttProvider').value], tokenUrl = $('sttTokenUrl').value.trim();
+  if (warm && tokenUrl) warm(tokenUrl, $('apiKey').value.trim()).catch(() => {});
+  const llmUrl = $('mode').value === 'llm' ? $('llmUrl').value.trim() : $('mode').value === 'hosted' ? HOSTED_LLM_URL : '';
+  if (llmUrl) fetch(llmUrl, { method: 'HEAD', signal: AbortSignal.timeout(3000) }).catch(() => {});
+};
 
 const $ = id => document.getElementById(id);
 const fill = (id, entries) => $(id).append(...entries.map(([value, textContent]) =>
@@ -461,7 +472,7 @@ function onSettingChanged() {
   for (const id of ['llmUrl', 'model']) $(id).disabled = !custom;
   $('sttTokenUrl').disabled = self;
   $('apiKey').disabled = !custom && self;   // used as LLM Bearer OR token-route X-API-Key — dead only when neither hop exists
-  showPipeline(); prewarmIfPipelined();
+  showPipeline(); prewarmIfPipelined(); prewarmRoutes();
 }
 
 // ── the orb's level ─────────────────────────────────────────────────────────
@@ -743,6 +754,7 @@ const applyTts = () => {
   wireModelProgress();
   dropAgent('tts');
   loadVoices();
+  if (tts instanceof ElevenLabsTTS) tts.warm().catch(() => {});   // DNS+TLS now, not 2.5s after ▶ (Piper's 60MB stays behind the click)
   log('tts →', $('ttsProvider').value);
 };
 let ttsUrlTimer;
