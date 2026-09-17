@@ -407,11 +407,16 @@ export class VoiceAgent {
         try {
           stream = await navigator.mediaDevices.getUserMedia({ audio });
         } catch (e) {
-          // The saved mic id no longer exists on this machine (unplugged / different device / stale
-          // cross-profile localStorage) — `exact` throws OverconstrainedError instead of falling back.
-          // Retry once on the system default so a stale preference doesn't brick the whole session.
-          if (deviceId && e.name === 'OverconstrainedError') stream = await navigator.mediaDevices.getUserMedia({ audio: { ...audio, deviceId: undefined } });
-          else throw e;
+          // OverconstrainedError ("Invalid constraint" on WebKit) has two causes:
+          //  - the saved mic id no longer exists here (unplugged / different device / stale
+          //    cross-profile localStorage) — `exact` rejects instead of falling back;
+          //  - WebKitGTK (Tauri on Linux) treats the bare DSP constraints as REQUIRED, so
+          //    channelCount/autoGainControl can be unsatisfiable even with no deviceId.
+          // Degrade in that order — a default mic with default DSP beats no session at all.
+          if (e.name !== 'OverconstrainedError') throw e;
+          stream = await navigator.mediaDevices.getUserMedia({ audio: { ...audio, deviceId: undefined } })
+            .catch(() => navigator.mediaDevices.getUserMedia({ audio: true }))
+            .catch(() => { throw e; });
         }
       } catch (e) {
         // Mic open failed (permission denied / no device / constraints). We already optimistically
