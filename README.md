@@ -108,11 +108,18 @@ into the mic (no AEC):
 | system | latency (clean) | talked through user | cut itself under echo |
 |---|---|---|---|
 | OpenAI Realtime (own LLM)* | 870ms | **0/30** | **17/30** |
+| **voiceloop** (soniox + ElevenLabs flash)† | **770ms** | 7/30 | 0/30 |
 | **voiceloop** (deepgram + ElevenLabs flash) | **980ms** | **0/30** | **0/30** |
 | **voiceloop** (deepgram + Piper, free local TTS) | **970ms** | **0/30** | — |
 | **voiceloop** (webspeech + Piper, zero-key default) | 2110ms | — | — |
 | Pipecat 1.8.1 (same providers) | 1050ms | 2/30 | **20/30** |
 | ElevenLabs ConvAI | 1450ms | **0/30** | 0/30 |
+
+† Soniox row measured 2026-09-16 (5 runs × 6 turns each, scoring v2; the other rows are the
+2026-08-31 v1 numbers). Soniox is the faster and cheaper STT ($0.12/hr vs $0.39/hr, 60+ languages)
+but its endpointing is acoustic-leaning: it enters a mid-sentence pause on 15/30 hesitation turns and
+talks through 7 of them (Flux: 2 → 0). Pick Flux when never-interrupt matters more than 100–400ms.
+Full tables: [bench/results/SONIOX-VS-DEEPGRAM.md](bench/results/SONIOX-VS-DEEPGRAM.md).
 
 The separating failure is echo: with no AEC, the other fast stacks hear their own voice as the
 user and cut their own replies. voiceloop's word-level echo filter runs echo-coupled turns at
