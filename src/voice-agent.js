@@ -979,6 +979,11 @@ export class VoiceAgent {
             // so it could only ever become a stuck spinner — drop it. The outcome chunk still lands.
             if (finalized || !item.id || known) continue;
             accept(item).announced = true;
+            // While the cursor is live the answer is only published on playback ticks, so the host's
+            // copy may lag the tokens generated just before this call. Publish the exact answer at
+            // the boundary FIRST: a host that splits the reply around its calls (text → chip → text
+            // after the result) then cuts at the model's real position, not a frame-old one.
+            if (self._cursorLive) self.onEvent({ type: 'assistant', text: self._replyText, full: answer, final: false, turn });
             self.onEvent({ type: 'tool', name: item.tool, id: item.id, args: item.args, running: true });
             continue;
           }

@@ -1440,3 +1440,37 @@ test('pushToolRecord: host context lands as a tool_use/tool_result pair, sysmsg 
   agent.pushToolRecord('inspect_todo', {}, 'more');
   assert.notEqual(toolUses(agent.history)[0].id, toolUses(agent.history)[1].id);
 });
+
+test('RUNNING: with a live cursor, the announcement is preceded by the exact answer at the boundary', async () => {
+  // Once the TTS progress hook drives the draft, generated tokens are only published on playback
+  // ticks. A host splitting the reply around its calls needs the answer AS OF the call — so the
+  // announcement is preceded by an assistant snapshot carrying it.
+  const llm = async function* () {
+    yield { text: 'Let me' };
+    yield { text: ' check.' };                           // generated after the last tick, before the call
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, running: true };
+    yield { tool: 'run_shell', id: 'c1', args: { cmd: 'ls' }, result: 'file1' };
+    yield { text: ' One file.' };
+  };
+  llm.executesTools = true;
+  const tts = {
+    _progress: null,
+    setOnProgress(f) { tts._progress = f; },
+    async speak(stream) {
+      let heard = '';
+      for await (const t of stream) {
+        if (!heard) { heard = t; tts._progress?.(t); }   // first clip starts → cursor goes live, no ticks after
+        else heard += t;
+      }
+      return heard;
+    },
+    stop() {},
+  };
+  const { agent, events } = makeAgent({ llm, tts });
+  agent.sendUserText('go');
+  for (let i = 0; i < 40; i++) await settle();
+  const i = events.findIndex((e) => e.type === 'tool' && e.running);
+  assert.ok(i > 0, 'the call was announced');
+  assert.deepEqual(events[i - 1], { type: 'assistant', text: 'Let me', full: 'Let me check.', final: false, turn: 1 },
+    'the event right before the announcement carries the answer up to the call');
+});
