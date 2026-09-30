@@ -19,10 +19,13 @@ const EL_API = 'https://api.elevenlabs.io/v1/text-to-speech';
 
 export class ElevenLabsTTS extends StreamingTTS {
   constructor({ ttsUrl, apiKey, voiceId = 'JBFqnCBsd6RMkjVDRZzb' /* George */,
-                modelId = 'eleven_flash_v2_5', format = 'mp3_44100_64', headers = {} } = {}) {
+                modelId = 'eleven_flash_v2_5', format = 'mp3_44100_64', headers = {}, languageCode = '' } = {}) {
     super(voiceId);
     if (!ttsUrl && !apiKey) throw new Error('ElevenLabsTTS needs ttsUrl (backend proxy) or apiKey (direct, dev only)');
     this.ttsUrl = ttsUrl; this.apiKey = apiKey; this.modelId = modelId; this.format = format;
+    // ISO 639-1 ('hu'). Without it Flash auto-detects per SENTENCE — short clips get misread as
+    // English and spoken with English phonetics. Base code only; '' = let the model guess.
+    this.languageCode = String(languageCode || '').split(/[-_]/)[0].toLowerCase();
     this.headers = headers;   // proxy-path auth (X-API-Key etc.) — never sent to ElevenLabs directly
   }
 
@@ -58,8 +61,11 @@ export class ElevenLabsTTS extends StreamingTTS {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(direct ? { 'xi-api-key': this.apiKey } : this.headers) },
       // The proxy form carries voice/model/format in the body so one backend route serves any voice.
-      body: JSON.stringify(direct ? { text, model_id: this.modelId }
-                                  : { text, voice_id: this.voiceId, model_id: this.modelId, output_format: this.format }),
+      body: JSON.stringify({
+        text, model_id: this.modelId,
+        ...(this.languageCode ? { language_code: this.languageCode } : {}),
+        ...(direct ? {} : { voice_id: this.voiceId, output_format: this.format }),
+      }),
       signal,
     });
     if (!res.ok) throw new Error(`ElevenLabs TTS ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);

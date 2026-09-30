@@ -380,7 +380,7 @@ export class StreamingTTS implements VoiceTTS {
  *  talks to ElevenLabs directly and is dev-only. `headers` authenticate proxy requests
  *  (e.g. { 'X-API-Key': ... }) and are never sent on a direct ElevenLabs call. */
 export class ElevenLabsTTS extends StreamingTTS {
-  constructor(options?: { ttsUrl?: string; apiKey?: string; voiceId?: string; modelId?: string; format?: string; headers?: Record<string, string> });
+  constructor(options?: { ttsUrl?: string; apiKey?: string; voiceId?: string; modelId?: string; format?: string; headers?: Record<string, string>; languageCode?: string });
   warm(): Promise<void>;
 }
 
