@@ -202,6 +202,9 @@ export interface VoiceAgentOptions {
   onEvent?: (event: VoiceAgentEvent) => void;
 }
 
+/** Current loudness of the agent's spoken reply (Web Audio playback), 0–1 on the same perceptual curve
+ *  as the mic `level` event; 0 when silent. Sample once per animation frame. */
+export function ttsLevel(): number;
 /** Call from a user-gesture handler (e.g. the mic button click) to bless the shared TTS audio
  *  element on mobile — without this, iOS rejects the async play() of synthesized speech. */
 export function unlockAudio(): void;

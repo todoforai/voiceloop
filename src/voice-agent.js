@@ -1304,14 +1304,7 @@ export class VoiceAgent {
     const now = (globalThis.performance ?? Date).now();
     if (now - this._levelAt < TUNING.LEVEL_MIN_MS) return;
     this._levelAt = now;
-    let sum = 0; for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
-    const rms = Math.sqrt(sum / f32.length);
-    // Perceptual curve, floored: linear RMS spends most of its range on levels nobody can hear, so a
-    // meter driven by it barely moves during speech. The floor is what keeps room noise reading as
-    // silence — without it a cube root maps a near-silent room to ~0.15-0.3 and the meter never rests.
-    const norm = (rms - TUNING.LEVEL_NOISE_FLOOR_RMS) / (TUNING.LEVEL_FULL_SCALE_RMS - TUNING.LEVEL_NOISE_FLOOR_RMS);
-    const level = norm <= 0 ? 0 : Math.min(1, Math.cbrt(norm));
-    this.onEvent({ type: 'level', level });
+    this.onEvent({ type: 'level', level: meterLevel(f32) });
   }
 
   // ── diagnostic tap ─────────────────────────────────────────────────────
@@ -1603,6 +1596,33 @@ async function initAecLoopback(ctx) {
     settle(); sinkBuild = null;
   }
 }
+// RMS of a PCM frame → 0–1 meter level. Perceptual curve, floored: linear RMS spends most of its range
+// on levels nobody can hear, so a meter driven by it barely moves during speech. The floor is what
+// keeps room noise reading as silence — without it a cube root maps a near-silent room to ~0.15-0.3
+// and the meter never rests. Shared by the mic 'level' event and ttsLevel().
+function meterLevel(f32) {
+  let sum = 0; for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+  const norm = (Math.sqrt(sum / f32.length) - TUNING.LEVEL_NOISE_FLOOR_RMS) / (TUNING.LEVEL_FULL_SCALE_RMS - TUNING.LEVEL_NOISE_FLOOR_RMS);
+  return norm <= 0 ? 0 : Math.min(1, Math.cbrt(norm));
+}
+
+// ── TTS output meter ─────────────────────────────────────────────────────────
+// One AnalyserNode every clip also feeds (a fan-out tap beside the real output, so it sees the signal
+// whether playback goes through the AEC sink or straight to the destination). Hosts read it per
+// frame via ttsLevel() to drive a speaking visual from the actual voice, not a fake sway.
+let ttsMeter = null, meterBuf = null;
+const meterFor = (ctx) => {
+  if (!ttsMeter) { ttsMeter = ctx.createAnalyser(); ttsMeter.fftSize = 512; meterBuf = new Float32Array(ttsMeter.fftSize); }
+  return ttsMeter;
+};
+/** Current loudness of the agent's spoken reply, 0–1 (same perceptual curve as the mic 'level'
+ *  event). 0 when nothing plays or before any clip ran. Cheap — call it once per animation frame. */
+export function ttsLevel() {
+  if (!ttsMeter) return 0;
+  ttsMeter.getFloatTimeDomainData(meterBuf);
+  return meterLevel(meterBuf);
+}
+
 export function unlockAudio() {
   try { const ctx = audioCtx(); ctx.resume(); initAecLoopback(ctx); } catch {}   // gesture context → blesses/resumes the shared AudioContext + builds the AEC sink
 }
@@ -1621,6 +1641,7 @@ class WebAudioClip {
     this._node = ctx.createBufferSource();
     this._node.buffer = buffer;
     this._node.connect(ttsSink ?? ctx.destination);   // via the AEC loopback sink when available (see initAecLoopback)
+    this._node.connect(meterFor(ctx));                 // tap for ttsLevel()
     // The native onended fires once — on natural end AND on our stop(). Classify with _stopped, but
     // treat a stop() at/near the buffer's end as a natural end (a pause() racing the final samples
     // shouldn't be reported as a barge-in). _fired guards the single-shot callback (not `ended`, which

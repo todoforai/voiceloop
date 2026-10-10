@@ -24,6 +24,7 @@ class MockCtx {
   async resume() { this.state = 'running'; }
   async decodeAudioData() { return { duration: 1 }; }   // every clip is 1s
   createBufferSource() { return new MockNode(this); }
+  createAnalyser() { return { fftSize: 0, connect() {}, getFloatTimeDomainData() {} }; }
 }
 globalThis.window = { AudioContext: MockCtx, webkitAudioContext: MockCtx };
 
