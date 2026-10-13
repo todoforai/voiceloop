@@ -55,11 +55,16 @@ const CAPTURE_WORKLET_URL_GET = () => captureWorkletUrl ??= URL.createObjectURL(
 // Compose the full system prompt: a persona (base voice persona by default, or a host-supplied one)
 // + the host's conversation context (if any).
 // The LLM otherwise guesses reply language from the (often short/garbled) transcript and drifts to
-// English under the English persona — so state the selected STT language explicitly.
+// English under the English persona — so state the selected STT language as the DEFAULT. Only a
+// default: the setting is often stale (web defaults to 'en', mobile to the device locale) while
+// multilingual STT transcribes whatever is spoken, and a hard "ALWAYS reply in English" made the
+// agent refuse a Hungarian speaker's explicit "answer in Hungarian".
 export const LANG_NAMES = { en: 'English', hu: 'Hungarian', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch', pl: 'Polish', ja: 'Japanese', ko: 'Korean', zh: 'Chinese' };
 const langRule = (lang) => {
   const name = LANG_NAMES[String(lang || '').split(/[-_]/)[0].toLowerCase()];
-  return name ? `ALWAYS reply in ${name} — including tool-call acknowledgements.` : '';
+  return name
+    ? `Reply in the language the user speaks — including tool-call acknowledgements. Default to ${name} (their selected language); switch when they clearly speak another language or ask for one, and stay in it.`
+    : 'Reply in the language the user speaks — including tool-call acknowledgements.';
 };
 // A tool call's arguments, key-sorted — so the SAME act always renders/compares identically no matter
 // what order a provider streamed the keys in (used for dedup).
