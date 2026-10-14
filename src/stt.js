@@ -623,8 +623,11 @@ const SONIOX_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
 const SONIOX_KEEPALIVE_MS = 10000;   // server closes after >20s with no audio/keepalive
 // Soniox errors arrive as { error_code: <http status>, error_type, error_message }. 4xx won't fix
 // itself with a reconnect (bad key/config, balance exhausted — seen live as 402): fatal, so the host
-// stops instead of the continuous feed re-minting + reconnecting forever. 5xx/429 stay recoverable.
-const sonioxFatal = (code) => code >= 400 && code < 500 && code !== 429;
+// stops instead of the continuous feed re-minting + reconnecting forever. 5xx/429 stay recoverable,
+// and so do the per-STREAM 4xx a fresh socket fixes: 408 request_timeout (audio feed stalled, e.g.
+// iOS backgrounding — seen live after ~8min), 413 max_duration_reached, 403 temp_api_key_session_expired.
+const SONIOX_STREAM_ERRORS = new Set(['request_timeout', 'max_duration_reached', 'temp_api_key_session_expired']);
+const sonioxFatal = (code, type) => code >= 400 && code < 500 && code !== 429 && code !== 408 && !SONIOX_STREAM_ERRORS.has(type);
 // Soniox's `<end>` is ACOUSTIC-LEANING: it fires ~250ms into any pause, including mid-sentence
 // ones — measured on the bench hesitation audio it closed "Hi, I need some help with—" / "Um." /
 // "with a dinner reservation." as three turns (Flux keeps that as one). Its own signal for "not
@@ -743,9 +746,10 @@ export function makeSonioxSTT(opts) {
         const m = JSON.parse(ev.data);
         if (m.error_code || m.error_message) {
           const msg = `${m.error_type || m.error_code || 'error'}: ${m.error_message || ''}`;
-          console.error('Soniox error msg', m);
-          if (+m.error_code === 401) { sxToken = null; sxTokenExp = 0; }   // a cached key the server rejects is dead
-          if (sonioxFatal(+m.error_code)) onFatal(`STT ${msg}`); else onError(msg);
+          const code = +m.error_code, fatal = sonioxFatal(code, m.error_type);
+          (fatal ? console.error : console.warn)('Soniox error msg', m);
+          if (code === 401 || code === 403) { sxToken = null; sxTokenExp = 0; }   // a cached key the server rejects is dead
+          if (fatal) onFatal(`STT ${msg}`); else onError(msg);   // recoverable: server closes, next feed() reopens
           return;
         }
         if (!Array.isArray(m.tokens)) return;
