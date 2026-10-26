@@ -1118,3 +1118,35 @@ test('soniox: a held continuation does not survive a reconnect (no cross-stream 
   assert.deepEqual(events.finals, ['Cancel that.']);
   stt.close();
 }));
+
+test('soniox: a transient drop on a live socket reconnects quietly; per-stream 408 too; real failures still surface', () => withStubs(async () => {
+  const errs = [], fatals = [], finals = [];
+  const stt = makeSonioxSTT({
+    apiKey: 'k', sttTokenUrl: 'http://x/t', onPartial() {}, onFinal: (t) => finals.push(t), onClose() {}, isClosed: () => false,
+    onError: (e) => errs.push(e), onFatal: (e) => fatals.push(e),
+  });
+  const reopen = async () => { stt.feed(new Int16Array(160)); await new Promise((r) => setTimeout(r, 0)); const s = FakeWS.last; s.onopen?.(); return s; };
+  const drop = (s, code) => { s.onerror?.({}); s.readyState = 3; s.onclose?.({ code, reason: '' }); };
+
+  const a = await reopen();
+  a.recv({ tokens: [] });                       // server answered → live
+  drop(a, 1006);
+  assert.deepEqual(errs, [], 'live 1006 → no user-facing error (and onerror adds none)');
+
+  const b = await reopen();
+  assert.notEqual(b, a, 'next frame reopened');
+  toks(b, tok('still', true), tok(' here', true), tok('<end>', true));
+  assert.deepEqual(finals, ['still here'], 'the reconnected stream is heard');
+  b.recv({ error_code: 408, error_type: 'request_timeout', error_message: 'Request timeout.' });
+  drop(b, 1000);
+  assert.deepEqual(errs, [], 'per-stream 408 (feed stalled) is silent');
+
+  const c = await reopen();
+  drop(c, 1006);                                 // upgrade accepted, cut before any answer
+  const d = await reopen();
+  d.recv({ tokens: [] });
+  drop(d, 1008);                                 // policy close on a live socket
+  assert.deepEqual(errs, ['STT closed 1006: no reason', 'STT closed 1008: no reason'], 'one row per real failure');
+  assert.deepEqual(fatals, []);
+  stt.close();
+}));

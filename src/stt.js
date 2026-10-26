@@ -59,6 +59,20 @@ const newSocket = (url, protocols) => {
 //     provider actually RUNNING (post-downgrade), so a host whose credential differs per provider
 //     writes one function instead of mirroring the downgrade rule.
 
+// A TRANSIENT close (going away / abnormal / server restart) on a socket the server already
+// answered on — network handoff, phone screen-off / frozen tab, proxy idle cut, all seen as 1006 —
+// is nothing the user can act on: the continuous providers reopen on the very next mic frame, so
+// it's a console warning, not a chat error row. Anything else (a socket cut before any answer, a
+// policy/auth/protocol close) is still reported, so a broken setup can't go silently deaf.
+// onerror alone is never reported: the browser always follows it with onclose (which has the code)
+// — reporting both doubled every drop into "STT socket error" + "STT closed 1006".
+const TRANSIENT_CLOSE = new Set([1001, 1005, 1006, 1011, 1012, 1013, 1014]);
+function reportClose(ev, live, onError) {
+  if (ev.code === 1000) return;
+  const msg = `STT closed ${ev.code}: ${ev.reason || 'no reason'}`;
+  if (live && TRANSIENT_CLOSE.has(ev.code)) console.warn(`${msg} — reconnecting`); else onError(msg);
+}
+
 // ── Shared socket-lifecycle helpers ─────────────────────────────────────────
 // The three providers below have genuinely different turn machines (Speechmatics' straggler cursor,
 // Deepgram's cumulative-turn + token cache, ElevenLabs' simple commit) — those stay separate on
@@ -162,8 +176,8 @@ export function makeElevenLabsSTT(opts) {
       sttStart = performance.now();
       ws = newSocket(`${sttUrl}?${p}`);
       ws.onopen = () => { const q = outbox; outbox = []; for (const it of q) it === 'commit' ? sendCommit() : sendAudio(it); };
-      ws.onerror = ev => { if (!isClosed()) { onError('STT socket error'); console.error('STT ws error', ev); } };
-      ws.onclose = ev => { usage.flush(); onClose?.(); if (!isClosed() && ev.code !== 1000) { onError(`STT closed ${ev.code}: ${ev.reason || 'no reason'}`); console.error('STT ws closed', ev.code, ev.reason); } };
+      ws.onerror = ev => { if (!isClosed()) console.warn('STT ws error', ev); };
+      ws.onclose = ev => { usage.flush(); onClose?.(); if (!isClosed() && ev.code !== 1000) onError(`STT closed ${ev.code}: ${ev.reason || 'no reason'}`); };
       ws.onmessage = ev => {
         const m = JSON.parse(ev.data);
         const ms = Math.round(performance.now() - sttStart);
@@ -307,6 +321,7 @@ export function makeSpeechmaticsSTT(opts) {
       sttStart = performance.now();
       ws = newSocket(`${SM_URL}?jwt=${encodeURIComponent(body.token)}`);
       ws.binaryType = 'arraybuffer';
+      let opened = false;   // server has answered → session is live (see reportClose)
       ws.onopen = () => {
         // Declare the audio format + transcription config, then flush buffered audio once started.
         ws.send(JSON.stringify({
@@ -328,12 +343,13 @@ export function makeSpeechmaticsSTT(opts) {
         }));
       };
       const sock = ws;   // this handler's own socket — feed() may reopen while it's still CLOSING
-      ws.onerror = ev => { if (sock === ws && !isClosed()) { onError('STT socket error'); console.error('SM ws error', ev); } };
+      ws.onerror = ev => { if (sock === ws && !isClosed()) console.warn('SM ws error', ev); };
       // Guard on sock === ws: a superseded socket's late onclose must not kill the NEW socket's
       // keepalive (feed() reopens on readyState>=2, i.e. while the old one is still CLOSING).
-      ws.onclose = ev => { if (sock === ws) { clearInterval(keepalive); keepalive = null; } usage.flush(); onClose?.(); if (!isClosed() && sock === ws && ev.code !== 1000) { onError(`STT closed ${ev.code}: ${ev.reason || 'no reason'}`); } };
+      ws.onclose = ev => { if (sock === ws) { clearInterval(keepalive); keepalive = null; } usage.flush(); onClose?.(); if (!isClosed() && sock === ws) reportClose(ev, opened, onError); };
       ws.onmessage = ev => {
         if (sock !== ws) return;   // stale message from a superseded socket (its clock is dead)
+        opened = true;
         const m = JSON.parse(ev.data);
         const ms = Math.round(performance.now() - sttStart);
         switch (m.message) {
@@ -535,16 +551,18 @@ export function makeDeepgramSTT(opts) {
       // /v1/auth/grant). The token only needs to be valid at handshake time; the socket persists.
       ws = newSocket(`${DG_URL}?${p}`, ['bearer', token]);
       ws.binaryType = 'arraybuffer';
+      let opened = false;   // server has answered → session is live (see reportClose)
       ws.onopen = () => { const q = outbox; outbox = []; outboxSamples = 0; for (const c of q) sendAudio(c); };
-      ws.onerror = ev => { if (!isClosed()) { onError('STT socket error'); console.error('DG ws error', ev); } };
+      ws.onerror = ev => { if (!isClosed()) console.warn('DG ws error', ev); };
       ws.onclose = ev => {
         usage.flush(); onClose?.();
         // Handshake rejected (auth) — likely a stale cached token (clock drift / revocation): drop the
         // cache so the next open() re-mints instead of failing forever within the cached window.
         if (ev.code === 1008 || ev.code === 4001 || ev.code === 1002) { dgToken = null; dgTokenExp = 0; }
-        if (!isClosed() && ev.code !== 1000) { onError(`STT closed ${ev.code}: ${ev.reason || 'no reason'}`); }
+        if (!isClosed()) reportClose(ev, opened, onError);
       };
       ws.onmessage = ev => {
+        opened = true;
         if (typeof ev.data !== 'string') return;
         const m = JSON.parse(ev.data);
         // Continuous stream: the socket lives for the whole session, so the ms clock re-anchors at
@@ -717,6 +735,7 @@ export function makeSonioxSTT(opts) {
       clearInterval(keepalive); keepalive = null;   // the superseded socket's timer must not outlive it
       const sock = ws = newSocket(sttUrl);
       sock.binaryType = 'arraybuffer';
+      let opened = false;   // server has answered → session is live (see reportClose)
       sock.onopen = () => {
         if (sock !== ws) return;
         const config = {
@@ -734,22 +753,25 @@ export function makeSonioxSTT(opts) {
         if (awaitingFinal) sock.send(JSON.stringify({ type: 'finalize' }));   // a commit() that landed while connecting
         keepalive = setInterval(() => { if (sock.readyState === 1) sock.send(JSON.stringify({ type: 'keepalive' })); }, SONIOX_KEEPALIVE_MS);
       };
-      sock.onerror = ev => { if (sock === ws && !isClosed()) { onError('STT socket error'); console.error('Soniox ws error', ev); } };
+      sock.onerror = ev => { if (sock === ws && !isClosed()) console.warn('Soniox ws error', ev); };
       sock.onclose = ev => {
         usage.flush(); onClose?.();
         if (sock !== ws) return;   // superseded socket's late close: the new one's state is untouched
         clearInterval(keepalive); keepalive = null;
-        if (!isClosed() && ev.code !== 1000) onError(`STT closed ${ev.code}: ${ev.reason || 'no reason'}`);
+        if (!isClosed()) reportClose(ev, opened, onError);
       };
       sock.onmessage = ev => {
         if (sock !== ws || isClosed() || typeof ev.data !== 'string') return;
+        opened = true;
         const m = JSON.parse(ev.data);
         if (m.error_code || m.error_message) {
           const msg = `${m.error_type || m.error_code || 'error'}: ${m.error_message || ''}`;
           const code = +m.error_code, fatal = sonioxFatal(code, m.error_type);
           (fatal ? console.error : console.warn)('Soniox error msg', m);
           if (code === 401 || code === 403) { sxToken = null; sxTokenExp = 0; }   // a cached key the server rejects is dead
-          if (fatal) onFatal(`STT ${msg}`); else onError(msg);   // recoverable: server closes, next feed() reopens
+          // Per-stream errors (feed stalled while the phone slept, max duration): the server closes
+          // and the next feed() reopens — nothing for the user to see. 429/5xx are still surfaced.
+          if (fatal) onFatal(`STT ${msg}`); else if (!SONIOX_STREAM_ERRORS.has(m.error_type) && code !== 408) onError(msg);
           return;
         }
         if (!Array.isArray(m.tokens)) return;
