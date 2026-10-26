@@ -542,7 +542,7 @@ export class VoiceAgent {
   // End the session for real: pause logic + release the mic/VAD (turns off the OS mic indicator). The
   // host calls this when it drops the agent (end/close/reset/new-chat) so a paused-but-discarded agent
   // never leaks the microphone.
-  destroy() { this._destroyed = true; this.stop(); this.stt.close(); this._teardownPipeline(); }
+  destroy() { this._destroyed = true; this.stop(); this.stt.close(); this.tts.close?.(); this._teardownPipeline(); }
 
   // Host-triggered barge-in: cut off the current in-flight turn (abort the LLM, stop TTS) WITHOUT
   // tearing down the pipeline — the mic keeps listening. Mirrors `_onBargeIn` but callable from a

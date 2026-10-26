@@ -20,7 +20,8 @@ export type VoiceAgentEvent =
   | { type: 'tool'; name: string; args: Record<string, unknown>; result?: unknown; id?: string; running?: true }
   | { type: 'echo'; text: string }                                        // dropped self-echo (the agent's own TTS leaked into the mic) — diagnostics only
   | { type: 'diag'; diag: 'aec-fallback'; message: string }               // once/session: AEC loopback failed → TTS plays un-cancelled (self-echo only text-filtered)
-  | { type: 'diag'; diag: 'presynth'; text: string }                      // a reply's first clip was synthesized speculatively (latency diagnostics)
+  | { type: 'diag'; diag: 'presynth'; text: string }
+  | { type: 'diag'; diag: 'tts_ws_fallback' | 'tts_ws_error'; error: string }   // ElevenLabsTTS socket path: a clip fell back to HTTP / the provider sent an error frame                      // a reply's first clip was synthesized speculatively (latency diagnostics)
   // Did that speculation pay off? hit = the real reply opened with the presynthesized text (clip
   // reused, latency saved); miss = it didn't (clip discarded). `pre` is what we had guessed.
   | { type: 'diag'; diag: 'presynth-hit' | 'presynth-miss'; text: string; pre: string }
@@ -99,6 +100,8 @@ export interface VoiceTTS {
    *  `scope` is that prefix PLUS the whole clip now playing: the cursor lags real audio, so echo
    *  suppression judges against this upper bound rather than the spoken text. */
   setOnProgress?(fn: TtsProgress | null): void;
+  /** Release held resources (sockets); VoiceAgent.destroy calls it. */
+  close?(): void;
 }
 
 /** Host-supplied mic capture (React Native, Electron, tests) — replaces getUserMedia + AudioWorklet +
@@ -383,8 +386,15 @@ export class StreamingTTS implements VoiceTTS {
  *  talks to ElevenLabs directly and is dev-only. `headers` authenticate proxy requests
  *  (e.g. { 'X-API-Key': ... }) and are never sent on a direct ElevenLabs call. */
 export class ElevenLabsTTS extends StreamingTTS {
-  constructor(options?: { ttsUrl?: string; apiKey?: string; voiceId?: string; modelId?: string; format?: string; headers?: Record<string, string>; languageCode?: string });
+  /** `getWsToken` enables the persistent browser↔ElevenLabs WebSocket path (mint a `tts_websocket`
+   *  single-use token server-side); `usageUrl` receives POST { chars, voice_id, model_id } per
+   *  socket clip so the backend can meter it. Without `getWsToken` every clip goes over HTTP via
+   *  `ttsUrl`; with it, HTTP stays the fallback for any socket failure. */
+  constructor(options?: { ttsUrl?: string; apiKey?: string; voiceId?: string; modelId?: string; format?: string; headers?: Record<string, string>; languageCode?: string;
+                          getWsToken?: () => Promise<{ token?: string }>; usageUrl?: string });
   warm(): Promise<void>;
+  /** Close the socket (VoiceAgent.destroy calls it). */
+  close(): void;
 }
 
 // ── LLM ──────────────────────────────────────────────────────────────────────────────────────
