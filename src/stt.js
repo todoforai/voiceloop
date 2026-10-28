@@ -655,14 +655,16 @@ const sonioxFatal = (code, type) => code >= 400 && code < 500 && code !== 429 &&
 const SONIOX_HOLD_MS = 1500;
 // Same token cache/prewarm as Deepgram (see dgToken): the temporary-key mint + WS open cost ~2s on
 // the first utterance when paid cold on the mic click.
-let sxToken = null, sxTokenExp = 0, sxMintPromise = null;
+// The token body may carry `url`: a Soniox key is bound to its region (US/EU/…), so the backend that
+// minted it names the matching WS host and the client never hardcodes a region.
+let sxToken = null, sxTokenExp = 0, sxUrl = '', sxMintPromise = null;
 // One acquisition path for prewarm AND open(): a click landing mid-prewarm joins that mint
 // instead of starting a second one. `slackMs` = how much life the cached key must have left.
 function acquireSonioxToken(sttTokenUrl, apiKey, onFatal, getToken, slackMs) {
   if (sxToken && performance.now() < sxTokenExp - slackMs) return Promise.resolve(sxToken);
   return (sxMintPromise ??= (async () => {
     const body = await mintSttToken(sttTokenUrl, apiKey, onFatal, getToken);
-    if (body) { sxToken = body.token; sxTokenExp = performance.now() + (body.expires_in ?? 300) * 1000; }
+    if (body) { sxToken = body.token; sxUrl = body.url || ''; sxTokenExp = performance.now() + (body.expires_in ?? 300) * 1000; }
     return body?.token ?? null;
   })().finally(() => { sxMintPromise = null; }));
 }
@@ -673,7 +675,6 @@ const sonioxContinues = (t) => /[—–-]$/.test(t) || /^(um+|uh+|hmm+|er+|ah+)[
 export function makeSonioxSTT(opts) {
   const { apiKey, sttModel, sttLang = 'en', keyterms = [], sttTokenUrl, getToken, sttUsageUrl,
           onPartial, onFinal, onError, onFatal, onClose, isClosed } = opts;
-  const sttUrl = opts.sttUrl || SONIOX_URL;
   const model = sttModel || 'stt-rt-v5';
   let ws = null, opening = false, outbox = [], outboxSamples = 0, keepalive = null;
   // Turn state. Soniox finals are APPEND-ONLY (no cumulative restatement like Flux), so a socket
@@ -733,7 +734,7 @@ export function makeSonioxSTT(opts) {
       // so the host's closing latch always resolves.
       resetText(); dropHold();   // a held cut-off phrase belongs to the dead stream too
       clearInterval(keepalive); keepalive = null;   // the superseded socket's timer must not outlive it
-      const sock = ws = newSocket(sttUrl);
+      const sock = ws = newSocket(opts.sttUrl || sxUrl || SONIOX_URL);
       sock.binaryType = 'arraybuffer';
       let opened = false;   // server has answered → session is live (see reportClose)
       sock.onopen = () => {

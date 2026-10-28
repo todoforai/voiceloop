@@ -344,8 +344,10 @@ export type STTFactory = (opts: STTCallbacks & Record<string, unknown>) => STTSe
 /** The built-in STT provider ids — the keys of STT_PROVIDERS. */
 export type SttProvider = 'webspeech' | 'speechmatics' | 'elevenlabs' | 'deepgram' | 'soniox';
 /** What a token minter returns: the short-TTL credential, plus its lifetime in seconds when the
- *  provider reports one (used to cache and pre-mint just before expiry). */
-export interface SttToken { token: string; expires_in?: number }
+ *  provider reports one (used to cache and pre-mint just before expiry). `url`: the provider WS
+ *  endpoint matching the token's region (Soniox keys are region-bound, US/EU); overrides the
+ *  built-in default, an explicit `sttUrl` still wins. */
+export interface SttToken { token: string; expires_in?: number; url?: string }
 
 export const STT_PROVIDERS: Record<SttProvider, STTFactory>;
 /** Does this provider own the mic and its own end-of-turn? Then the agent builds NO capture pipeline
