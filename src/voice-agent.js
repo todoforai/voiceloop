@@ -32,16 +32,22 @@ export const VOICE_SYSMSG =
 
 const CDN = 'https://cdn.jsdelivr.net/npm/';
 
-// AudioWorklet processor: accumulate the audio-thread's 128-sample render quanta into ~256ms chunks
-// (4096 samples @16kHz — the cadence the pipeline's bootstrap-VAD/preroll math assumes) and post each
-// to the main thread. Kept as a source string → Blob URL so no separate asset/bundler config is needed.
+// AudioWorklet processor: downsample the context's rate to 16kHz (box-average per output sample;
+// passthrough when the context already runs at 16kHz) and accumulate ~256ms chunks (4096 samples
+// @16kHz — the cadence the pipeline's bootstrap-VAD/preroll math assumes), posting each to the main
+// thread. The context runs at the device's native rate: Safari/iOS may ignore or mishandle a 16kHz
+// context fed by a 48kHz mic, so the resample happens here where we control it.
+// Kept as a source string → Blob URL so no separate asset/bundler config is needed.
 const CAPTURE_WORKLET_SRC = `
 registerProcessor('capture-processor', class extends AudioWorkletProcessor {
-  constructor() { super(); this._buf = new Float32Array(4096); this._n = 0; }
+  constructor() { super(); this._buf = new Float32Array(4096); this._n = 0; this._step = sampleRate / 16000; this._acc = 0; this._sum = 0; this._cnt = 0; }
   process(inputs) {
     const ch = inputs[0]?.[0];
     if (ch) for (let i = 0; i < ch.length; i++) {
-      this._buf[this._n++] = ch[i];
+      this._sum += ch[i]; this._cnt++;
+      if (++this._acc < this._step) continue;
+      this._acc -= this._step;
+      this._buf[this._n++] = this._sum / this._cnt; this._sum = 0; this._cnt = 0;
       if (this._n === this._buf.length) { this.port.postMessage(this._buf.slice()); this._n = 0; }
     }
     return true;
@@ -448,7 +454,11 @@ export class VoiceAgent {
       // stale continuation must clean up its own objects only.
       let ctx;
       try {
-        ctx = new AudioContext({ sampleRate: 16000 });
+        ctx = new (window.AudioContext || window.webkitAudioContext)();   // native rate — the worklet resamples to 16kHz
+        // Created after awaits (outside the click gesture): iOS starts it 'suspended' and suspends/'interrupts'
+        // it again on backgrounding/calls. An active mic capture lets WebKit run it without a gesture.
+        const wake = () => { if (ctx.state !== 'running' && ctx.state !== 'closed') ctx.resume().catch(() => {}); };
+        ctx.onstatechange = wake; wake();
         const src = ctx.createMediaStreamSource(stream);
         await ctx.audioWorklet.addModule(CAPTURE_WORKLET_URL_GET());
         if (gen !== this._pipelineGen || this._closed) { stream.getTracks().forEach(t => t.stop()); ctx.close(); return; }   // superseded/stopped while loading
