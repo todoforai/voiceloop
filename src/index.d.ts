@@ -152,7 +152,7 @@ export interface VoiceAgentOptions {
   /** STT backend: 'webspeech' (default — the browser's own on-device SpeechRecognition; free, no
    *  token, no socket, captures its own mic) | 'speechmatics' | 'elevenlabs' (Scribe) | 'deepgram'
    *  (Flux — native model-based end-of-turn detection; the agent feeds it the full mic stream and
-   *  lets it close turns itself) | 'soniox' (stt-rt-v5 — same native-endpointing shape as Flux). The cloud ones connect the browser DIRECTLY to the provider with a
+   *  lets it close turns itself) | 'soniox' (stt-rt-v6 — same native-endpointing shape as Flux). The cloud ones connect the browser DIRECTLY to the provider with a
    *  short-TTL token the backend mints (raw key stays server-side).
    *  'webspeech' auto-downgrades to a cloud provider in browsers with no SpeechRecognition (Firefox,
    *  the Linux WebKitGTK desktop webview) — read `agent.sttProvider` for what's actually running. */

@@ -625,10 +625,12 @@ export function makeDeepgramSTT(opts) {
   };
 }
 
-// ── Soniox realtime (stt-rt-v5) ──────────────────────────────────────────────
+// ── Soniox realtime (stt-rt-v6) ──────────────────────────────────────────────
 // Browser↔Soniox direct WS. Auth: the backend mints a temporary API key (POST /v1/auth/temporary-api-key,
-// usage_type transcribe_websocket) and the browser sends it in the FIRST JSON config message — no
-// URL/subprotocol auth. Audio is raw binary pcm_s16le @16k after the config frame.
+// usage_type transcribe_websocket) and the browser sends it WITH THE CONNECTION, as the WebSocket
+// subprotocol pair ['soniox-api-key', <key>] (a browser can't set an Authorization header). Soniox
+// refuses a key sent only in the config message from 2027-01-15. Audio is raw binary pcm_s16le @16k
+// after the config frame.
 //
 // Turn model — TOKENS, not transcripts: every message carries a `tokens` array; `is_final: true`
 // tokens arrive exactly once and are appended, `is_final: false` tokens are the whole current
@@ -675,7 +677,7 @@ const sonioxContinues = (t) => /[—–-]$/.test(t) || /^(um+|uh+|hmm+|er+|ah+)[
 export function makeSonioxSTT(opts) {
   const { apiKey, sttModel, sttLang = 'en', keyterms = [], sttTokenUrl, getToken, sttUsageUrl,
           onPartial, onFinal, onError, onFatal, onClose, isClosed } = opts;
-  const model = sttModel || 'stt-rt-v5';
+  const model = sttModel || 'stt-rt-v6';
   let ws = null, opening = false, outbox = [], outboxSamples = 0, keepalive = null;
   // Turn state. Soniox finals are APPEND-ONLY (no cumulative restatement like Flux), so a socket
   // boundary must wipe them: a stale prefix can't be repaired by the next stream.
@@ -734,13 +736,13 @@ export function makeSonioxSTT(opts) {
       // so the host's closing latch always resolves.
       resetText(); dropHold();   // a held cut-off phrase belongs to the dead stream too
       clearInterval(keepalive); keepalive = null;   // the superseded socket's timer must not outlive it
-      const sock = ws = newSocket(opts.sttUrl || sxUrl || SONIOX_URL);
+      const sock = ws = newSocket(opts.sttUrl || sxUrl || SONIOX_URL, ['soniox-api-key', token]);
       sock.binaryType = 'arraybuffer';
       let opened = false;   // server has answered → session is live (see reportClose)
       sock.onopen = () => {
         if (sock !== ws) return;
         const config = {
-          api_key: token, model, audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1,
+          model, audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1,
           enable_endpoint_detection: true,
           // Level 2 measured (bench smalltalk, 5 runs): 1042 → 768 ms voice→voice, 0 mid-sentence
           // splits; level 3 was faster still (726) but split "Hey there. | Can you hear me?" every run.

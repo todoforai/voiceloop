@@ -547,7 +547,7 @@ test('deepgram: native EndOfTurn during the commit safety window wins (no duplic
 
 // ── Soniox realtime provider ─────────────────────────────────────────────────────────────────────
 // Token-based wire: final tokens append once, non-final tokens replace the tail, `<end>` closes the
-// turn (native endpointing → nativeEOT, continuous like Flux). Auth rides in the first JSON frame.
+// turn (native endpointing → nativeEOT, continuous like Flux). Auth rides in the subprotocol list.
 
 import { makeSonioxSTT } from './stt.js';
 
@@ -568,13 +568,14 @@ async function makeSX() {
 const tok = (text, is_final) => ({ text, is_final });
 const toks = (ws, ...tokens) => ws.recv({ tokens });
 
-test('soniox: continuous + nativeEOT, config frame first with api_key/model/endpointing/terms, then buffered audio', () => withStubs(async () => {
+test('soniox: continuous + nativeEOT, key in the subprotocol list, config frame first with model/endpointing/terms, then buffered audio', () => withStubs(async () => {
   const { stt, ws } = await makeSX();
   assert.equal(stt.continuous, true);
   assert.equal(stt.nativeEOT, true);
   const cfg = JSON.parse(ws().sent[0]);
-  assert.equal(cfg.api_key, 'tok');
-  assert.equal(cfg.model, 'stt-rt-v5');
+  assert.deepEqual(ws().protocols, ['soniox-api-key', 'tok'], 'temporary key travels with the connection');
+  assert.ok(!('api_key' in cfg), 'the deprecated start-message key is gone (refused alone from 2027-01-15)');
+  assert.equal(cfg.model, 'stt-rt-v6');
   assert.equal(cfg.audio_format, 'pcm_s16le');
   assert.equal(cfg.sample_rate, 16000);
   assert.equal(cfg.enable_endpoint_detection, true);
