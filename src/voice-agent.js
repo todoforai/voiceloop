@@ -305,7 +305,7 @@ export class VoiceAgent {
         this._onUserTurn(text, { speech: true });   // only a SPOKEN final may adopt the prefetch it seeded
       },
       onError:   (error) => this.onEvent({ type: 'error', error }),
-      onFatal:   (error) => { this.stop(); this.onEvent({ type: 'error', error }); },   // auth/config — won't self-heal; stop FIRST so the error event sees `closed` (host reconciles `running`)
+      onFatal:   (error) => { this.stop(); this._teardownPipeline(); this.onEvent({ type: 'error', error }); },   // auth/config — won't self-heal; stop FIRST so the error event sees `closed` (host reconciles `running`); release the mic — the host keeps the agent for typing, so a paused pipeline would hold it indefinitely
       onClose:   () => {},
       isClosed:  () => this._closed,
     });
@@ -540,11 +540,14 @@ export class VoiceAgent {
   // session) and before a cold rebuild (mic device switch). After this, start() pays the full cold
   // cost again. Split out so stop() can pause cheaply without duplicating this.
   _teardownPipeline() {
+    // Mic tracks FIRST, and nothing below may abort the teardown: vad-web's destroy() throws on a
+    // created-but-never-started MicVAD (Silero loaded while bootstrap VAD was still active), which
+    // used to skip the track stop and leak the mic (tab kept the recording indicator).
+    this._stream?.getTracks().forEach(t => t.stop()); this._stream = null;
     this._capture?.stop(); this._capture = null;
-    this._vad?.destroy?.(); this._vad = null;
+    try { this._vad?.destroy?.(); } catch {} this._vad = null;
     this._node?.disconnect(); this._node = null;
     this._ctx?.close(); this._ctx = null;
-    this._stream?.getTracks().forEach(t => t.stop()); this._stream = null;
     this._streamDeviceId = undefined;
     this._tap = []; this._tapSamples = 0; this._tapTotal = 0; this._tapLastMs = 0; this._tapGaps = [];   // fresh diagnostics per pipeline
   }
@@ -1235,7 +1238,7 @@ export class VoiceAgent {
     // A stale build (the pipeline was superseded/torn down while MicVAD.new() resolved) must not
     // stomp the current session's _vad — destroy its own instance and bail (the caller's .then()
     // gen-guard skips the swap too; this guard covers the assignment itself).
-    if (gen !== undefined && (gen !== this._pipelineGen || this._closed)) { vad.destroy?.(); throw new Error('superseded'); }
+    if (gen !== undefined && (gen !== this._pipelineGen || this._closed)) { try { vad.destroy?.(); } catch {} throw new Error('superseded'); }
     this._vad = vad;
     // Only actually start listening on Silero right away if the bootstrap VAD has already been
     // swapped out (or never engaged) — otherwise _swapToSileroWhenReady (called after this resolves)
