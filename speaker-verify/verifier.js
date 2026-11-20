@@ -1,7 +1,7 @@
 // verifier.js — Browser speaker verification engine wrapping onnxruntime-web + DSP baseline.
 // Supports WASM (1-thread / multi-thread SIMD) and WebGPU execution providers.
 
-import { computeFbank, l2Normalize, cosineSimilarity, extractActiveSpeech } from './fbank.js';
+import { computeFbank, l2Normalize, cosineSimilarity, extractActiveSpeech } from '../src/fbank.js';
 import { extractMfccEmbedding } from './mfcc-baseline.js';
 import { MODEL_BY_ID } from './models.js';
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeFbank, cosineSimilarity, l2Normalize, extractActiveSpeech } from './fbank.js';
+import { computeFbank, cosineSimilarity, l2Normalize, extractActiveSpeech } from '../src/fbank.js';
 import { extractMfccEmbedding } from './mfcc-baseline.js';
 import { MODELS } from './models.js';
 

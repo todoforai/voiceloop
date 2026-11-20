@@ -64,3 +64,15 @@ HU dialogue streamed at real-time pace to Soniox `stt-rt-v6` (EU, diarization on
 | **4. 3 + window veto (<0.30)** | **100%** | **100%** |
 
 Notes: Soniox transcribed only the owner in the overlap turn (Erik −3 dB ignored). Gate decision is ready well before Soniox finalises words (median 2.7 s after word end here, default endpoint settings) → no added latency. Single synthetic dialogue; strategy 4's 0.30 veto is tuned on it — validate on real mic audio.
+
+## Shipped gate, causal replay (`gate-replay.mjs`)
+`src/speaker-gate.js` (the code the app runs) replayed on the recorded Soniox stream: audio at real-time
+pace, each token admitted when it originally arrived, so labels only know their past audio.
+`NODE_PATH=<dir with onnxruntime-web>/node_modules node gate-replay.mjs`
+
+| | owner words kept | intruder words dropped |
+|---|---|---|
+| causal, label + window veto (+ window-only before a label is scored) | 37/37 | 40/40 |
+
+Label scores at the end: S1 (owner) 0.72, S2 −0.08, S3 0.26. Still ONE synthetic dialogue — real-mic
+validation pending. Diarization costs nothing extra (bundled in Soniox's hourly rate).

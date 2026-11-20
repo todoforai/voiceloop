@@ -2,7 +2,7 @@
 // Extracts 19 MFCCs (DCT-II of 40-bin log-mel) + deltas -> mean & std across frames
 // + decimated autocorrelation pitch (F0) stats -> 78-dim L2-normalized vector.
 
-import { computeFbank, l2Normalize } from './fbank.js';
+import { computeFbank, l2Normalize } from '../src/fbank.js';
 
 const NUM_MEL = 40;
 const NUM_MFCC = 20;

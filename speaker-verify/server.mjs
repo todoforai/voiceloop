@@ -96,6 +96,13 @@ const server = http.createServer(async (req, res) => {
       return sendFile(req, res, localPath);
     }
 
+    // The lab imports the shipped DSP from ../src (fbank.js) — serve that one directory too.
+    if (pathname.startsWith('/src/')) {
+      const file = pathname.slice('/src/'.length);
+      if (file.includes('/') || file.includes('..') || !file.endsWith('.js')) { res.writeHead(403); res.end('Forbidden'); return; }
+      return sendFile(req, res, join(DIR, '..', 'src', file));
+    }
+
     // Static files inside speaker-verify/ only
     const safePath = normalize(join(DIR, pathname));
     if (!safePath.startsWith(DIR)) { res.writeHead(403); res.end('Forbidden'); return; }

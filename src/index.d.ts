@@ -180,6 +180,9 @@ export interface VoiceAgentOptions {
   sttEotThreshold?: number;
   /** Provider-specific extras forwarded to the STT factory (Soniox: endpointLatencyLevel 0–3, endpointSensitivity −1..1). */
   sttOptions?: Record<string, unknown>;
+  /** Voice lock: drop transcribed words not spoken by the enrolled owner (Soniox only — uses its
+   *  per-token times + diarization labels). Build with `new SpeakerGate({ voiceprint })`. */
+  speakerGate?: SpeakerGate | null;
   /** Every tool the model may call. voiceloop ships NO built-in tools — a voice library has no
    *  business knowing what a "todo" is — so product tools (and their `run`) are supplied here. */
   tools?: Record<string, VoiceTool>;
@@ -423,3 +426,24 @@ export function isSelfEcho(heard: string, reply: string, options?: { threshold?:
 export function novelChars(heard: string, reply: string): number;
 /** Render a tool result the way the agent reports it to the model (and to `tool` events). */
 export function toolResultText(result: unknown): string;
+
+// ── Speaker gate (voice lock) ──
+export interface SpeakerGateOptions {
+  threshold?: number; windowThreshold?: number; veto?: number; windowSec?: number; hopSec?: number; minRms?: number;
+  labelMinSec?: number; labelMaxSec?: number; labelRescoreSec?: number; bufferSec?: number;
+}
+export const SPEAKER_GATE_DEFAULTS: Required<SpeakerGateOptions>;
+export const SPEAKER_MODEL: { id: string; url: string; sizeMB: number; fbank: Record<string, unknown> };
+export interface Voiceprint { voiceprint: number[]; model: string; speechSec: number; segments: number }
+/** Load (download once, OPFS-cached) the CAM++ speaker model; `onProgress` fires on a cache miss. */
+export interface SpeakerModel { embed(pcm: Float32Array): Promise<Float32Array> }
+export function loadSpeakerModel(onProgress?: (loaded: number, total: number) => void): Promise<SpeakerModel>;
+/** Voiceprint from ~15 s of the owner reading (16 kHz mono Float32). Throws on too little speech. */
+export function enrollSpeaker(pcm: Float32Array, options?: { onProgress?: (loaded: number, total: number) => void; model?: SpeakerModel }): Promise<Voiceprint>;
+export class SpeakerGate {
+  constructor(options: { voiceprint: ArrayLike<number>; onProgress?: (loaded: number, total: number) => void; model?: SpeakerModel } & SpeakerGateOptions);
+  resetStream(): void;
+  pushSent(chunk: Int16Array | Float32Array): void;
+  admit(token: { text: string; start_ms?: number; end_ms?: number; speaker?: string; is_final?: boolean }, prev?: { speaker?: string; keep: boolean }): boolean;
+  readonly state: { ready: boolean; window?: number; dropped: number; labels: Record<string, { sec: number; score?: number }> };
+}

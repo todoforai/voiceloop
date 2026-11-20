@@ -19,6 +19,7 @@
 
 import { STT_PROVIDERS, resolveSttProvider } from './stt.js';
 import { TUNING } from './tuning.js';
+import { importUrl, opfsCachedFetch } from './assets.js';
 import { makeOpenAILLM, toolResultText } from './llm-openai.js';
 export { toolResultText };
 
@@ -185,7 +186,7 @@ export class VoiceAgent {
                 tts, speed, sttLang = 'en', micDeviceId = '', sttProvider = 'webspeech', sttEotThreshold, sttOptions = {},
                 sttTokenUrl = '', getSttToken, sttUsageUrl = '', sttUrl = '', sttModel = '',
                 tools = {}, keyterms = [], preroll = TUNING.PREROLL_CHUNKS, vadOptions = {}, turnDetector = null,
-                maxPauseMs = TUNING.MAX_PAUSE_MS, bargeInMinChars, audioIO = null, onEvent = () => {} } = {}) {
+                maxPauseMs = TUNING.MAX_PAUSE_MS, bargeInMinChars, audioIO = null, speakerGate = null, onEvent = () => {} } = {}) {
     // Host-supplied mic capture (React Native, Electron main, tests): `startCapture(onFrame)` delivers
     // 16 kHz mono Float32 frames (~256 ms) and resolves a handle with stop()/setMuted(). Replaces the
     // whole getUserMedia + AudioWorklet + Silero path — the bootstrap energy-VAD then runs for the
@@ -211,7 +212,8 @@ export class VoiceAgent {
     this.sttProvider = resolveSttProvider(sttProvider);
     const makeStt = STT_PROVIDERS[this.sttProvider] ?? STT_PROVIDERS.webspeech;
     this.stt = makeStt({
-      ...sttOptions, apiKey, sttUrl, sttModel: this.sttProvider === sttProvider ? sttModel : '', sttLang, micDeviceId, keyterms: keyterms.filter(k => k && k.length <= 20).slice(0, 50),
+      ...sttOptions, speakerGate, apiKey, sttUrl,   // speakerGate: voice lock, Soniox only (needs its per-token times + speaker labels)
+      sttModel: this.sttProvider === sttProvider ? sttModel : '', sttLang, micDeviceId, keyterms: keyterms.filter(k => k && k.length <= 20).slice(0, 50),
       // `getSttToken` is called with the provider actually running — the RESOLVED one, so a host
       // whose credential differs per provider never has to re-derive the webspeech downgrade
       // (that rule lives here, in resolveSttProvider, and must not be mirrored host-side).
@@ -2024,35 +2026,6 @@ const CDN_PIPER_WASM = `${CDN}@diffusionstudio/piper-wasm@1.0.0/build/piper_phon
 // literal specifier is resolved by Vite's import analysis BEFORE it checks /* @vite-ignore */ —
 // which fails since onnxruntime-web isn't installed as a dependency.
 const ORT_SPECIFIER = 'onnxruntime-web';
-// Dynamic import by URL, hidden from bundlers: Hermes (React Native) rejects `import(expr)` at
-// bytecode compile time, so the syntax can't appear in this file even on paths RN never takes.
-// Hermes's runtime parser rejects it too, so the Function is built LAZILY — a top-level
-// `new Function(...)` would throw at module load and take the whole import down with it.
-const importUrl = (u) => new Function('u', 'return import(u)')(u);
-
-// OPFS blob cache — same 'piper' directory and url-basename filenames as the lib's own cache, so
-// models already downloaded through the lib are reused (and vice versa).
-// `onProgress(loaded, total)` fires while the file is coming down the wire (total is 0 if the server
-// sends no content-length). A Piper voice is ~60MB: on mobile data that is a minute of apparent
-// nothing, so a host needs to be able to SAY so — see PiperTTS.setOnModelProgress. Cache hits report
-// nothing (they're instant).
-async function opfsCachedFetch(url, onProgress) {
-  const name = url.split('/').at(-1);
-  const dir = () => navigator.storage.getDirectory().then((r) => r.getDirectoryHandle('piper', { create: true }));
-  try { return await (await (await dir()).getFileHandle(name)).getFile(); } catch {}
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`);
-  let blob;
-  if (onProgress && res.body) {
-    const total = +(res.headers.get('content-length') || 0);
-    const chunks = []; let loaded = 0;
-    for await (const c of res.body) { chunks.push(c); loaded += c.byteLength; onProgress(loaded, total); }
-    blob = new Blob(chunks);
-  } else blob = await res.blob();
-  try { const w = await (await (await dir()).getFileHandle(name, { create: true })).createWritable(); await w.write(blob); await w.close(); } catch {}
-  return blob;
-}
-
 // float32 PCM → 16-bit mono WAV (the lib's pcm2wav isn't exported).
 function pcm2wav(f32, sampleRate) {
   const n = f32.length, v = new DataView(new ArrayBuffer(44 + n * 2));

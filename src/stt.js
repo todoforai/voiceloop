@@ -676,14 +676,17 @@ export function warmSonioxToken(sttTokenUrl, apiKey, getToken) {
 const sonioxContinues = (t) => /[—–-]$/.test(t) || /^(um+|uh+|hmm+|er+|ah+)[.,]?$/i.test(t);
 export function makeSonioxSTT(opts) {
   const { apiKey, sttModel, sttLang = 'en', keyterms = [], sttTokenUrl, getToken, sttUsageUrl,
-          onPartial, onFinal, onError, onFatal, onClose, isClosed } = opts;
+          onPartial, onFinal, onError, onFatal, onClose, isClosed, speakerGate } = opts;
   const model = sttModel || 'stt-rt-v6';
+  // Voice lock (speaker-gate.js): sees every sample this socket sends, and admits each token by who
+  // said it — diarization is on for its speaker labels (bundled in Soniox's hourly rate).
   let ws = null, opening = false, outbox = [], outboxSamples = 0, keepalive = null;
   // Turn state. Soniox finals are APPEND-ONLY (no cumulative restatement like Flux), so a socket
   // boundary must wipe them: a stale prefix can't be repaired by the next stream.
   let finalText = '', tail = '', lastInterim = '', turnStart = 0;
   let audioSinceFinal = false, awaitingFinal = false, safetyTimer = null;
   let held = '', holdTimer = null;   // turn closed on a continuation cue, waiting for the rest
+  let gatePrev;   // speakerGate: verdict of the last FINAL token (a sub-word piece follows its word)
   const usage = makeUsageReporter(sttUsageUrl, apiKey, 'soniox', { model }, opts.fetchFn);
   const OUTBOX_MAX_SAMPLES = 32000;   // ~2s preroll across the token mint + handshake (see Deepgram)
 
@@ -694,6 +697,7 @@ export function makeSonioxSTT(opts) {
       return;
     }
     ws.send(i16.buffer.slice(i16.byteOffset, i16.byteOffset + i16.byteLength));
+    speakerGate?.pushSent(i16);   // token start_ms/end_ms count from this socket's first sent sample
     usage.add(i16.length);
   };
   const resetText = () => { finalText = ''; tail = ''; lastInterim = ''; turnStart = 0; };
@@ -750,6 +754,7 @@ export function makeSonioxSTT(opts) {
           ...(opts.endpointSensitivity != null && { endpoint_sensitivity: opts.endpointSensitivity }),
         };
         if (sttLang) config.language_hints = [sttLang.slice(0, 2)];
+        if (speakerGate) { config.enable_speaker_diarization = true; speakerGate.resetStream(); gatePrev = undefined; }   // new stream: times restart at 0, labels are new people
         if (keyterms.length) config.context = { terms: keyterms };
         sock.send(JSON.stringify(config));
         const q = outbox; outbox = []; outboxSamples = 0; for (const c of q) sendAudio(c);
@@ -780,10 +785,15 @@ export function makeSonioxSTT(opts) {
         if (!Array.isArray(m.tokens)) return;
         // Tokens are chronological and a response may straddle a boundary (…, <end>, next-turn
         // tokens): handle the markers at their POSITION, so text after one belongs to the next turn.
-        let newTail = '';
+        let newTail = '', tailPrev = gatePrev;   // gate cursors: finals persist, the partial tail is rebuilt every response
         for (const t of m.tokens) {
-          if (t.text === '<end>' || t.text === '<fin>') { tail = newTail; newTail = ''; closeTurn(t.text === '<fin>'); continue; }
+          if (t.text === '<end>' || t.text === '<fin>') { tail = newTail; newTail = ''; gatePrev = tailPrev = undefined; closeTurn(t.text === '<fin>'); continue; }
           if (!turnStart) turnStart = performance.now();   // turn's ms clock anchors at its first token
+          if (speakerGate) {   // another voice's word: never shown, never sent
+            const v = { speaker: t.speaker, keep: speakerGate.admit(t, t.is_final ? gatePrev : tailPrev) };
+            if (t.is_final) gatePrev = tailPrev = v; else tailPrev = v;
+            if (!v.keep) continue;
+          }
           if (t.is_final) finalText += t.text; else newTail += t.text;
         }
         tail = newTail;

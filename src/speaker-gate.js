@@ -1,0 +1,201 @@
+// ── Speaker gate ("voice lock"): keep only the enrolled owner's words ─────────────────────────────
+// All audio still streams to the STT as before (zero added latency); the gate judges each returned
+// token by WHO said it and drops other voices' words. A convenience filter, NOT a security boundary:
+// the other voices are still transcribed (and billed), and whoever controls the client can turn it off.
+//
+// Two signals, both local (the voiceprint never leaves the device), from CAM++ (3D-Speaker, 200k
+// speakers, 192-dim, Apache-2.0) — the lab winner (speaker-verify/README.md: 9/9 HU utterances,
+// ~30 ms per 1.5 s window on WASM):
+//   • window score — cosine(voiceprint, embedding of the 1.5 s audio window), one every 0.5 s,
+//     computed as audio arrives (causal: only the past). Smeared ~1 s at speaker changes.
+//   • label score — Soniox diarization tags each token with an anonymous speaker label; every label
+//     pools the audio of its FINAL tokens so far and is re-scored as it grows. Long pooled audio is
+//     far more reliable than one window, but a label only exists after its first finals land.
+// A token is kept if its label scores as the owner and its own window doesn't clearly say someone
+// else (the veto catches diarization mislabels — measured: Soniox put an intruder's "Küldd el" on the
+// owner's label). Before its label has a score, the window alone decides, at a laxer bar (short owner
+// words scored 0.47–0.49 on single windows). Nothing to judge yet (model loading, no window) →
+// finals pass (fail-open: missing the owner is worse than letting a stranger through) and partials
+// wait (an intruder's partial must not barge in on the reply; its final decides).
+// Timeline: the STT pushes exactly the samples it sends on the current socket (pushSent) and resets
+// on a new socket, so token start_ms/end_ms index straight into this buffer.
+
+import { computeFbank, l2Normalize, extractActiveSpeech } from './fbank.js';
+import { opfsCachedFetch, loadOrt } from './assets.js';
+
+const SR = 16000;
+// Pinned revision: a re-uploaded model would silently change every score (and the thresholds).
+export const SPEAKER_MODEL = {
+  id: 'campplus-200k',
+  url: 'https://huggingface.co/welcomyou/campplus-3dspeaker-200k-onnx/resolve/6265ff7af2a104d745b4389026ed9815c6c1c6ff/campplus_cn_en_common_200k.onnx',
+  sizeMB: 28,
+  fbank: { scale: 1.0, window: 'povey', numBins: 80, frameLenMs: 25, frameShiftMs: 10, lowFreq: 20, highFreq: 7600, cmvn: 'mean' },
+};
+export const SPEAKER_GATE_DEFAULTS = {
+  threshold: 0.52,       // label score ≥ → owner (lab: owner labels 0.90, intruders ≤ 0.27)
+  windowThreshold: 0.40, // window-only verdict before the label has a score
+  veto: 0.30,            // window below → not the owner even under the owner's label (tuned on ONE synthetic dialogue — re-measure)
+  windowSec: 1.5, hopSec: 0.5,
+  minRms: 0.01,          // quieter window = silence → no score
+  labelMinSec: 1.0,      // pooled audio a label needs before it's scored
+  labelMaxSec: 12,       // pool the latest N s per label (bounds the re-score cost)
+  labelRescoreSec: 1.0,  // re-score a label after this much new audio
+  bufferSec: 30,         // audio kept for label pooling (finals land ~3–5 s after the word)
+};
+
+let sessionP = null;
+/** Load (download once → OPFS cache) and build the model. `onProgress(loaded, total)` on a cache miss. */
+export function loadSpeakerModel(onProgress) {
+  return (sessionP ??= (async () => {
+    const [ort, blob] = await Promise.all([loadOrt(), opfsCachedFetch(SPEAKER_MODEL.url, onProgress, 'speaker-gate')]);
+    const session = await ort.InferenceSession.create(await blob.arrayBuffer(), { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+    let q = Promise.resolve();   // one session, one run at a time
+    const embed = (pcm) => (q = q.catch(() => {}).then(async () => {
+      const { data, numFrames, numBins } = computeFbank(pcm, SPEAKER_MODEL.fbank);
+      const out = await session.run({ feats: new ort.Tensor('float32', data, [1, numFrames, numBins]) });
+      return l2Normalize(out.embs.data);
+    }));
+    return { embed };
+  })().catch((e) => { sessionP = null; throw e; }));   // a failed download must not poison the memo
+}
+
+const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+
+/** Voiceprint from an enrollment recording (16 kHz mono Float32, ~15 s of the owner reading):
+ *  silence stripped, 2.5 s windows (1.5 s hop) embedded and averaged. Returns a plain number[]. */
+export async function enrollSpeaker(pcm, { onProgress, model } = {}) {
+  const { embed } = model ?? await loadSpeakerModel(onProgress);
+  const speech = extractActiveSpeech(pcm, 0.012);
+  if (speech.length < 4 * SR) throw new Error('Too little speech — read the whole text aloud, close to the mic.');
+  const win = 2.5 * SR, hop = 1.5 * SR, sum = new Float32Array(192);
+  let n = 0;
+  for (let p = 0; p + win / 2 <= speech.length; p += hop) {
+    const e = await embed(speech.subarray(p, Math.min(p + win, speech.length)));
+    for (let i = 0; i < sum.length; i++) sum[i] += e[i];
+    n++;
+  }
+  return { voiceprint: Array.from(l2Normalize(sum)), model: SPEAKER_MODEL.id, speechSec: speech.length / SR, segments: n };
+}
+
+export class SpeakerGate {
+  /** `model` ({ embed(pcm) → unit vector }) overrides the CDN-loaded one — Node replays, tests. */
+  constructor({ voiceprint, onProgress, model, ...opts }) {
+    this.vp = Float32Array.from(voiceprint);
+    this.o = { ...SPEAKER_GATE_DEFAULTS, ...opts };
+    this.model = null;
+    (model ? Promise.resolve(model) : loadSpeakerModel(onProgress)).then((m) => { this.model = m; this._pump(); }, (e) => console.warn('speaker gate: model load failed — passing everything', e));
+    this.resetStream();
+  }
+
+  /** New STT stream: its token times restart at 0, and its speaker labels are new people. */
+  resetStream() {
+    this._gen = (this._gen || 0) + 1;
+    const n = this.o.bufferSec * SR;
+    this.buf = new Float32Array(n); this.total = 0;   // ring buffer; `total` = samples pushed this stream
+    this.windows = [];        // { end (sample), score | null }
+    this.nextEnd = this.o.windowSec * SR;
+    this.labels = new Map();  // label → { segs: [[s, e]], sec, scoredSec, score }
+    this._busy = false; this.dropped = 0;
+  }
+
+  /** The exact samples the STT just sent on the current stream (Int16 or Float32). */
+  pushSent(chunk) {
+    const n = this.buf.length, f = chunk instanceof Int16Array ? 1 / 32768 : 1;
+    for (let i = 0; i < chunk.length; i++) this.buf[(this.total + i) % n] = chunk[i] * f;
+    this.total += chunk.length;
+    this._pump();
+  }
+
+  _slice(s, e) {   // [s, e) in stream samples, clipped to what the ring still holds
+    s = Math.max(s, this.total - this.buf.length, 0); e = Math.min(e, this.total);
+    const out = new Float32Array(Math.max(0, e - s)), n = this.buf.length;
+    for (let i = 0; i < out.length; i++) out[i] = this.buf[(s + i) % n];
+    return out;
+  }
+
+  // Background scoring, one inference at a time: the newest due window first (a slow device skips
+  // stale ones rather than falling behind), then any label whose pool grew enough.
+  async _pump() {
+    if (!this.model || this._busy) return;
+    this._busy = true;
+    const gen = this._gen, hop = this.o.hopSec * SR, win = this.o.windowSec * SR;
+    try {
+      while (gen === this._gen) {
+        if (this.total >= this.nextEnd) {
+          const end = this.nextEnd + Math.floor((this.total - this.nextEnd) / hop) * hop;   // skip to the newest due
+          this.nextEnd = end + hop;
+          const pcm = this._slice(end - win, end);
+          let rms = 0; for (let i = 0; i < pcm.length; i++) rms += pcm[i] * pcm[i];
+          const score = Math.sqrt(rms / pcm.length) < this.o.minRms ? null : dot(this.vp, await this.model.embed(pcm));
+          if (gen !== this._gen) return;
+          this.windows.push({ end, score });
+          while (this.windows.length && this.windows[0].end < this.total - this.buf.length) this.windows.shift();
+          continue;
+        }
+        const lab = [...this.labels.values()].find((l) => l.sec >= this.o.labelMinSec && l.sec - l.scoredSec >= this.o.labelRescoreSec);
+        if (!lab) break;
+        lab.scoredSec = lab.sec;
+        const parts = []; let len = 0;
+        for (let i = lab.segs.length - 1; i >= 0 && len < this.o.labelMaxSec * SR; i--) { const p = this._slice(...lab.segs[i]); parts.unshift(p); len += p.length; }
+        const pcm = new Float32Array(len); let o = 0; for (const p of parts) { pcm.set(p, o); o += p.length; }
+        if (len >= 0.5 * SR) { const score = dot(this.vp, await this.model.embed(pcm)); if (gen === this._gen) lab.score = score; }
+      }
+    } catch (e) { console.warn('speaker gate: scoring failed', e); }
+    finally { if (gen === this._gen) this._busy = false; }   // a stale pump must not unlock the new stream's
+  }
+
+  /** Mean score of the windows covering sample `m`; undefined when none is scored yet. */
+  windowScore(m) {
+    let sum = 0, n = 0;
+    for (const w of this.windows) if (w.score != null && w.end - this.o.windowSec * SR <= m && m <= w.end) { sum += w.score; n++; }
+    return n ? sum / n : undefined;
+  }
+
+  /** Decide one STT token: { text, start_ms, end_ms, speaker, is_final } → keep it? `prev` is the
+   *  verdict of the token right before it in the TEXT it joins ({ speaker, keep } — the caller keeps
+   *  one cursor for finals and a throwaway one per partial tail): a sub-word piece (no leading space)
+   *  of the same speaker follows its word's verdict, so a word is never half-dropped. A FINAL token
+   *  also feeds its audio to its speaker label's pool. */
+  admit(t, prev) {
+    const cont = prev && !/^\s/.test(t.text) && prev.speaker === t.speaker;
+    if (t.is_final) this._pool(t);
+    const keep = cont ? prev.keep : this._judge(t);
+    if (!keep && t.is_final) this.dropped++;
+    return keep;
+  }
+
+  _pool(t) {
+    if (t.start_ms == null || t.end_ms == null) return;
+    const lab = this._label(t.speaker), s = Math.round(t.start_ms * SR / 1000), e = Math.round(t.end_ms * SR / 1000);
+    if (!lab || e <= s) return;
+    lab.segs.push([s, e]); lab.sec += (e - s) / SR;
+    // Keep only what the ring still holds, and at most the pool budget — a long session must not
+    // grow per-label history (or the re-score walk) without bound.
+    const oldest = this.total - this.buf.length; let kept = 0;
+    for (let i = lab.segs.length - 1; i >= 0; i--) {
+      kept += lab.segs[i][1] - lab.segs[i][0];
+      if (lab.segs[i][1] <= oldest || kept > this.o.labelMaxSec * SR * 1.5) { lab.segs.splice(0, i + (lab.segs[i][1] <= oldest ? 1 : 0)); break; }
+    }
+    this._pump();
+  }
+  _label(k) {
+    if (k == null) return null;
+    let l = this.labels.get(k);
+    if (!l) this.labels.set(k, l = { segs: [], sec: 0, scoredSec: 0, score: undefined });
+    return l;
+  }
+
+  _judge(t) {
+    if (t.start_ms == null || t.end_ms == null) return true;
+    const lab = this._label(t.speaker), w = this.windowScore((t.start_ms + t.end_ms) * SR / 2000), o = this.o;
+    if (lab?.score != null) return lab.score >= o.threshold && (w == null || w >= o.veto);
+    if (w != null) return w >= o.windowThreshold;
+    return !!t.is_final;
+  }
+
+  /** Debug/UI snapshot: per-label scores + the latest window. */
+  get state() {
+    const last = this.windows.at(-1);
+    return { ready: !!this.model, window: last?.score, dropped: this.dropped, labels: Object.fromEntries([...this.labels].map(([k, l]) => [k, { sec: +l.sec.toFixed(1), score: l.score }])) };
+  }
+}

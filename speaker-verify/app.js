@@ -2,7 +2,7 @@
 
 import { MODELS, MODEL_BY_ID, BENCH_WAVS } from './models.js';
 import { SpeakerVerifier } from './verifier.js';
-import { decodeWav16k, rmsEnergy } from './fbank.js';
+import { decodeWav16k, rmsEnergy } from '../src/fbank.js';
 
 const verifier = new SpeakerVerifier();
 const selectedModels = new Set(MODELS.filter((m) => m.defaultSelected).map((m) => m.id));
