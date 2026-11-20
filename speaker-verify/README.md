@@ -34,3 +34,20 @@ Integration point: `VoiceAgent._feed` (src/voice-agent.js) — score each uttera
 | NeMo SpeakerNet | 7/9 | +0.47 / +0.03 | 79% |
 
 Failures are all 1–2-word owner commands (<1.2 s) under default thresholds. Overlap (owner + other) is passed by every model — needs separate handling. Caveat: synthetic TTS voices, not real mics.
+
+## Overlap + distant-voice stress test (`python3 eval_scenarios.py`)
+
+Synthetic mixes of the Hungarian clips (16 owner×intruder pairs; distant = synthetic RIR RT60 0.5 s + lowpass + attenuation). % = correct verdict at default threshold.
+
+| Scenario | CAM++ 200k | WeSpeaker CAM++ | ResNet34 |
+|---|---|---|---|
+| owner + intruder, equal loudness, whole time | 50% | 44% | 56% |
+| owner + intruder −6 dB or quieter | 100% | 100% | 100% |
+| intruder + owner in background, equal loudness (should reject) | 69% | 81% | 75% |
+| intruder + owner −6 dB or quieter | 100% | 100% | 100% |
+| distant intruder alone, −6…−20 dB | 100% | 100% | 100% |
+| distant owner alone, −6/−12 dB | 100% | 100% | 100% |
+| owner close + distant intruder in background | 100% | 100% | 100% |
+| owner, intruder interrupts halfway (0 dB) | passes (0.79) — intruder's words leak through | | |
+
+Findings: embeddings are loudness-invariant (CMVN), so a quiet/distant voice is judged by timbre, not volume — distant intruders are rejected, distant owner accepted. Only equal-loudness overlap is a coin flip. Mid-utterance interruption passes whole-utterance scoring; 1 s sub-window scoring catches it (owner windows 0.6–0.8, intruder 0.0–0.1) → gate per sub-window / word-timestamp, not per utterance.
