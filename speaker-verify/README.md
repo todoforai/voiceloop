@@ -51,3 +51,16 @@ Synthetic mixes of the Hungarian clips (16 owner×intruder pairs; distant = synt
 | owner, intruder interrupts halfway (0 dB) | passes (0.79) — intruder's words leak through | | |
 
 Findings: embeddings are loudness-invariant (CMVN), so a quiet/distant voice is judged by timbre, not volume — distant intruders are rejected, distant owner accepted. Only equal-loudness overlap is a coin flip. Mid-utterance interruption passes whole-utterance scoring; 1 s sub-window scoring catches it (owner windows 0.6–0.8, intruder 0.0–0.1) → gate per sub-window / word-timestamp, not per utterance.
+
+## Soniox realtime + gate (`soniox-stream.mjs` → `gate-eval.py`)
+
+HU dialogue streamed at real-time pace to Soniox `stt-rt-v6` (EU, diarization on); final words gated by CAM++ 200k owner score.
+
+| Strategy | owner words kept | intruder words dropped |
+|---|---|---|
+| 1. whole utterance score | 92% | 100% |
+| 2. sliding window per word | 92% | 100% |
+| 3. Soniox speaker label → pooled-audio score | 100% | 95% (Soniox labelled Erik's "Küldd el" as owner) |
+| **4. 3 + window veto (<0.30)** | **100%** | **100%** |
+
+Notes: Soniox transcribed only the owner in the overlap turn (Erik −3 dB ignored). Gate decision is ready well before Soniox finalises words (median 2.7 s after word end here, default endpoint settings) → no added latency. Single synthetic dialogue; strategy 4's 0.30 veto is tuned on it — validate on real mic audio.
