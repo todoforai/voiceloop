@@ -218,6 +218,34 @@
     <div id="winner-box" class="winner-box"></div>
   </section>
 
+  <!-- HUNGARIAN ELEVENLABS V4 DIALOGUE TEST -->
+  <section class="card">
+    <div class="card-head">
+      <h2>2b. Magyar párbeszéd teszt (ElevenLabs v4 — Attila tulajdonos vs Erik + Sarah)</h2>
+      <div class="row">
+        <button id="btn-run-hu" class="primary">Magyar párbeszéd tesztelése</button>
+      </div>
+    </div>
+    <div id="hu-status" class="status-bar">
+      14,2 mp magyar betanítás (Attila) + 44,4 mp 10-fordulós párbeszéd (férfi kolléga Erik, női kolléga Sarah, 1–2 szavas parancsok, egymásra beszélés).
+    </div>
+    <div class="row" style="margin-bottom:10px;">
+      <span class="small"><strong>Betanítás (Attila):</strong></span>
+      <audio id="hu-audio-enroll" controls src="/hu-dialogue/enroll_attila.wav" style="height:32px;"></audio>
+      <span class="small" style="margin-left:8px;"><strong>Teljes párbeszéd:</strong></span>
+      <audio id="hu-audio-full" controls src="/hu-dialogue/dialogue_full.wav" style="height:32px; flex:1; min-width:260px;"></audio>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead id="hu-thead">
+          <tr><th>#</th><th>Beszélő</th><th>Hossz</th><th>Szöveg</th><th class="small">Kattints a „Magyar párbeszéd tesztelése” gombra</th></tr>
+        </thead>
+        <tbody id="hu-tbody"></tbody>
+      </table>
+    </div>
+    <div id="hu-summary" class="winner-box"></div>
+  </section>
+
   <!-- LIVE MICROPHONE -->
   <section class="card">
     <div class="card-head">

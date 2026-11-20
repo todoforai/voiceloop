@@ -82,6 +82,12 @@ const server = http.createServer(async (req, res) => {
       return sendFile(req, res, localPath);
     }
 
+    if (pathname.startsWith('/hu-dialogue/')) {
+      const file = pathname.slice('/hu-dialogue/'.length);
+      if (file.includes('/') || file.includes('..')) { res.writeHead(403); res.end('Forbidden'); return; }
+      return sendFile(req, res, join(DIR, '.cache', 'hu-dialogue', file));
+    }
+
     if (pathname.startsWith('/wavs/')) {
       const file = pathname.slice('/wavs/'.length);
       if (!WAV_SET.has(file)) { res.writeHead(404); res.end('Unknown wav'); return; }

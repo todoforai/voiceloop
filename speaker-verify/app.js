@@ -614,3 +614,124 @@ $('btn-rec-clip').addEventListener('click', async () => {
     $('btn-rec-clip').textContent = 'Tesztklip felvétele (3 mp)';
   }
 });
+
+// ── 2b. Hungarian ElevenLabs v4 dialogue test ───────────────────────────────
+$('btn-run-hu').addEventListener('click', async () => {
+  const ids = [...selectedModels];
+  if (ids.length === 0) {
+    $('hu-status').textContent = 'Jelölj ki legalább egy modellt felül!';
+    return;
+  }
+  $('btn-run-hu').disabled = true;
+  const huStatus = $('hu-status');
+  const huThead = $('hu-thead');
+  const huTbody = $('hu-tbody');
+  const huSummary = $('hu-summary');
+  huSummary.style.display = 'none';
+  try {
+    huStatus.textContent = 'Magyar párbeszéd WAV-ok betöltése...';
+    const meta = await (await fetch('/hu-dialogue/dialogue_meta.json')).json();
+    const fetchWav = async (f) => decodeWav16k(await (await fetch(`/hu-dialogue/${f}`)).arrayBuffer());
+    const enrollPcm = await fetchWav(meta.enroll.file);
+    const fullPcm = await fetchWav(meta.full.file);
+    const turnPcms = {};
+    for (const t of meta.turns) turnPcms[t.file] = await fetchWav(t.file);
+
+    const perModel = {}; // id -> { scores: [], ownerScores, otherScores, overlapScore, streamAcc, streamMsAvg }
+    for (const id of ids) {
+      const m = MODEL_BY_ID[id];
+      huStatus.textContent = `Betanítás (Attila 14s): ${m.shortName}...`;
+      await verifier.loadModel(id, (msg) => { huStatus.textContent = msg; });
+      const { voiceprint } = await verifier.enroll(id, enrollPcm);
+
+      huStatus.textContent = `10 forduló kiértékelése: ${m.shortName}...`;
+      const thr = thresholds[id];
+      const turnRes = [];
+      for (const t of meta.turns) {
+        const r = await verifier.verify(id, turnPcms[t.file], voiceprint, thr);
+        turnRes.push({ ...r, role: t.role, durSec: t.durSec });
+      }
+
+      // Streaming sliding-window test on continuous 44s dialogue (1.5s window, 0.5s hop)
+      huStatus.textContent = `Streaming csúszóablak teszt (44 mp): ${m.shortName}...`;
+      let streamCorrect = 0, streamTotal = 0;
+      const streamLat = [];
+      for (let tEnd = 1.5; tEnd <= meta.full.durSec; tEnd += 0.5) {
+        const tMid = tEnd - 0.75;
+        const activeTurn = meta.turns.find((t) => tMid >= t.startSec && tMid <= t.endSec);
+        if (!activeTurn || activeTurn.role === 'overlap') continue;
+        // Only count pure single-speaker windows (center inside turn with >=0.4s margin)
+        const s0 = Math.floor((tEnd - 1.5) * 16000);
+        const s1 = Math.floor(tEnd * 16000);
+        const r = await verifier.verify(id, fullPcm.subarray(s0, s1), voiceprint, thr);
+        streamLat.push(r.totalMs);
+        const expectedOwner = activeTurn.role === 'owner';
+        if (r.match === expectedOwner) streamCorrect++;
+        streamTotal++;
+      }
+
+      const ownerNormal = turnRes.filter((r) => r.role === 'owner' && r.durSec >= 1.5).map((r) => r.score);
+      const ownerAll = turnRes.filter((r) => r.role === 'owner').map((r) => r.score);
+      const otherAll = turnRes.filter((r) => r.role === 'other').map((r) => r.score);
+      const turnCorrect = turnRes.filter((r) => r.role !== 'overlap' && r.match === (r.role === 'owner')).length;
+      const turnTotal = turnRes.filter((r) => r.role !== 'overlap').length;
+
+      perModel[id] = {
+        thr,
+        turnRes,
+        turnCorrect,
+        turnTotal,
+        minOwnerAll: Math.min(...ownerAll),
+        minOwnerNormal: Math.min(...ownerNormal),
+        maxOther: Math.max(...otherAll),
+        marginAll: Math.min(...ownerAll) - Math.max(...otherAll),
+        marginNormal: Math.min(...ownerNormal) - Math.max(...otherAll),
+        streamCorrect,
+        streamTotal,
+        streamAvgMs: streamLat.reduce((a, b) => a + b, 0) / (streamLat.length || 1),
+      };
+    }
+
+    // Render table
+    huThead.innerHTML = `<tr>
+      <th>#</th><th>Beszélő</th><th class="num">Hossz</th><th>Szöveg</th>
+      ${ids.map((id) => `<th class="num">${MODEL_BY_ID[id].shortName}<br><span class="small">küszöb ${perModel[id].thr.toFixed(2)}</span></th>`).join('')}
+    </tr>`;
+    huTbody.innerHTML = '';
+    meta.turns.forEach((t, idx) => {
+      const tr = document.createElement('tr');
+      const roleTag = t.role === 'owner' ? 'good' : t.role === 'overlap' ? 'mid' : 'bad';
+      tr.innerHTML = `
+        <td class="num">${idx + 1}</td>
+        <td><span class="pill ${roleTag}">${t.speaker}</span></td>
+        <td class="num">${t.durSec.toFixed(2)}s</td>
+        <td class="small" style="white-space:normal;max-width:260px;">${t.text}</td>
+        ${ids.map((id) => {
+          const r = perModel[id].turnRes[idx];
+          const ok = t.role === 'overlap' ? null : (r.match === (t.role === 'owner'));
+          const cls = ok === null ? 'mid' : ok ? 'good' : 'bad';
+          const icon = ok === null ? (r.match ? 'ENGED' : 'DOB') : (ok ? '✓' : '✗');
+          return `<td class="num"><span class="pill ${cls}">${r.score.toFixed(2)} ${icon}</span> <span class="small">${r.totalMs.toFixed(0)}ms</span></td>`;
+        }).join('')}
+      `;
+      huTbody.appendChild(tr);
+    });
+
+    // Summary row
+    const sumLines = ids.map((id) => {
+      const m = MODEL_BY_ID[id];
+      const p = perModel[id];
+      return `<div><strong>${m.shortName}:</strong> fordulók <strong>${p.turnCorrect}/${p.turnTotal}</strong> · margó (normál/összes) <strong>${p.marginNormal >= 0 ? '+' : ''}${p.marginNormal.toFixed(2)} / ${p.marginAll >= 0 ? '+' : ''}${p.marginAll.toFixed(2)}</strong> · streaming 1.5s ablak: <strong>${p.streamCorrect}/${p.streamTotal} (${(100*p.streamCorrect/p.streamTotal).toFixed(0)}%)</strong> · átl. ${p.streamAvgMs.toFixed(0)} ms</div>`;
+    }).join('');
+    huSummary.style.display = 'block';
+    huSummary.innerHTML = `<strong>Magyar ElevenLabs v4 eredmények:</strong>${sumLines}`;
+    huStatus.textContent = `Kész! Magyar ElevenLabs v4 párbeszéd kiértékelve (${ids.length} modell).`;
+    window.__huResults = perModel;
+    window.__huMeta = meta;
+  } catch (err) {
+    console.error(err);
+    huStatus.textContent = `Hiba: ${err.message || err}`;
+  } finally {
+    $('btn-run-hu').disabled = false;
+  }
+});
