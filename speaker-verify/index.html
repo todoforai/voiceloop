@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hangszín-felismerés (Speaker Verification) — Web Prototípus</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #64748b;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --green: #10b981;
+      --green-bg: #ecfdf5;
+      --red: #ef4444;
+      --red-bg: #fef2f2;
+      --amber: #f59e0b;
+      --amber-bg: #fffbeb;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      font-size: 14px;
+    }
+    .wrap { max-width: 1220px; margin: 0 auto; padding: 20px 20px 60px; }
+    header {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 18px;
+    }
+    h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+    .subtitle { color: var(--muted); font-size: 13px; margin-top: 2px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 9px; border-radius: 999px; font-size: 12px; font-weight: 500;
+      background: #f1f5f9; color: #334155; border: 1px solid var(--border);
+    }
+    .badge.ok { background: var(--green-bg); color: #065f46; border-color: #a7f3d0; }
+    .badge.warn { background: var(--amber-bg); color: #92400e; border-color: #fde68a; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 18px; margin-bottom: 16px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .card-head {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+      gap: 10px; margin-bottom: 12px;
+    }
+    .card h2 { margin: 0; font-size: 15px; font-weight: 700; }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    button {
+      appearance: none; border: 1px solid var(--border); background: #fff; color: var(--text);
+      padding: 8px 14px; border-radius: 8px; font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: all 0.12s;
+    }
+    button:hover:not(:disabled) { background: #f1f5f9; }
+    button.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+    button.primary:hover:not(:disabled) { background: var(--primary-hover); }
+    button.danger { background: var(--red); color: #fff; border-color: var(--red); }
+    button.success { background: var(--green); color: #fff; border-color: var(--green); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    select, input[type="text"] {
+      padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+      font-size: 13px; background: #fff; color: var(--text);
+    }
+    .model-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
+      gap: 10px;
+    }
+    .model-item {
+      display: flex; gap: 10px; align-items: flex-start;
+      padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+      cursor: pointer; transition: border-color 0.12s, background 0.12s;
+    }
+    .model-item:hover { background: #f8fafc; }
+    .model-item.selected { border-color: #93c5fd; background: #eff6ff; }
+    .model-item input { margin-top: 3px; accent-color: var(--primary); }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+    .model-name { font-weight: 600; font-size: 13px; }
+    .model-meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); background: #f8fafc; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .pill {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 11.5px; font-weight: 700;
+    }
+    .pill.good { background: var(--green-bg); color: #047857; }
+    .pill.mid { background: var(--amber-bg); color: #b45309; }
+    .pill.bad { background: var(--red-bg); color: #b91c1c; }
+    .pill.idle { background: #f1f5f9; color: #475569; }
+    .status-bar {
+      font-size: 12.5px; color: var(--muted); padding: 8px 12px;
+      background: #f8fafc; border-radius: 8px; border: 1px solid var(--border);
+      margin-bottom: 12px; min-height: 36px; display: flex; align-items: center; gap: 8px;
+    }
+    .winner-box {
+      padding: 10px 14px; border-radius: 10px; background: var(--green-bg);
+      border: 1px solid #a7f3d0; color: #065f46; font-size: 13px; margin-top: 12px;
+      display: none;
+    }
+    /* Live mic section */
+    .vu-wrap {
+      flex: 1; min-width: 140px; height: 12px; background: #e2e8f0;
+      border-radius: 999px; overflow: hidden;
+    }
+    .vu-fill { height: 100%; width: 0%; background: var(--green); transition: width 0.06s; }
+    .live-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 12px; margin-top: 12px;
+    }
+    .live-card {
+      border: 2px solid var(--border); border-radius: 12px; padding: 12px 14px;
+      background: #fff; transition: border-color 0.15s, background 0.15s;
+    }
+    .live-card.match { border-color: var(--green); background: #f0fdf4; }
+    .live-card.reject { border-color: var(--red); background: #fef2f2; }
+    .live-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .score-big { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; margin: 6px 0 4px; }
+    .meter {
+      position: relative; height: 10px; background: #e2e8f0; border-radius: 999px; overflow: visible;
+      margin: 6px 0 10px;
+    }
+    .meter-fill { height: 100%; border-radius: 999px; width: 0%; transition: width 0.12s; }
+    .meter-thr {
+      position: absolute; top: -3px; bottom: -3px; width: 2px; background: #0f172a;
+      pointer-events: none;
+    }
+    .thr-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .thr-row input[type="range"] { flex: 1; }
+    canvas#timeline {
+      width: 100%; height: 190px; display: block;
+      border: 1px solid var(--border); border-radius: 10px; background: #fff;
+      margin-top: 14px;
+    }
+    .small { font-size: 12px; color: var(--muted); }
+    .divider { height: 1px; background: var(--border); margin: 14px 0; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Hangszín-felismerés (Speaker Verification) — Web Prototípus</h1>
+      <div class="subtitle">Helyi, böngészőben futó összehasonlítás: pontosság + near-realtime sebesség (WASM SIMD / WebGPU)</div>
+    </div>
+    <div class="badges">
+      <span id="badge-coi" class="badge">SharedArrayBuffer: ...</span>
+      <span id="badge-cores" class="badge">CPU: ...</span>
+      <span id="badge-gpu" class="badge">WebGPU: ...</span>
+      <select id="backend-select" title="Futtatási motor">
+        <option value="wasm-mt">WASM multi-thread (SIMD)</option>
+        <option value="wasm-1t">WASM 1 szál (SIMD)</option>
+        <option value="webgpu">WebGPU (kísérleti)</option>
+      </select>
+    </div>
+  </header>
+
+  <!-- MODEL SELECTOR -->
+  <section class="card">
+    <div class="card-head">
+      <h2>1. Összehasonlítandó megoldások</h2>
+      <div class="row">
+        <button id="btn-select-fast">Alapértelmezett</button>
+        <button id="btn-select-all">Mind az 5</button>
+      </div>
+    </div>
+    <div id="model-grid" class="model-grid"></div>
+  </section>
+
+  <!-- AUTOMATED BENCHMARK -->
+  <section class="card">
+    <div class="card-head">
+      <h2>2. Automatikus Benchmark (3 beszélő + ablakméret-sebesség a te böngésződben)</h2>
+      <div class="row">
+        <button id="btn-run-bench" class="primary">Benchmark futtatása</button>
+      </div>
+    </div>
+    <div id="bench-status" class="status-bar">
+      Kattints a „Benchmark futtatása” gombra: 3 valódi beszélőn (6 WAV) és 0.5–3.0 mp-es ablakokon méri a valódi böngészős sebességet és szétválasztást.
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Modell</th>
+            <th>Motor</th>
+            <th class="num">Méret</th>
+            <th class="num">Betöltés</th>
+            <th class="num">0.5s</th>
+            <th class="num">1.0s</th>
+            <th class="num">1.5s</th>
+            <th class="num">2.0s</th>
+            <th class="num">3.0s</th>
+            <th class="num">RTF (1.5s)</th>
+            <th class="num">Saját (min/átl)</th>
+            <th class="num">Idegen (max/átl)</th>
+            <th class="num">Margó (teljes)</th>
+            <th class="num">Margó (1.2s)</th>
+            <th class="num">Ajánlott küszöb</th>
+          </tr>
+        </thead>
+        <tbody id="bench-tbody">
+          <tr><td colspan="15" class="small" style="text-align:center; padding:18px;">Még nincs futtatott mérés.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="winner-box" class="winner-box"></div>
+  </section>
+
+  <!-- LIVE MICROPHONE -->
+  <section class="card">
+    <div class="card-head">
+      <h2>3. Élő Mikrofon Próba (Near-Realtime Streaming)</h2>
+      <div class="row">
+        <label class="small">Ablak:
+          <select id="live-window">
+            <option value="1.0">1.0 mp</option>
+            <option value="1.5" selected>1.5 mp</option>
+            <option value="2.0">2.0 mp</option>
+          </select>
+        </label>
+        <label class="small">Frissítés:
+          <select id="live-hop">
+            <option value="300">300 ms</option>
+            <option value="500" selected>500 ms</option>
+            <option value="1000">1000 ms</option>
+          </select>
+        </label>
+        <label class="small">Csend küszöb (RMS):
+          <select id="live-rms">
+            <option value="0.008">Érzékeny (0.008)</option>
+            <option value="0.015" selected>Normál (0.015)</option>
+            <option value="0.025">Zajos szoba (0.025)</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div class="row" style="margin-bottom: 10px;">
+      <button id="btn-enroll" class="primary">1. Hangminta felvétele (beszélj 6–12 mp-et)</button>
+      <button id="btn-live" class="success" disabled>2. Élő figyelés indítása</button>
+      <button id="btn-clear-enroll" disabled>Hanglenyomat törlése</button>
+      <div class="vu-wrap" title="Mikrofon jelszint"><div id="vu-fill" class="vu-fill"></div></div>
+      <span id="mic-info" class="small">Nincs betanított hangminta</span>
+    </div>
+
+    <div id="live-status" class="status-bar">
+      1. lépés: vedd fel a saját hangod 6–12 másodpercig (beszélj természetesen magyarul). Utána indítsd az élő figyelést, és próbáld ki más hanggal vagy YouTube videóval!
+    </div>
+
+    <div id="live-cards" class="live-grid"></div>
+    <canvas id="timeline" width="1160" height="190"></canvas>
+    <div class="small" style="margin-top:6px;">
+      Élő hasonlósági görbe (utolsó 15 mp) — a szaggatott vonal a kiválasztott első modell küszöbét mutatja.
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- RECORDED CLIP COMPARISON MATRIX -->
+    <div class="card-head" style="margin-bottom:8px;">
+      <h2>4. Saját vs Idegen klipek összehasonlítása (azonos hangon)</h2>
+      <div class="row">
+        <input id="clip-label" type="text" value="Saját hang (normál)" placeholder="Klip neve (pl. Idegen / TV)" />
+        <button id="btn-rec-clip" disabled>Tesztklip felvétele (3 mp)</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="clip-table">
+        <thead id="clip-thead">
+          <tr><th>Tesztklip</th><th>Hossz</th><th class="small">Vedd fel előbb a hangmintát, majd rögzíts tesztklipeket.</th></tr>
+        </thead>
+        <tbody id="clip-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

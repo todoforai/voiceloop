@@ -40,3 +40,6 @@ bench/results/ablation-2026-09-07/*
 !bench/results/ablation-2026-09-07/pooled-capture.md
 !bench/results/ablation-2026-09-07/pooled-presynth.md
 !bench/results/ablation-2026-09-07/pooled-combined.md
+
+# Speaker verification prototype model cache
+speaker-verify/.cache/
