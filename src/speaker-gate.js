@@ -14,9 +14,10 @@
 // A token is kept if its label scores as the owner and its own window doesn't clearly say someone
 // else (the veto catches diarization mislabels — measured: Soniox put an intruder's "Küldd el" on the
 // owner's label). Before its label has a score, the window alone decides, at a laxer bar (short owner
-// words scored 0.47–0.49 on single windows). Nothing to judge yet (model loading, no window) →
-// finals pass (fail-open: missing the owner is worse than letting a stranger through) and partials
-// wait (an intruder's partial must not barge in on the reply; its final decides).
+// words scored 0.47–0.49 on single windows). Nothing to judge yet (model loading, no scored window —
+// e.g. a quiet/distant voice under minRms — and no label score) → DROP (fail-closed). It used to pass
+// finals, and with auto-send a stranger's sentence was sent before the owner said a word; losing an
+// owner word at session start (re-say it) is the cheaper mistake.
 // Timeline: the STT pushes exactly the samples it sends on the current socket (pushSent) and resets
 // on a new socket, so token start_ms/end_ms index straight into this buffer.
 
@@ -83,7 +84,7 @@ export class SpeakerGate {
     this.vp = Float32Array.from(voiceprint);
     this.o = { ...SPEAKER_GATE_DEFAULTS, ...opts };
     this.model = null;
-    (model ? Promise.resolve(model) : loadSpeakerModel(onProgress)).then((m) => { this.model = m; this._pump(); }, (e) => console.warn('speaker gate: model load failed — passing everything', e));
+    (model ? Promise.resolve(model) : loadSpeakerModel(onProgress)).then((m) => { this.model = m; this._pump(); }, (e) => console.warn('speaker gate: model load failed — every word is dropped until a new session', e));
     this.resetStream();
   }
 
@@ -190,7 +191,7 @@ export class SpeakerGate {
     const lab = this._label(t.speaker), w = this.windowScore((t.start_ms + t.end_ms) * SR / 2000), o = this.o;
     if (lab?.score != null) return lab.score >= o.threshold && (w == null || w >= o.veto);
     if (w != null) return w >= o.windowThreshold;
-    return !!t.is_final;
+    return false;
   }
 
   /** Debug/UI snapshot: per-label scores + the latest window. */

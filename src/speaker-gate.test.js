@@ -15,12 +15,16 @@ async function gateWith(segments) {   // [[sec, sign]] → gate that has heard t
   return g;
 }
 
-test('window decides before a label has a score; finals pass when nothing is known', async () => {
+test('window decides before a label has a score; nothing known → dropped (fail-closed)', async () => {
   const g = await gateWith([[2, 1], [2, -1]]);
   assert.equal(g.admit({ text: ' hi', start_ms: 500, end_ms: 900, speaker: '1', is_final: false }), true);
   assert.equal(g.admit({ text: ' yo', start_ms: 3500, end_ms: 3900, speaker: '2', is_final: false }), false);
   const cold = new SpeakerGate({ voiceprint: VP, model: new Promise(() => {}) });
-  assert.equal(cold.admit({ text: ' a', start_ms: 0, end_ms: 100, is_final: true }), true);
+  assert.equal(cold.admit({ text: ' a', start_ms: 0, end_ms: 100, is_final: true }), false);
+  // A quiet voice (window under minRms → no score) with no label score yet is not waved through either
+  const quiet = await gateWith([[2, 0.05]]);
+  assert.equal(quiet.windowScore(8000), undefined);
+  assert.equal(quiet.admit({ text: ' psst', start_ms: 300, end_ms: 700, speaker: '2', is_final: true }), false);
   assert.equal(cold.admit({ text: ' a', start_ms: 0, end_ms: 100, is_final: false }), false);
 });
 
