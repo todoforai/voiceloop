@@ -79,17 +79,27 @@ export async function enrollSpeaker(pcm, { onProgress, model } = {}) {
 }
 
 export class SpeakerGate {
-  /** `model` ({ embed(pcm) → unit vector }) overrides the CDN-loaded one — Node replays, tests. */
-  constructor({ voiceprint, onProgress, model, ...opts }) {
+  /** `model` ({ embed(pcm) → unit vector }) overrides the CDN-loaded one — Node replays, tests.
+   *  `onStreamLog(dump)` (optional, dev/diagnostics) receives the full stream PCM + per-token verdicts on stream end. */
+  constructor({ voiceprint, onProgress, model, onStreamLog, ...opts }) {
     this.vp = Float32Array.from(voiceprint);
     this.o = { ...SPEAKER_GATE_DEFAULTS, ...opts };
+    this._onStreamLog = onStreamLog || null;
+    this._log = null;
+    this._createdAt = Date.now();
+    this._modelReadyMs = null;
+    this._modelError = null;
     this.model = null;
-    (model ? Promise.resolve(model) : loadSpeakerModel(onProgress)).then((m) => { this.model = m; this._pump(); }, (e) => console.warn('speaker gate: model load failed — every word is dropped until a new session', e));
+    (model ? Promise.resolve(model) : loadSpeakerModel(onProgress)).then(
+      (m) => { this.model = m; this._modelReadyMs = Date.now() - this._createdAt; this._pump(); },
+      (e) => { this._modelError = String(e?.message || e); console.warn('speaker gate: model load failed — every word is dropped until a new session', e); },
+    );
     this.resetStream();
   }
 
   /** New STT stream: its token times restart at 0, and its speaker labels are new people. */
   resetStream() {
+    this.endStream('reset');
     this._gen = (this._gen || 0) + 1;
     const n = this.o.bufferSec * SR;
     this.buf = new Float32Array(n); this.total = 0;   // ring buffer; `total` = samples pushed this stream
@@ -97,13 +107,51 @@ export class SpeakerGate {
     this.nextEnd = this.o.windowSec * SR;
     this.labels = new Map();  // label → { segs: [[s, e]], sec, scoredSec, score }
     this._busy = false; this.dropped = 0;
+    this._log = this._onStreamLog ? { startedAt: Date.now(), pcmChunks: [], pcmSamples: 0, truncated: false, tokens: [], windows: [], labelScores: [], turns: [] } : null;
+  }
+
+  /** Flush the current stream's diagnostic capture (if `onStreamLog` is attached and anything arrived). */
+  endStream(reason = 'close') {
+    const log = this._log;
+    if (!log) return;
+    this._log = null;
+    if (!log.tokens.length && !log.turns.length) return;
+    const pcm = new Int16Array(log.pcmSamples);
+    let off = 0;
+    for (const c of log.pcmChunks) { pcm.set(c, off); off += c.length; }
+    try {
+      this._onStreamLog({
+        pcm, sampleRate: SR, tokens: log.tokens, windows: log.windows, labelScores: log.labelScores, turns: log.turns,
+        meta: {
+          startedAt: log.startedAt, endedAt: Date.now(), endReason: reason,
+          durationSec: +(this.total / SR).toFixed(2), truncated: log.truncated, dropped: this.dropped,
+          modelReady: !!this.model, modelReadyMs: this._modelReadyMs, modelError: this._modelError,
+          options: { ...this.o }, finalLabels: this.state.labels,
+        },
+      });
+    } catch (e) { console.warn('speaker gate: onStreamLog failed', e); }
+  }
+
+  /** Record a turn boundary (`<end>` / `<fin>`) and what text survived gating. */
+  logTurn(marker, emittedText, held = false) {
+    if (this._log) this._log.turns.push({ marker, at_ms: Math.round(this.total * 1000 / SR), emittedText, held });
   }
 
   /** The exact samples the STT just sent on the current stream (Int16 or Float32). */
   pushSent(chunk) {
-    const n = this.buf.length, f = chunk instanceof Int16Array ? 1 / 32768 : 1;
+    const n = this.buf.length, isI16 = chunk instanceof Int16Array, f = isI16 ? 1 / 32768 : 1;
     for (let i = 0; i < chunk.length; i++) this.buf[(this.total + i) % n] = chunk[i] * f;
     this.total += chunk.length;
+    if (this._log && !this._log.truncated) {
+      const cap = (this.o.maxLogSec ?? 600) * SR;
+      if (this._log.pcmSamples + chunk.length <= cap) {
+        let copy;
+        if (isI16) copy = chunk.slice();
+        else { copy = new Int16Array(chunk.length); for (let i = 0; i < chunk.length; i++) copy[i] = Math.max(-1, Math.min(1, chunk[i])) * 32767; }
+        this._log.pcmChunks.push(copy);
+        this._log.pcmSamples += copy.length;
+      } else this._log.truncated = true;
+    }
     this._pump();
   }
 
@@ -127,19 +175,28 @@ export class SpeakerGate {
           this.nextEnd = end + hop;
           const pcm = this._slice(end - win, end);
           let rms = 0; for (let i = 0; i < pcm.length; i++) rms += pcm[i] * pcm[i];
-          const score = Math.sqrt(rms / pcm.length) < this.o.minRms ? null : dot(this.vp, await this.model.embed(pcm));
+          const rmsVal = Math.sqrt(rms / pcm.length);
+          const score = rmsVal < this.o.minRms ? null : dot(this.vp, await this.model.embed(pcm));
           if (gen !== this._gen) return;
           this.windows.push({ end, score });
+          if (this._log) this._log.windows.push({ end_ms: Math.round(end * 1000 / SR), rms: +rmsVal.toFixed(5), score: score == null ? null : +score.toFixed(4) });
           while (this.windows.length && this.windows[0].end < this.total - this.buf.length) this.windows.shift();
           continue;
         }
-        const lab = [...this.labels.values()].find((l) => l.sec >= this.o.labelMinSec && l.sec - l.scoredSec >= this.o.labelRescoreSec);
+        let labKey = null, lab = null;
+        for (const [k, l] of this.labels) if (l.sec >= this.o.labelMinSec && l.sec - l.scoredSec >= this.o.labelRescoreSec) { labKey = k; lab = l; break; }
         if (!lab) break;
         lab.scoredSec = lab.sec;
         const parts = []; let len = 0;
         for (let i = lab.segs.length - 1; i >= 0 && len < this.o.labelMaxSec * SR; i--) { const p = this._slice(...lab.segs[i]); parts.unshift(p); len += p.length; }
         const pcm = new Float32Array(len); let o = 0; for (const p of parts) { pcm.set(p, o); o += p.length; }
-        if (len >= 0.5 * SR) { const score = dot(this.vp, await this.model.embed(pcm)); if (gen === this._gen) lab.score = score; }
+        if (len >= 0.5 * SR) {
+          const score = dot(this.vp, await this.model.embed(pcm));
+          if (gen === this._gen) {
+            lab.score = score;
+            if (this._log) this._log.labelScores.push({ at_ms: Math.round(this.total * 1000 / SR), speaker: labKey, sec: +lab.sec.toFixed(2), score: +score.toFixed(4) });
+          }
+        }
       }
     } catch (e) { console.warn('speaker gate: scoring failed', e); }
     finally { if (gen === this._gen) this._busy = false; }   // a stale pump must not unlock the new stream's
@@ -158,11 +215,22 @@ export class SpeakerGate {
    *  of the same speaker follows its word's verdict, so a word is never half-dropped. A FINAL token
    *  also feeds its audio to its speaker label's pool. */
   admit(t, prev) {
-    const cont = prev && !/^\s/.test(t.text) && prev.speaker === t.speaker;
+    const cont = !!(prev && !/^\s/.test(t.text) && prev.speaker === t.speaker);
     if (t.is_final) this._pool(t);
-    const keep = cont ? prev.keep : this._judge(t);
-    if (!keep && t.is_final) this.dropped++;
-    return keep;
+    const d = cont ? { keep: prev.keep, reason: 'cont', w: null, lab: null, labSec: 0 } : this._judgeDetail(t);
+    if (!d.keep && t.is_final) this.dropped++;
+    if (this._log) {
+      this._log.tokens.push({
+        text: t.text, start_ms: t.start_ms ?? null, end_ms: t.end_ms ?? null,
+        speaker: t.speaker ?? null, is_final: !!t.is_final,
+        arrival_ms: Math.round(this.total * 1000 / SR),
+        keep: d.keep, reason: d.reason,
+        w: d.w == null ? null : +d.w.toFixed(4),
+        lab: d.lab == null ? null : +d.lab.toFixed(4),
+        labSec: +d.labSec.toFixed(2), ready: !!this.model,
+      });
+    }
+    return d.keep;
   }
 
   _pool(t) {
@@ -186,12 +254,16 @@ export class SpeakerGate {
     return l;
   }
 
-  _judge(t) {
-    if (t.start_ms == null || t.end_ms == null) return true;
-    const lab = this._label(t.speaker), w = this.windowScore((t.start_ms + t.end_ms) * SR / 2000), o = this.o;
-    if (lab?.score != null) return lab.score >= o.threshold && (w == null || w >= o.veto);
-    if (w != null) return w >= o.windowThreshold;
-    return false;
+  _judgeDetail(t) {
+    if (t.start_ms == null || t.end_ms == null) return { keep: true, reason: 'no_ts', w: null, lab: null, labSec: 0 };
+    const lab = this._label(t.speaker), w = this.windowScore((t.start_ms + t.end_ms) * SR / 2000), o = this.o, labSec = lab?.sec ?? 0;
+    if (lab?.score != null) {
+      if (lab.score < o.threshold) return { keep: false, reason: 'label_low', w, lab: lab.score, labSec };
+      if (w != null && w < o.veto) return { keep: false, reason: 'label_veto', w, lab: lab.score, labSec };
+      return { keep: true, reason: 'label_ok', w, lab: lab.score, labSec };
+    }
+    if (w != null) return { keep: w >= o.windowThreshold, reason: w >= o.windowThreshold ? 'win_ok' : 'win_low', w, lab: null, labSec };
+    return { keep: false, reason: this.model ? 'no_score' : 'no_model', w: null, lab: null, labSec };
   }
 
   /** Debug/UI snapshot: per-label scores + the latest window. */

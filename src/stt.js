@@ -709,9 +709,11 @@ export function makeSonioxSTT(opts) {
     if ((finalText + tail).trim()) { holdTimer = setTimeout(flushHeld, SONIOX_HOLD_MS); return; }   // continuation in progress: its <end> merges
     const t = held, at = ms(); resetTurn(); audioSinceFinal = false; onFinal(t, at);
   };
-  const closeTurn = (force = false) => {
+  const closeTurn = (force = false, marker = '<end>') => {
     const seg = (finalText + tail).trim(), t = withHeld(seg), at = ms();
-    if (!force && sonioxContinues(seg)) {   // cut mid-thought: keep it as the prefix of the next segment
+    const hold = !force && sonioxContinues(seg);
+    speakerGate?.logTurn?.(marker, t, hold);
+    if (hold) {   // cut mid-thought: keep it as the prefix of the next segment
       resetText(); held = t;
       clearTimeout(holdTimer); holdTimer = setTimeout(flushHeld, SONIOX_HOLD_MS);
       return;
@@ -765,6 +767,7 @@ export function makeSonioxSTT(opts) {
       sock.onclose = ev => {
         usage.flush(); onClose?.();
         if (sock !== ws) return;   // superseded socket's late close: the new one's state is untouched
+        speakerGate?.endStream?.('socket_close');
         clearInterval(keepalive); keepalive = null;
         if (!isClosed()) reportClose(ev, opened, onError);
       };
@@ -787,7 +790,7 @@ export function makeSonioxSTT(opts) {
         // tokens): handle the markers at their POSITION, so text after one belongs to the next turn.
         let newTail = '', tailPrev = gatePrev;   // gate cursors: finals persist, the partial tail is rebuilt every response
         for (const t of m.tokens) {
-          if (t.text === '<end>' || t.text === '<fin>') { tail = newTail; newTail = ''; gatePrev = tailPrev = undefined; closeTurn(t.text === '<fin>'); continue; }
+          if (t.text === '<end>' || t.text === '<fin>') { tail = newTail; newTail = ''; gatePrev = tailPrev = undefined; closeTurn(t.text === '<fin>', t.text); continue; }
           if (!turnStart) turnStart = performance.now();   // turn's ms clock anchors at its first token
           if (speakerGate) {   // another voice's word: never shown, never sent
             const v = { speaker: t.speaker, keep: speakerGate.admit(t, t.is_final ? gatePrev : tailPrev) };
@@ -827,6 +830,7 @@ export function makeSonioxSTT(opts) {
     close() {
       resetTurn(); audioSinceFinal = false;
       clearInterval(keepalive); keepalive = null; outbox = []; outboxSamples = 0;
+      speakerGate?.endStream?.('close');
       usage.flush();
       const sock = ws; ws = null;
       if (sock?.readyState === 1) { try { sock.send(''); } catch { /* closing anyway */ } }   // empty frame = end of stream

@@ -47,3 +47,26 @@ test('resetStream drops labels and windows', async () => {
   assert.deepEqual(g.state.labels, {});
   assert.equal(g.windowScore(8000), undefined);
 });
+
+test('onStreamLog captures PCM, per-token verdicts/reasons, windows, labels, and turns on endStream', async () => {
+  const logs = [];
+  const g = new SpeakerGate({ voiceprint: VP, model, onStreamLog: (d) => logs.push(d) });
+  await tick();
+  g.pushSent(tone(2, 1)); await tick();
+  g.pushSent(tone(2, -1)); await tick();
+  assert.equal(g.admit({ text: ' szia', start_ms: 400, end_ms: 800, speaker: '1', is_final: true }), true);
+  assert.equal(g.admit({ text: ' mas', start_ms: 3200, end_ms: 3600, speaker: '2', is_final: true }), false);
+  g.logTurn('<end>', 'szia');
+  g.endStream('close');
+  g.endStream('close');   // idempotent: second call does not duplicate
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].pcm.length, 4 * 16000);
+  assert.equal(logs[0].tokens.length, 2);
+  assert.equal(logs[0].tokens[0].reason, 'win_ok');
+  assert.equal(logs[0].tokens[1].reason, 'win_low');
+  assert.ok(logs[0].windows.length >= 2);
+  assert.equal(logs[0].turns.length, 1);
+  assert.equal(logs[0].turns[0].emittedText, 'szia');
+  assert.equal(logs[0].meta.endReason, 'close');
+  assert.equal(logs[0].meta.dropped, 1);
+});

@@ -430,7 +430,23 @@ export function toolResultText(result: unknown): string;
 // ── Speaker gate (voice lock) ──
 export interface SpeakerGateOptions {
   threshold?: number; windowThreshold?: number; veto?: number; windowSec?: number; hopSec?: number; minRms?: number;
-  labelMinSec?: number; labelMaxSec?: number; labelRescoreSec?: number; bufferSec?: number;
+  labelMinSec?: number; labelMaxSec?: number; labelRescoreSec?: number; bufferSec?: number; maxLogSec?: number;
+}
+export interface SpeakerGateTokenLog {
+  text: string; start_ms: number | null; end_ms: number | null; speaker: string | null; is_final: boolean;
+  arrival_ms: number; keep: boolean; reason: string; w: number | null; lab: number | null; labSec: number; ready: boolean;
+}
+export interface SpeakerGateStreamLog {
+  pcm: Int16Array; sampleRate: number;
+  tokens: SpeakerGateTokenLog[];
+  windows: Array<{ end_ms: number; rms: number; score: number | null }>;
+  labelScores: Array<{ at_ms: number; speaker: string; sec: number; score: number }>;
+  turns: Array<{ marker: string; at_ms: number; emittedText: string; held: boolean }>;
+  meta: {
+    startedAt: number; endedAt: number; endReason: string; durationSec: number; truncated: boolean; dropped: number;
+    modelReady: boolean; modelReadyMs: number | null; modelError: string | null;
+    options: SpeakerGateOptions; finalLabels: Record<string, { sec: number; score?: number }>;
+  };
 }
 export const SPEAKER_GATE_DEFAULTS: Required<SpeakerGateOptions>;
 export const SPEAKER_MODEL: { id: string; url: string; sizeMB: number; fbank: Record<string, unknown> };
@@ -441,8 +457,10 @@ export function loadSpeakerModel(onProgress?: (loaded: number, total: number) =>
 /** Voiceprint from ~15 s of the owner reading (16 kHz mono Float32). Throws on too little speech. */
 export function enrollSpeaker(pcm: Float32Array, options?: { onProgress?: (loaded: number, total: number) => void; model?: SpeakerModel }): Promise<Voiceprint>;
 export class SpeakerGate {
-  constructor(options: { voiceprint: ArrayLike<number>; onProgress?: (loaded: number, total: number) => void; model?: SpeakerModel } & SpeakerGateOptions);
+  constructor(options: { voiceprint: ArrayLike<number>; onProgress?: (loaded: number, total: number) => void; model?: SpeakerModel; onStreamLog?: (log: SpeakerGateStreamLog) => void } & SpeakerGateOptions);
   resetStream(): void;
+  endStream(reason?: string): void;
+  logTurn(marker: string, emittedText: string, held?: boolean): void;
   pushSent(chunk: Int16Array | Float32Array): void;
   admit(token: { text: string; start_ms?: number; end_ms?: number; speaker?: string; is_final?: boolean }, prev?: { speaker?: string; keep: boolean }): boolean;
   readonly state: { ready: boolean; window?: number; dropped: number; labels: Record<string, { sec: number; score?: number }> };
