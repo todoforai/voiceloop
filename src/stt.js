@@ -707,7 +707,7 @@ export function makeSonioxSTT(opts) {
   const withHeld = (t) => (held ? `${held} ${t.trim()}` : t).trim();
   const flushHeld = () => {   // hold cap: nothing followed → the cut-off phrase was the whole turn
     if ((finalText + tail).trim()) { holdTimer = setTimeout(flushHeld, SONIOX_HOLD_MS); return; }   // continuation in progress: its <end> merges
-    const t = held, at = ms(); resetTurn(); audioSinceFinal = false; onFinal(t, at);
+    const t = held, at = ms(); speakerGate?.logTurn?.('hold_flush', t, false); resetTurn(); audioSinceFinal = false; onFinal(t, at);
   };
   const closeTurn = (force = false, marker = '<end>') => {
     const seg = (finalText + tail).trim(), t = withHeld(seg), at = ms();
@@ -825,7 +825,7 @@ export function makeSonioxSTT(opts) {
       if (!audioSinceFinal) { onFinal('', ms()); return; }
       awaitingFinal = true;
       if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'finalize' }));   // else onopen sends it
-      clearTimeout(safetyTimer); safetyTimer = setTimeout(() => closeTurn(true), TUNING.STT.forceEndSafetyMs);
+      clearTimeout(safetyTimer); safetyTimer = setTimeout(() => closeTurn(true, 'safety'), TUNING.STT.forceEndSafetyMs);
     },
     close() {
       resetTurn(); audioSinceFinal = false;

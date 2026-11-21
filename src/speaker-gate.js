@@ -42,6 +42,7 @@ export const SPEAKER_GATE_DEFAULTS = {
   labelMaxSec: 12,       // pool the latest N s per label (bounds the re-score cost)
   labelRescoreSec: 1.0,  // re-score a label after this much new audio
   bufferSec: 30,         // audio kept for label pooling (finals land ~3–5 s after the word)
+  maxLogSec: 600,        // cap diagnostic capture per stream (~19 MB PCM) when onStreamLog is set
 };
 
 let sessionP = null;
@@ -143,7 +144,7 @@ export class SpeakerGate {
     for (let i = 0; i < chunk.length; i++) this.buf[(this.total + i) % n] = chunk[i] * f;
     this.total += chunk.length;
     if (this._log && !this._log.truncated) {
-      const cap = (this.o.maxLogSec ?? 600) * SR;
+      const cap = this.o.maxLogSec * SR;
       if (this._log.pcmSamples + chunk.length <= cap) {
         let copy;
         if (isI16) copy = chunk.slice();
@@ -179,7 +180,7 @@ export class SpeakerGate {
           const score = rmsVal < this.o.minRms ? null : dot(this.vp, await this.model.embed(pcm));
           if (gen !== this._gen) return;
           this.windows.push({ end, score });
-          if (this._log) this._log.windows.push({ end_ms: Math.round(end * 1000 / SR), rms: +rmsVal.toFixed(5), score: score == null ? null : +score.toFixed(4) });
+          if (this._log && !this._log.truncated) this._log.windows.push({ end_ms: Math.round(end * 1000 / SR), rms: +rmsVal.toFixed(5), score: score == null ? null : +score.toFixed(4) });
           while (this.windows.length && this.windows[0].end < this.total - this.buf.length) this.windows.shift();
           continue;
         }
@@ -194,7 +195,7 @@ export class SpeakerGate {
           const score = dot(this.vp, await this.model.embed(pcm));
           if (gen === this._gen) {
             lab.score = score;
-            if (this._log) this._log.labelScores.push({ at_ms: Math.round(this.total * 1000 / SR), speaker: labKey, sec: +lab.sec.toFixed(2), score: +score.toFixed(4) });
+            if (this._log && !this._log.truncated) this._log.labelScores.push({ at_ms: Math.round(this.total * 1000 / SR), speaker: labKey, sec: +lab.sec.toFixed(2), score: +score.toFixed(4) });
           }
         }
       }
@@ -219,7 +220,7 @@ export class SpeakerGate {
     if (t.is_final) this._pool(t);
     const d = cont ? { keep: prev.keep, reason: 'cont', w: null, lab: null, labSec: 0 } : this._judgeDetail(t);
     if (!d.keep && t.is_final) this.dropped++;
-    if (this._log) {
+    if (this._log && !this._log.truncated && this._log.tokens.length < 20000) {
       this._log.tokens.push({
         text: t.text, start_ms: t.start_ms ?? null, end_ms: t.end_ms ?? null,
         speaker: t.speaker ?? null, is_final: !!t.is_final,

@@ -2,13 +2,14 @@
 // Summarize one (or the latest) recorded ~/voice-logs/<session> directory:
 // per-speaker score distributions, RMS, decision reasons, and kept/[dropped] transcript.
 // Usage: node speaker-verify/analyze-log.mjs [~/voice-logs/<id>]
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 let dir = process.argv[2];
 if (!dir) {
   const root = join(homedir(), 'voice-logs');
+  if (!existsSync(root)) { console.error(`No sessions directory yet: ${root}`); process.exit(1); }
   const dirs = readdirSync(root).filter((d) => statSync(join(root, d)).isDirectory()).sort();
   if (!dirs.length) { console.error(`No sessions in ${root}`); process.exit(1); }
   dir = join(root, dirs.at(-1));
