@@ -76,3 +76,14 @@ pace, each token admitted when it originally arrived, so labels only know their 
 
 Label scores at the end: S1 (owner) 0.72, S2 −0.08, S3 0.26. Still ONE synthetic dialogue — real-mic
 validation pending. Diarization costs nothing extra (bundled in Soniox's hourly rate).
+
+## Later (agreed design, not built)
+
+- **Multi-person lock:** `SpeakerGate` takes several voiceprints, score = max over them (matching is µs; the
+  embedding is the cost, once per window). `setVoiceprints()` swaps the allowed set live (re-score labels, no
+  reconnect). Frontend: per-person records `{ name, enabled, prints per mic }`, falling back to another mic's
+  print when this mic has none; a checklist UI. Do it after the single-owner gate is tried on a real mic.
+- **`tfa-assistant` CLI:** lets agents change the browser-local `VoiceSettings` over the existing `ui_call`
+  bridge (bash can't read localStorage). Allowed: `sttLang`, `speed`, voice, `voiceLock` and allowed names,
+  `notifyScope`, `todStyle` presets, `listenInBackground`, mascot look. Denied: `todInstructions` (goes into the
+  prompt, so it's an injection risk), `todModel`/`voiceMode` (billing). Never expose voiceprint vectors.
