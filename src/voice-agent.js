@@ -34,14 +34,13 @@ export const VOICE_SYSMSG =
 const CDN = 'https://cdn.jsdelivr.net/npm/';
 
 // AudioWorklet processor: downsample the context's rate to 16kHz (box-average per output sample;
-// passthrough when the context already runs at 16kHz) and accumulate ~256ms chunks (4096 samples
-// @16kHz — the cadence the pipeline's bootstrap-VAD/preroll math assumes), posting each to the main
-// thread. The context runs at the device's native rate: Safari/iOS may ignore or mishandle a 16kHz
-// context fed by a 48kHz mic, so the resample happens here where we control it.
-// Kept as a source string → Blob URL so no separate asset/bundler config is needed.
+// passthrough when the context already runs at 16kHz) and accumulate ~64ms chunks (1024 samples
+// @16kHz), posting each to the main thread. The context runs at the device's native rate: Safari/iOS
+// may ignore or mishandle a 16kHz context fed by a 48kHz mic, so the resample happens here where we
+// control it. Kept as a source string → Blob URL so no separate asset/bundler config is needed.
 const CAPTURE_WORKLET_SRC = `
 registerProcessor('capture-processor', class extends AudioWorkletProcessor {
-  constructor() { super(); this._buf = new Float32Array(4096); this._n = 0; this._step = sampleRate / 16000; this._acc = 0; this._sum = 0; this._cnt = 0; }
+  constructor() { super(); this._buf = new Float32Array(${TUNING.CAPTURE_CHUNK_SAMPLES}); this._n = 0; this._step = sampleRate / 16000; this._acc = 0; this._sum = 0; this._cnt = 0; }
   process(inputs) {
     const ch = inputs[0]?.[0];
     if (ch) for (let i = 0; i < ch.length; i++) {
@@ -185,7 +184,7 @@ export class VoiceAgent {
   constructor({ sysmsg = '', persona, model = '', llm, fetchFn, apiKey = '', llmUrl = '', maxTokens = TUNING.MAX_TOKENS,
                 tts, speed, sttLang = 'en', micDeviceId = '', sttProvider = 'webspeech', sttEotThreshold, sttOptions = {},
                 sttTokenUrl = '', getSttToken, sttUsageUrl = '', sttUrl = '', sttModel = '',
-                tools = {}, keyterms = [], preroll = TUNING.PREROLL_CHUNKS, vadOptions = {}, turnDetector = null,
+                tools = {}, keyterms = [], preroll, prerollMs = TUNING.PREROLL_MS, vad = true, vadOptions = {}, turnDetector = null,
                 maxPauseMs = TUNING.MAX_PAUSE_MS, bargeInMinChars, audioIO = null, speakerGate = null, onEvent = () => {} } = {}) {
     // Host-supplied mic capture (React Native, Electron main, tests): `startCapture(onFrame)` delivers
     // 16 kHz mono Float32 frames (~256 ms) and resolves a handle with stop()/setMuted(). Replaces the
@@ -201,7 +200,10 @@ export class VoiceAgent {
     this.tts = tts ?? new PiperTTS(undefined, speed); this.sttLang = sttLang; this.onEvent = onEvent;
     this.tts.onEvent = onEvent;   // diagnostics channel (e.g. aec-fallback warning from StreamingTTS._playBuf)
     this.apiKey = apiKey;
-    this.micDeviceId = micDeviceId; this.prerollMax = preroll; this.vadOptions = vadOptions;
+    this.micDeviceId = micDeviceId;
+    // Legacy `preroll` counted old 256 ms (4096-sample) chunks; prefer `prerollMs` (default 1000 ms).
+    this.prerollMaxSamples = preroll !== undefined ? preroll * 4096 : Math.round(prerollMs * 16);
+    this.useVad = vad; this.vadOptions = vadOptions;
     this.turnDetector = turnDetector; this._turnText = ''; this._turnClosing = false; this.maxPauseMs = maxPauseMs; this._bargeInMinChars = bargeInMinChars; this._maxPause = null;   // _bargeInMinChars undefined → live-read tuning.js (see getter)   // semantic end-of-turn hook + latest interim it judges + closing latch + hard max-pause failsafe
     this._prefetch = null; this._prefetchTimer = null;   // speculative LLM prefetch (see _startPrefetch)
     // STT is a pluggable provider (like tts/llm). The agent owns the mic+VAD and forwards
@@ -255,7 +257,10 @@ export class VoiceAgent {
         // the audible reply count as echo (misheard echo words land NEAR the reply's words — see
         // fuzzyHas) and contribute nothing, so echo that slipped past the ratio latch above still
         // can't cut the reply; real interruptions are novel words and fire exactly as before.
-        if (this.state === 'speaking' && !this._echoRef && novelChars(interim, echoScope) >= this.bargeInMinChars) this._onBargeIn();
+        if (this.state === 'speaking' && !this._echoRef && (
+          novelChars(interim, echoScope) >= this.bargeInMinChars ||
+          (Number.isFinite(this.bargeInMinChars) && hasNovelStopWord(interim, echoScope))
+        )) this._onBargeIn();
         // SPECULATIVE PREFETCH: the turn's end-of-turn debounce is dead time — the LLM request only
         // fires after it elapses, so its TTFT lands ON TOP. Instead, once the interim has been
         // stable for PREFETCH_MS (no new words), start generating NOW with the probable final text;
@@ -325,7 +330,7 @@ export class VoiceAgent {
     this.state = 'idle';           // idle | listening | thinking | speaking
     this._abort = null;            // aborts the in-flight LLM
     this._replySeq = 0;            // bumped per reply-generating turn; a queued turn drops itself if a newer one exists
-    this._preroll = []; this._wasSpeaking = false; this._closed = false; this._destroyed = false;
+    this._preroll = []; this._prerollSamples = 0; this._wasSpeaking = false; this._closed = false; this._destroyed = false;
     // Diagnostic tap: last ~30s of the exact i16 frames handed to STT + delivery-stall gaps, for
     // dumpAudio() (replay any "it misheard me" run and prove capture clean-or-not).
     this._tap = []; this._tapSamples = 0; this._tapTotal = 0; this._tapLastMs = 0; this._tapGaps = [];
@@ -346,7 +351,7 @@ export class VoiceAgent {
     // — so the mic is gated (and speech detected) from frame 1 instead of losing/chopping the user's
     // opening words in the size-capped preroll buffer. Swapped to Silero at the next utterance
     // boundary once it's ready (never mid-speech — see _endOfSpeech / onSpeechStart).
-    this._useBootstrap = false; this._sileroPending = false; this._bsSpeechFrames = 0; this._bsSilenceFrames = 0;
+    this._useBootstrap = false; this._sileroPending = false; this._bsSpeechSamples = 0; this._bsSilenceSamples = 0;
     // Bumped on every cold start()/_teardownPipeline() — guards the fire-and-forget _startVad() below:
     // a rapid re-click or device switch during the cold-load window can call start() again before the
     // FIRST _startVad() resolves; its late resolution must not stomp the SECOND session's _vad/bootstrap
@@ -384,13 +389,14 @@ export class VoiceAgent {
     // latency), so reopening a paused voice session feels instant. A device switch (different deviceId)
     // can't reuse the captured stream, so fall through to a fresh build. The VAD's getStream callback
     // captured this._stream at MicVAD.new() time, so we MUST keep the same stream to reuse the model.
-    if (this._vad && this._stream?.active && deviceId === this._streamDeviceId) {
+    const needsVad = this.useVad || !this.stt.continuous || !this.stt.nativeEOT;
+    if ((needsVad ? this._vad : this._ctx) && this._stream?.active && deviceId === this._streamDeviceId) {
       this._ctx?.resume?.();                                                  // a paused-tab AudioContext can be suspended
       this._stream.getAudioTracks().forEach(t => t.enabled = !this._muted);   // honor a mute toggled while paused
       // stop() is always a safe boundary (nothing is mid-utterance once stopped) — so if Silero
       // finished loading while paused, resume goes straight to it instead of restarting bootstrap.
-      if (this._useBootstrap) { this._useBootstrap = false; this._bsSpeechFrames = 0; this._bsSilenceFrames = 0; }
-      this._vad.start();
+      if (this._useBootstrap) { this._useBootstrap = false; this._bsSpeechSamples = 0; this._bsSilenceSamples = 0; }
+      this._vad?.start();
       this.stt.open?.();   // re-open the STT socket (stop() closed it) so the first utterance doesn't pay a cold connect
       this.tts.warm?.().catch(() => {});
       this._set('listening');
@@ -484,9 +490,15 @@ export class VoiceAgent {
       // only be protected by the small preroll ring buffer (silently drops the opening words on a slow
       // cold start). _startVad() runs in the background (not awaited) and swaps in Silero the moment
       // it's ready — see _swapToSileroWhenReady.
-      this._useBootstrap = true; this._sileroPending = true;
-      this._startVad(gen).then(() => { if (gen === this._pipelineGen && !this._closed) this._swapToSileroWhenReady(); })
-        .catch(() => { if (gen === this._pipelineGen) this._sileroPending = false; });
+      // Skip Silero + bootstrap VAD when explicitly disabled AND the provider handles continuous
+      // streaming + native end-of-turn itself (e.g. Soniox dictation, which doesn't need VAD events).
+      if (needsVad) {
+        this._useBootstrap = true; this._sileroPending = true;
+        this._startVad(gen).then(() => { if (gen === this._pipelineGen && !this._closed) this._swapToSileroWhenReady(); })
+          .catch(() => { if (gen === this._pipelineGen) this._sileroPending = false; });
+      } else {
+        this._useBootstrap = false; this._sileroPending = false;
+      }
       // Warm the TTS engine (Piper: download+compile the ONNX voice model, JIT the WASM path) so the
       // first reply isn't stalled by cold start mid-turn — deferred off the STT connect window (see
       // TTS_WARM_DELAY_MS).
@@ -510,7 +522,8 @@ export class VoiceAgent {
     catch (e) { if (gen === this._pipelineGen) { this.stop(); this.onEvent({ type: 'error', error: e?.message || 'Microphone access failed' }); } return; }
     if (gen !== this._pipelineGen || this._closed) { cap.stop(); return; }
     this._capture = cap; cap.setMuted?.(this._muted);
-    this._useBootstrap = true; this._sileroPending = false;   // energy-VAD for the whole session
+    this._useBootstrap = this.useVad || !this.stt.continuous || !this.stt.nativeEOT;
+    this._sileroPending = false;   // energy-VAD for the whole session (unless disabled on continuous+nativeEOT)
     this.stt.open?.();
     setTimeout(() => { if (gen === this._pipelineGen && !this._closed) this.tts.warm?.().catch(() => {}); }, TUNING.TTS_WARM_DELAY_MS);
   }
@@ -527,13 +540,13 @@ export class VoiceAgent {
     this._replyDoneAt = 0;
     // Drop buffered-but-unsent audio: flushing it into the next session's socket on resume
     // would re-transcribe old speech (duplicate user turns).
-    this._preroll = []; this._wasSpeaking = false; this._speaking = false;
+    this._preroll = []; this._prerollSamples = 0; this._wasSpeaking = false; this._speaking = false;
     // PAUSE, don't tear down: keep the mic stream + audio graph + VAD model alive so a resume of THIS
     // agent (start() again) is instant — no getUserMedia prompt, no MicVAD.new() cold start. The STT
     // socket DOES close (it's cheap to reopen lazily on the next utterance, and a stale socket would
     // re-transcribe old audio). The host releases the mic by calling destroy() when it ends the session.
     this._vad?.pause(); this.stt.close();
-    this._bsSpeechFrames = 0; this._bsSilenceFrames = 0;
+    this._bsSpeechSamples = 0; this._bsSilenceSamples = 0;
     this._tapLastMs = 0;   // the pause gap isn't a capture dropout — don't flag it on resume
     this._set('idle');
   }
@@ -657,7 +670,7 @@ export class VoiceAgent {
   // Mute/unmute the AI's spoken OUTPUT (TTS). When muted, the reply still streams into the
   // transcript but is never voiced; an utterance already playing is stopped. Stored so it carries
   // across pauses and applies to the next turn.
-  setTtsMuted(muted) { this._ttsMuted = muted; if (muted) this.tts.stop?.(); }
+  setTtsMuted(muted) { this._ttsMuted = muted; if (muted) { this.tts.stop?.(); this.tts.clearPresynth?.(); } }
 
   // Move the playhead to a position in the current reply (non-whitespace char count) and play forward
   // from there — the transcript UI's tap-to-seek. Hits any sentence already streamed (backward replays
@@ -775,17 +788,33 @@ export class VoiceAgent {
   // Safe where tools are not: synth has zero side effects — a stale speculation wastes one tiny
   // predict, nothing more. Serial-session cost is bounded: the chunk is the reply's first WORDS
   // (stage-0 breaker, ~a dozen chars), so even a wasted predict delays a real turn only briefly.
+  _pullHead(p) {
+    p.pulling = p.gen.next().then((r) => {
+      if (r.done) p.headDone = true;
+      else p.head.push(r.value);
+      return r;
+    });
+    p.pulling.catch(() => {});                             // aborted/failed speculation must not be an unhandled rejection
+    return p.pulling;
+  }
+
   async _presynthFirstClip(p) {
-    if (!this.tts.presynth) return;
+    if (!this.tts.presynth || this._ttsMuted) return;
     try {
-      const f = await p.first;                             // opening delta of the speculation
-      if (f.done || p.ctl.signal.aborted || this._prefetch !== p) return;
-      p.first = Promise.resolve(f);                        // re-stitch: first was consumed here, adoption must still see it
-      // LLM chunks are { text } / { tool, … } objects (or raw strings from simple custom llms) —
-      // only text is voiceable.
-      const chunk = typeof f.value === 'string' ? f.value : (f.value?.text ?? '');
-      const end = firstWordEnd(chunk);
-      if (end > 0) this.tts.presynth(chunk.slice(0, end).trim());   // enough for the stage-0 chunk → warm the exact clip
+      let acc = '';
+      // Real SSE streams emit 1 token per delta ("Sure", ",", " I") — accumulate deltas into p.head
+      // until the stage-0 word boundary (firstWordEnd) completes, then warm that exact clip.
+      while (!p.headDone && !p.ctl.signal.aborted && this._prefetch === p) {
+        const f = await p.pulling;
+        if (f.done || p.ctl.signal.aborted || this._prefetch !== p) return;
+        const v = f.value;
+        // Non-text chunk (tool announcement/call/boundary): stop pulling ahead.
+        if (typeof v !== 'string' && typeof v?.text !== 'string') return;
+        acc += typeof v === 'string' ? v : v.text;
+        const end = firstWordEnd(acc);
+        if (end > 0) { if (!this._ttsMuted) this.tts.presynth(acc.slice(0, end).trim()); return; }
+        this._pullHead(p);
+      }
     } catch { /* speculation failed/aborted — the real turn re-runs it */ }
   }
 
@@ -815,8 +844,8 @@ export class VoiceAgent {
     const committed = new Promise((res, rej) => { commit = res; cancel = rej; });
     committed.catch(() => {});   // an adapter that ignores the gate must not raise an unhandled rejection
     const gen = this.llm([...this.history, { role: 'user', content: text }], this.sysmsg, ctl.signal, { toolGate: committed });
-    const p = { text, ctl, gen, commit, cancel, first: gen.next(), histLen: this.history.length };   // pull NOW → fetch fires during the debounce; histLen pins the base the speculation saw
-    p.first.catch(() => {});                           // aborted/failed speculation must not be an unhandled rejection
+    const p = { text, ctl, gen, commit, cancel, head: [], headDone: false, pulling: null, histLen: this.history.length };   // histLen pins the base the speculation saw
+    this._pullHead(p);                                 // pull NOW → fetch fires during the debounce
     this._prefetch = p;
     this._presynthFirstClip(p);                        // fire-and-forget: warm the first TTS clip off the same speculation
   }
@@ -826,10 +855,10 @@ export class VoiceAgent {
     if (p) {
       try { p.ctl.abort(); } catch {}
       // Reject the gate BEFORE touching the iterator: a generator parked on `await toolGate` is not
-      // woken by the abort signal alone, so without this its finally never runs and `first` never
+      // woken by the abort signal alone, so without this its finally never runs and `pulling` never
       // settles — leaking the generator and its fetch (and stranding the return() below forever).
       p.cancel?.(new DOMException('speculation dropped', 'AbortError'));
-      p.first.then(() => p.gen.return?.()).catch(() => {});   // abort the fetch AND close the iterator (custom llm impls may clean up in finally)
+      p.pulling?.then(() => p.gen.return?.()).catch(() => {});   // abort the fetch AND close the iterator (custom llm impls may clean up in finally)
     }
   }
   // Claim the prefetch for a closing SPOKEN turn: exact text match AND unchanged history base (the
@@ -854,7 +883,13 @@ export class VoiceAgent {
     this.onEvent?.({ type: 'diag', diag: 'prefetch-hit', len: text.length });
     this._prefetch = null;   // timer already cleared: successful adoption is only reached from a spoken onFinal
     p.commit();              // turn committed → open the tool gate; held-back tool calls execute now
-    return { ctl: p.ctl, gen: (async function* () { const f = await p.first; if (!f.done) { yield f.value; yield* p.gen; } })() };
+    return { ctl: p.ctl, gen: (async function* () {
+      let err;
+      try { await p.pulling; } catch (e) { err = e; }
+      for (const v of p.head) yield v;
+      if (err) throw err;
+      if (!p.headDone) yield* p.gen;
+    })() };
   }
 
   // The ONE serialized turn runner. Every reply (typed, spoken, held-release, notify) goes through
@@ -1226,7 +1261,12 @@ export class VoiceAgent {
       startOnLoad: false,
       // Listen on the SAME stream we opened in start() (the chosen mic) — not a second
       // default-mic getUserMedia. Keeps VAD and STT on one input, and one permission prompt.
-      getStream: async () => this._stream,
+      // VoiceAgent owns the stream lifecycle (_teardownPipeline stops tracks): vad-web's default
+      // pauseStream stops every track (breaking warm resume on stop() → start()) and its default
+      // resumeStream opens a fresh default-mic getUserMedia with AGC on.
+      getStream:    async () => this._stream,
+      pauseStream:  async () => {},
+      resumeStream: async () => this._stream,
       // Same asset paths warmVad() pre-fetched/compiled, so this reuses the cached v5 model + WASM.
       onnxWASMBasePath: VAD_WASM_PATH,
       baseAssetPath:    VAD_ASSET_PATH,
@@ -1256,29 +1296,32 @@ export class VoiceAgent {
   _swapToSileroWhenReady() {
     this._sileroPending = false;
     if (this._speaking) return;   // mid-utterance — _bootstrapVadTick's speech-end path swaps after
-    this._useBootstrap = false; this._bsSpeechFrames = 0; this._bsSilenceFrames = 0;
+    this._useBootstrap = false; this._bsSpeechSamples = 0; this._bsSilenceSamples = 0;
     this._vad?.start();
   }
 
   // Zero-load RMS-energy stand-in for Silero, active only during `this._useBootstrap` (cold-start
-  // window before Silero has loaded). Deliberately crude — it only needs to survive the first
-  // second(s) of a session without losing/chopping the user's opening words; see tuning.js
-  // BOOTSTRAP_VAD for the thresholds. Ticks once per ~256ms worklet capture chunk (_feed below).
+  // window before Silero has loaded). Counts samples (16 kHz) so 64 ms browser, 128 ms mobile, and
+  // 256 ms test chunks all apply identical real-time durations; see tuning.js BOOTSTRAP_VAD.
   _bootstrapVadTick(f32) {
     const cfg = TUNING.BOOTSTRAP_VAD;
     let sum = 0; for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
     const rms = Math.sqrt(sum / f32.length);
     if (rms >= cfg.energyThreshold) {
-      this._bsSilenceFrames = 0;
-      if (!this._speaking && ++this._bsSpeechFrames >= cfg.minSpeechFrames) this._onSpeechStart();
+      this._bsSilenceSamples = 0;
+      this._bsSpeechSamples += f32.length;
+      if (!this._speaking && this._bsSpeechSamples >= cfg.minSpeechMs * 16) this._onSpeechStart();
     } else {
-      this._bsSpeechFrames = 0;
-      if (this._speaking && ++this._bsSilenceFrames >= cfg.redemptionFrames) {
-        this._bsSilenceFrames = 0;
-        this._onSpeechEnd();
-        // The utterance that was masking the swap (see _swapToSileroWhenReady) just closed — hand
-        // off to Silero now, before the NEXT one starts, instead of waiting for another tick.
-        if (!this._sileroPending && this._vad) { this._useBootstrap = false; this._vad.start(); }
+      this._bsSpeechSamples = 0;
+      if (this._speaking) {
+        this._bsSilenceSamples += f32.length;
+        if (this._bsSilenceSamples >= cfg.redemptionMs * 16) {
+          this._bsSilenceSamples = 0;
+          this._onSpeechEnd();
+          // The utterance that was masking the swap (see _swapToSileroWhenReady) just closed — hand
+          // off to Silero now, before the NEXT one starts, instead of waiting for another tick.
+          if (!this._sileroPending && this._vad) { this._useBootstrap = false; this._vad.start(); }
+        }
       }
     }
   }
@@ -1296,9 +1339,13 @@ export class VoiceAgent {
     // silences, so feed the FULL stream — no VAD gating, no preroll replay. VAD still runs above
     // (state events + speech-start reset + the nativeEOT failsafe), it just doesn't gate the audio.
     if (this.stt.continuous) { this.stt.feed(i16); return; }
-    if (!this._speaking) { this._preroll.push(i16); if (this._preroll.length > this.prerollMax) this._preroll.shift(); this._wasSpeaking = false; return; }
+    if (!this._speaking) {
+      this._preroll.push(i16); this._prerollSamples += i16.length;
+      while (this._prerollSamples > this.prerollMaxSamples && this._preroll.length > 1) this._prerollSamples -= this._preroll.shift().length;
+      this._wasSpeaking = false; return;
+    }
     if (!this._wasSpeaking) {
-      for (const c of this._preroll) this.stt.feed(c); this._preroll = []; this._wasSpeaking = true;
+      for (const c of this._preroll) this.stt.feed(c); this._preroll = []; this._prerollSamples = 0; this._wasSpeaking = true;
     }
     this.stt.feed(i16);
   }
@@ -1335,7 +1382,7 @@ export class VoiceAgent {
   _tapPush(i16) {
     const now = (globalThis.performance ?? Date).now();
     const chunkMs = (i16.length / 16000) * 1000;
-    if (this._tapLastMs && now - this._tapLastMs > chunkMs * 1.5) {
+    if (this._tapLastMs && now - this._tapLastMs > Math.max(chunkMs * 1.5, 300)) {
       this._tapGaps.push({ atSample: this._tapTotal, gapMs: Math.round(now - this._tapLastMs) });
     }
     this._tapLastMs = now;
@@ -1456,6 +1503,14 @@ export function novelChars(heard, reply) {
   let n = 0;
   for (const w of wordsOf(heard)) if (!rw.length || !fuzzyHas(rw, w)) n += w.length;
   return n;
+}
+// Short explicit interruption word ("stop", "wait", "no", "várj", "állj", …) not attributable to
+// the reply being spoken — lets crisp 1-word commands cut off TTS without letting backchannels in.
+export function hasNovelStopWord(heard, reply, stopWords = TUNING.BARGE_IN_STOP_WORDS) {
+  if (!stopWords?.length) return false;
+  const rw = wordsOf((reply ?? '').normalize('NFC'));
+  for (const w of wordsOf((heard ?? '').normalize('NFC'))) if (stopWords.includes(w) && (!rw.length || !fuzzyHas(rw, w))) return true;
+  return false;
 }
 
 // Count non-whitespace chars — the whitespace-invariant position key shared by the cursor and seek().
@@ -1707,8 +1762,14 @@ export class StreamingTTS {
   // Single-slot cache keyed by exact chunk text; a mismatched or unused clip is simply dropped.
   presynth(text) {
     if (!text || this._preClip?.text === text) return;
+    this.clearPresynth();
+    const ctl = new AbortController();
     this.onEvent?.({ type: 'diag', diag: 'presynth', text });
-    this._preClip = { text, blobP: this._enqueueSynth(text).catch(() => null) };
+    this._preClip = { text, ctl, blobP: this._enqueueSynth(text, ctl.signal).catch(() => null) };
+  }
+  clearPresynth() {
+    const pre = this._preClip; this._preClip = null;
+    pre?.ctl?.abort();
   }
   setSpeed(speed) { this.speed = speed; }
   setVoice(voiceId) { this.voiceId = voiceId; }
@@ -1875,12 +1936,14 @@ export class StreamingTTS {
       // (presynth) with EXACTLY this text — reuse the clip instead of predicting again. Single-shot:
       // hit or miss, the slot is cleared (a stale speculation must not leak into a later reply).
       const pre = tape.length === 0 ? this._preClip : null;
-      if (pre) this.onEvent?.({ type: 'diag', diag: pre.text === r.value ? 'presynth-hit' : 'presynth-miss', text: r.value, pre: pre.text });
+      const hit = !!pre && pre.text === r.value && !pre.ctl?.signal.aborted;
+      if (pre) this.onEvent?.({ type: 'diag', diag: hit ? 'presynth-hit' : 'presynth-miss', text: r.value, pre: pre.text });
       this._preClip = null;
+      if (pre && !hit) pre.ctl?.abort();   // cancel stale speculation so it doesn't waste network or block _synthQ
       // blobP always RESOLVES — to the wav, or null carrying the error on the entry — so an
       // ahead-of-playback synth failure never raises unhandledrejection; the queue keeps going for
       // the rest of the reply, and the consumer re-throws entry.err only if it actually reaches it.
-      const p = pre && pre.text === r.value ? pre.blobP : this._enqueueSynth(r.value, signal);
+      const p = hit ? pre.blobP : this._enqueueSynth(r.value, signal);
       entry.blobP = p.catch((e) => { entry.err = e; return null; });
       tape.push(entry);
       nwTotal += nw(r.value);

@@ -146,16 +146,43 @@ export function makeElevenLabsSTT(opts) {
           onPartial, onFinal, onError, onFatal, onClose, isClosed } = opts;
   const sttUrl = opts.sttUrl || 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
   const sttModel = opts.sttModel || 'scribe_v2_realtime';
-  let ws = null, opening = false, outbox = [], sentSinceCommit = false, sttStart = 0;
+  let ws = null, opening = false, outbox = [], outboxSamples = 0, sentSinceCommit = false, sttStart = 0;
+  let pendingCommits = 0, timedOutCommits = 0, lastPartial = '', safetyTimer = null;
+  // VAD-gated provider: generous 15s cap preserves opening speech on slow cold connects while
+  // bounding memory if a socket stalls. Never drops queued 'commit' markers.
+  const OUTBOX_MAX_SAMPLES = 16000 * 15;
   const usage = makeUsageReporter(sttUsageUrl, apiKey, 'elevenlabs', {}, opts.fetchFn);
 
+  const armSafety = () => {
+    clearTimeout(safetyTimer);
+    if (pendingCommits <= 0) { safetyTimer = null; return; }
+    safetyTimer = setTimeout(() => {
+      safetyTimer = null;
+      if (pendingCommits <= 0) return;
+      pendingCommits--; timedOutCommits++;
+      const text = lastPartial; lastPartial = '';
+      onFinal(text, Math.round(performance.now() - sttStart));
+      if (pendingCommits > 0) armSafety();
+    }, TUNING.STT.forceEndSafetyMs);
+  };
   const sendAudio = (i16) => {
-    if (!ws || ws.readyState !== 1) { outbox.push(i16); return; }
+    if (!ws || ws.readyState !== 1) {
+      outbox.push(i16); outboxSamples += i16.length;
+      while (outboxSamples > OUTBOX_MAX_SAMPLES) {
+        const idx = outbox.findIndex((it) => it !== 'commit');
+        if (idx < 0 || outbox.length <= 1) break;
+        outboxSamples -= outbox.splice(idx, 1)[0].length;
+      }
+      return;
+    }
     let bin = ''; const b = new Uint8Array(i16.buffer); for (let i = 0; i < b.length; i++) bin += String.fromCharCode(b[i]);
     ws.send(JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: btoa(bin) }));
     usage.add(i16.length);
   };
-  const sendCommit = () => ws.send(JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: '', commit: true }));
+  const sendCommit = () => {
+    ws.send(JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: '', commit: true }));
+    armSafety();
+  };
 
   const open = async () => {
     if (opening) return;          // re-entry guard: the async token fetch could otherwise open two sockets
@@ -166,7 +193,7 @@ export function makeElevenLabsSTT(opts) {
         // Auth/config failure won't fix itself — drop buffered audio (don't replay stale speech on
         // a later recovery); mintSttToken already called onFatal so the host stops instead of
         // re-firing on every utterance.
-        outbox = []; sentSinceCommit = false;
+        outbox = []; outboxSamples = 0; sentSinceCommit = false;
         return;
       }
       if (isClosed()) return;
@@ -175,15 +202,25 @@ export function makeElevenLabsSTT(opts) {
       for (const k of keyterms) p.append('keyterms', k);
       sttStart = performance.now();
       ws = newSocket(`${sttUrl}?${p}`);
-      ws.onopen = () => { const q = outbox; outbox = []; for (const it of q) it === 'commit' ? sendCommit() : sendAudio(it); };
+      ws.onopen = () => { const q = outbox; outbox = []; outboxSamples = 0; for (const it of q) it === 'commit' ? sendCommit() : sendAudio(it); };
       ws.onerror = ev => { if (!isClosed()) console.warn('STT ws error', ev); };
       ws.onclose = ev => { usage.flush(); onClose?.(); if (!isClosed() && ev.code !== 1000) onError(`STT closed ${ev.code}: ${ev.reason || 'no reason'}`); };
       ws.onmessage = ev => {
         const m = JSON.parse(ev.data);
         const ms = Math.round(performance.now() - sttStart);
         if (m.message_type?.endsWith('_error')) { onError(`${m.message_type}: ${m.error || m.reason || m.message || ''}`); console.error('STT error msg', m); return; }
-        if (m.message_type === 'partial_transcript') onPartial(m.text || '', ms);
-        else if (m.message_type?.startsWith('committed') && m.text) onFinal(m.text, ms);
+        if (m.message_type === 'partial_transcript') { lastPartial = m.text || ''; onPartial(lastPartial, ms); }
+        else if (m.message_type?.startsWith('committed')) {
+          // A late committed reply for a turn already closed by the safety timer must be dropped so
+          // it neither duplicates the user turn nor steals a later commit's pending slot.
+          if (timedOutCommits > 0) { timedOutCommits--; return; }
+          const text = m.text || '';
+          if (!text && pendingCommits <= 0) return;   // unsolicited/duplicate empty committed must not clobber a live turn
+          if (pendingCommits > 0) pendingCommits--;
+          lastPartial = '';
+          armSafety();
+          onFinal(text, ms);
+        }
       };
     } catch (e) {
       // open() is called fire-and-forget (pre-open, and lazily from feed()), so anything thrown here
@@ -211,9 +248,10 @@ export function makeElevenLabsSTT(opts) {
       // without this an empty VAD end would leave _turnClosing stuck (mirrors the Speechmatics contract).
       if (!sentSinceCommit) { onFinal('', Math.round(performance.now() - sttStart)); return; }
       sentSinceCommit = false;
+      pendingCommits++;
       if (ws?.readyState === 1) sendCommit(); else outbox.push('commit');
     },
-    close() { outbox = []; sentSinceCommit = false; usage.flush(); ws?.close(); ws = null; },
+    close() { clearTimeout(safetyTimer); safetyTimer = null; pendingCommits = 0; timedOutCommits = 0; lastPartial = ''; outbox = []; outboxSamples = 0; sentSinceCommit = false; usage.flush(); ws?.close(); ws = null; },
   };
 }
 
@@ -293,8 +331,18 @@ export function makeSpeechmaticsSTT(opts) {
 
   const usage = makeUsageReporter(sttUsageUrl, apiKey, 'speechmatics', { model: sttModel || 'standard' }, opts.fetchFn);
 
+  const OUTBOX_MAX_SAMPLES = 16000 * 15;   // VAD-gated: generous 15s cap preserves opening speech on slow cold connects
+  let outboxSamples = 0;
   const sendAudio = (i16) => {
-    if (!ws || ws.readyState !== 1 || !started) { outbox.push(i16); return; }
+    if (!ws || ws.readyState !== 1 || !started) {
+      outbox.push(i16); outboxSamples += i16.length;
+      while (outboxSamples > OUTBOX_MAX_SAMPLES && outbox.length > 1) {
+        const d = outbox.shift().length; outboxSamples -= d;
+        sentSamples = Math.max(0, sentSamples - d);
+        commitBoundary = Math.max(0, commitBoundary - d / 16000);
+      }
+      return;
+    }
     ws.send(i16.buffer);   // raw binary AddAudio (pcm_s16le @16k, declared in StartRecognition)
     lastSendMs = performance.now();
     usage.add(i16.length);
@@ -316,7 +364,7 @@ export function makeSpeechmaticsSTT(opts) {
     cursor = 0; sentSamples = 0; commitBoundary = 0; started = false;
     try {
       const body = await mintSttToken(tokenUrl, apiKey, onFatal, getToken);
-      if (!body) { outbox = []; sentSinceCommit = false; return; }
+      if (!body) { outbox = []; outboxSamples = 0; sentSinceCommit = false; return; }
       if (isClosed()) return;
       sttStart = performance.now();
       ws = newSocket(`${SM_URL}?jwt=${encodeURIComponent(body.token)}`);
@@ -354,7 +402,7 @@ export function makeSpeechmaticsSTT(opts) {
         const ms = Math.round(performance.now() - sttStart);
         switch (m.message) {
           case 'RecognitionStarted': {
-            started = true; const q = outbox; outbox = []; for (const c of q) sendAudio(c); if (pendingForceEnd) sendForceEnd();
+            started = true; const q = outbox; outbox = []; outboxSamples = 0; for (const c of q) sendAudio(c); if (pendingForceEnd) sendForceEnd();
             // Idle keepalive (see declaration): 0.1s of silence whenever nothing was sent for 20s
             // AND no turn is open/closing — injected silence must never trip the provider's
             // end-of-utterance silence trigger on a live turn. Cost is negligible (~0.5% stream time).
@@ -453,7 +501,7 @@ export function makeSpeechmaticsSTT(opts) {
       sendForceEnd();                            // sends now, or defers to RecognitionStarted if still opening
       armSafety(TUNING.STT.forceEndSafetyMs);    // fallback if EndOfUtterance never arrives (tuning.js)
     },
-    close() { clearTimeout(safetyTimer); safetyTimer = null; clearInterval(keepalive); keepalive = null; outbox = []; committed = ''; lastTail = ''; cursor = 0; sentSamples = 0; commitBoundary = 0; turnOpen = false; awaitingFinal = false; sentSinceCommit = false; started = false; pendingForceEnd = false; usage.flush(); ws?.close(); ws = null; },
+    close() { clearTimeout(safetyTimer); safetyTimer = null; clearInterval(keepalive); keepalive = null; outbox = []; outboxSamples = 0; committed = ''; lastTail = ''; cursor = 0; sentSamples = 0; commitBoundary = 0; turnOpen = false; awaitingFinal = false; sentSinceCommit = false; started = false; pendingForceEnd = false; usage.flush(); ws?.close(); ws = null; },
   };
 }
 

@@ -90,6 +90,8 @@ export type TtsProgress = (spokenText: string, scope: string) => void;
 export interface VoiceTTS {
   speak(input: AsyncIterable<string> | string, signal?: AbortSignal, fromNw?: number): Promise<string>;
   stop?(): void;
+  presynth?(text: string): void;
+  clearPresynth?(): void;
   /** Eagerly prepare the synth engine (load models, JIT) so the first utterance has no cold start. */
   warm?(): Promise<void>;
   voices?(): Promise<Array<{ id: string; name: string; language: string }>>;
@@ -189,9 +191,13 @@ export interface VoiceAgentOptions {
   /** Domain words to bias cloud STT towards ("Kubernetes", product names) — the fix for jargon
    *  transcribed phonetically. Silently trimmed to 50 terms of ≤20 chars. Cloud providers only. */
   keyterms?: string[];
-  /** Audio chunks retained BEFORE the VAD fires, prepended to the utterance so the first syllable
-   *  isn't clipped (VAD confirms speech a beat after it starts). Default TUNING.PREROLL_CHUNKS. */
+  /** Audio duration (ms) retained BEFORE the VAD fires, prepended so the first syllable isn't clipped. Default TUNING.PREROLL_MS (1000). */
+  prerollMs?: number;
+  /** Legacy chunk count (256 ms units); prefer `prerollMs`. */
   preroll?: number;
+  /** Run Silero + bootstrap VAD (default true). Set false for continuous + nativeEOT sessions that
+   *  don't consume VAD events (e.g. Soniox dictation) to skip loading ONNX VAD. Ignored for VAD-gated providers. */
+  vad?: boolean;
   /** Passed through to Silero VAD (thresholds, frame sizes) — see tuning.js for the defaults. */
   vadOptions?: Record<string, unknown>;
   /** Semantic end-of-turn hook run when VAD hears end-of-speech: return false to KEEP listening (the
@@ -424,6 +430,7 @@ export const TUNING: Record<string, any>;
  *  whether heard text is the agent's own voice, `novelChars` counts what is genuinely new. */
 export function isSelfEcho(heard: string, reply: string, options?: { threshold?: number; window?: number; minHits?: number }): boolean;
 export function novelChars(heard: string, reply: string): number;
+export function hasNovelStopWord(heard: string, reply: string, stopWords?: string[]): boolean;
 /** Render a tool result the way the agent reports it to the model (and to `tool` events). */
 export function toolResultText(result: unknown): string;
 

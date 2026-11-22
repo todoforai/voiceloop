@@ -1474,3 +1474,198 @@ test('RUNNING: with a live cursor, the announcement is preceded by the exact ans
   assert.deepEqual(events[i - 1], { type: 'assistant', text: 'Let me', full: 'Let me check.', final: false, turn: 1 },
     'the event right before the announcement carries the answer up to the call');
 });
+
+// ── Multi-delta speculative presynth, stop-word barge-in, vad:false, time-based VAD ────────────
+
+test('PRESYNTH: multi-token SSE deltas accumulate into firstWordEnd, fire presynth, and preserve exact stream order', async () => {
+  const { STT_PROVIDERS } = await import('./stt.js');
+  const orig = STT_PROVIDERS.elevenlabs;
+  const origMs = TUNING.PREFETCH_MS;
+  TUNING.PREFETCH_MS = 5;
+  let cbs;
+  STT_PROVIDERS.elevenlabs = (opts) => { cbs = opts; return { open() {}, feed() {}, commit() {}, close() {}, reset() {} }; };
+  try {
+    let llmCalls = 0;
+    const llm = async function* () {
+      llmCalls++;
+      for (const tok of ['Hel', 'lo', ' ', 'wor', 'ld', '!']) {
+        await Promise.resolve();
+        yield { text: tok };
+      }
+    };
+    const presynths = [];
+    const tts = {
+      presynth(text) { presynths.push(text); },
+      async speak(stream) { let full = ''; for await (const t of stream) full += t; return full; },
+      stop() {},
+    };
+    const { agent } = makeAgent({ llm, tts, opts: { sttProvider: 'elevenlabs' } });
+    agent._set('listening');
+    cbs.onPartial('hi there', 100);
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(llmCalls, 1, 'speculative LLM call fired');
+    assert.deepEqual(presynths, ['Hello'], 'multi-token deltas accumulated to first word and triggered presynth');
+
+    cbs.onFinal('hi there', 200);
+    for (let i = 0; i < 30; i++) await settle();
+    assert.equal(llmCalls, 1, 'adopted speculation with no duplicate LLM call');
+    assert.equal(agent.history.at(-1)?.content, 'Hello world!', 'every pre-pulled and remaining delta preserved in order');
+    agent.destroy();
+  } finally {
+    STT_PROVIDERS.elevenlabs = orig; TUNING.PREFETCH_MS = origMs;
+  }
+});
+
+test('PRESYNTH: error partway through buffered head still yields earlier chunks before throwing', async () => {
+  const { STT_PROVIDERS } = await import('./stt.js');
+  const orig = STT_PROVIDERS.elevenlabs;
+  const origMs = TUNING.PREFETCH_MS;
+  TUNING.PREFETCH_MS = 5;
+  let cbs;
+  STT_PROVIDERS.elevenlabs = (opts) => { cbs = opts; return { open() {}, feed() {}, commit() {}, close() {}, reset() {} }; };
+  try {
+    const llm = async function* () {
+      yield { text: 'Hel' };
+      await Promise.resolve();
+      throw new Error('stream broke');
+    };
+    const seen = [];
+    const tts = {
+      presynth() {},
+      async speak(stream) { for await (const t of stream) seen.push(t); return seen.join(''); },
+      stop() {},
+    };
+    const { agent, events } = makeAgent({ llm, tts, opts: { sttProvider: 'elevenlabs' } });
+    agent._set('listening');
+    cbs.onPartial('hi', 100);
+    await new Promise((r) => setTimeout(r, 25));
+    cbs.onFinal('hi', 200);
+    for (let i = 0; i < 30; i++) await settle();
+    assert.deepEqual(seen, ['Hel'], 'already-pulled head delta yielded before error');
+    assert.ok(events.some((e) => e.type === 'error' && /stream broke/.test(e.error)), 'error surfaced');
+    agent.destroy();
+  } finally {
+    STT_PROVIDERS.elevenlabs = orig; TUNING.PREFETCH_MS = origMs;
+  }
+});
+
+test('PRESYNTH: StreamingTTS aborts stale presynth signal on miss and on clearPresynth()', async () => {
+  const { StreamingTTS } = await import('./voice-agent.js');
+  const signals = [];
+  class SignalTTS extends StreamingTTS {
+    async _synth(_text, signal) { signals.push(signal); return null; }
+  }
+  const tts = new SignalTTS();
+  tts.presynth('Wrong opener');
+  await settle();
+  tts.clearPresynth();
+  assert.equal(signals[0]?.aborted, true, 'clearPresynth aborts in-flight presynth');
+
+  tts.presynth('Stale opener');
+  const slot = tts._preClip;
+  await tts.speak('Different reply.');
+  assert.equal(slot.ctl.signal.aborted, true, 'presynth-miss aborts stale presynth controller');
+});
+
+test('BARGE-IN: short stop words cut in immediately, backchannels do not, echoed stop words do not', () =>
+  withSttAgent(async ({ agent, tts, stt, finish }) => {
+    const before = tts.stopped;
+    stt.onPartial('mhm', 50);
+    stt.onPartial('yeah', 60);
+    stt.onPartial('ok', 70);
+    stt.onPartial('igen', 80);
+    assert.equal(tts.stopped, before, 'short backchannels do not interrupt');
+
+    stt.onPartial('stop', 100);
+    assert.equal(tts.stopped, before + 1, 'single-word "stop" barges in immediately');
+    await finish();
+  }));
+
+test('BARGE-IN: Hungarian stop word "várj" barges in, echoed "stop" and 2-char "no" do not', async () => {
+  const { hasNovelStopWord } = await import('./voice-agent.js');
+  assert.equal(hasNovelStopWord('várj', 'Elindítom a feladatot'), true);
+  assert.equal(hasNovelStopWord('állj', 'Elindítom a feladatot'), true);
+  assert.equal(hasNovelStopWord('stop', 'I can stop that job for you'), false, 'echoed stop word is ignored');
+  assert.equal(hasNovelStopWord('no', 'Right now we can check'), false, '2-char "no" does not false-trigger on misheard "now"');
+  assert.equal(hasNovelStopWord('mhm', 'I can help you with that'), false, 'backchannel is ignored');
+});
+
+test('VAD: _startVad passes non-destructive pauseStream/resumeStream so stop() keeps the shared mic stream alive', async () => {
+  const origWindow = globalThis.window;
+  let capturedOpts = null;
+  let tracksStopped = 0;
+  const fakeStream = { active: true, getTracks: () => [{ stop() { tracksStopped++; fakeStream.active = false; } }] };
+  globalThis.window = {
+    vad: {
+      MicVAD: {
+        async new(opts) {
+          capturedOpts = opts;
+          return {
+            start() {},
+            async pause() {
+              // Mimic vad-web 0.0.29 default pauseStream: stops tracks if caller didn't override it.
+              const pauseStream = opts.pauseStream ?? (async (s) => s.getTracks().forEach((t) => t.stop()));
+              await pauseStream(await opts.getStream());
+            },
+            destroy() {},
+          };
+        },
+      },
+    },
+  };
+  try {
+    const { agent } = makeAgent();
+    agent._stream = fakeStream;
+    agent._useBootstrap = false;
+    await agent._startVad(agent._pipelineGen);
+    assert.equal(await capturedOpts.getStream(), fakeStream);
+    assert.equal(await capturedOpts.resumeStream(fakeStream), fakeStream);
+    agent.stop();
+    await settle();
+    assert.equal(tracksStopped, 0, 'stop() pause must not stop shared stream tracks');
+    assert.equal(fakeStream.active, true, 'shared stream stays active for warm resume');
+    agent.destroy();
+    assert.equal(tracksStopped, 1, 'destroy() tears down the mic tracks itself');
+  } finally {
+    if (origWindow === undefined) delete globalThis.window;
+    else globalThis.window = origWindow;
+  }
+});
+
+test('VAD: vad:false skips bootstrap VAD on continuous+nativeEOT audioIO, but keeps it on VAD-gated STT', async () => {
+  for (const native of [true, false]) {
+    let onFrame;
+    const audioIO = { startCapture: async (fn) => { onFrame = fn; return { stop() {}, setMuted() {} }; } };
+    const { agent, events } = makeAgent({ opts: { audioIO, vad: false } });
+    agent.stt = { continuous: native, nativeEOT: native, open() {}, close() {}, feed() {}, commit() {}, reset() {} };
+    await agent.start();
+    for (let i = 0; i < 4; i++) onFrame(new Float32Array(1024).fill(0.5));
+    const sawVad = events.some((e) => e.type === 'vad' && e.active === true);
+    assert.equal(sawVad, !native, native ? 'vad:false skipped VAD for continuous+nativeEOT' : 'vad:false ignored for VAD-gated STT');
+    agent.destroy();
+  }
+});
+
+test('BOOTSTRAP VAD: 1024-sample (64ms) ignores 1-chunk click, all chunk sizes share ~1.5s redemption', async () => {
+  for (const chunkSize of [1024, 2048, 4096]) {
+    let onFrame;
+    const audioIO = { startCapture: async (fn) => { onFrame = fn; return { stop() {}, setMuted() {} }; } };
+    const { agent, events } = makeAgent({ opts: { audioIO } });
+    agent.stt = { continuous: true, nativeEOT: true, open() {}, close() {}, feed() {}, commit() {}, reset() {} };
+    await agent.start();
+    onFrame(new Float32Array(chunkSize).fill(0.5));
+    if (chunkSize === 1024) {
+      assert.ok(!events.some((e) => e.type === 'vad' && e.active === true), 'single 64ms click does not trigger onset');
+      onFrame(new Float32Array(chunkSize).fill(0.5));
+    }
+    assert.ok(events.some((e) => e.type === 'vad' && e.active === true), `chunkSize=${chunkSize}: onset after >=128ms`);
+    // Feed ~1.0s of silence — must NOT have ended yet (< 1.5s redemption)
+    const chunksFor1s = Math.floor(16000 / chunkSize) - 1;
+    for (let i = 0; i < chunksFor1s; i++) onFrame(new Float32Array(chunkSize));
+    assert.ok(!events.some((e) => e.type === 'vad' && e.active === false), `chunkSize=${chunkSize}: still active at <1s`);
+    // Feed another ~1.0s — must have ended (>= 1.5s redemption)
+    for (let i = 0; i < Math.ceil(16000 / chunkSize) + 2; i++) onFrame(new Float32Array(chunkSize));
+    assert.ok(events.some((e) => e.type === 'vad' && e.active === false), `chunkSize=${chunkSize}: ended after 1.5s`);
+    agent.destroy();
+  }
+});

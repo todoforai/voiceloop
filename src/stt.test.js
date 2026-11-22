@@ -1151,3 +1151,47 @@ test('soniox: a transient drop on a live socket reconnects quietly; per-stream 4
   assert.deepEqual(fatals, []);
   stt.close();
 }));
+
+test('elevenlabs: commit() safety timer preserves last partial, ignores unsolicited empty committed, outbox preserves commit', () => withStubs(async () => {
+  const { makeElevenLabsSTT } = await import('./stt.js');
+  const { TUNING } = await import('./tuning.js');
+  const origMs = TUNING.STT.forceEndSafetyMs;
+  TUNING.STT.forceEndSafetyMs = 40;
+  try {
+    const finals = [];
+    const stt = makeElevenLabsSTT({
+      apiKey: 'k', sttTokenUrl: 'http://x/t', onPartial() {}, onFinal: (t) => finals.push(t), onError() {}, onFatal() {}, onClose() {}, isClosed: () => false,
+    });
+    // Feed audio + queue a commit while socket is opening, then overflow past the 15s cap:
+    // the commit marker MUST survive outbox trimming, and the safety timer must not fire before open.
+    stt.feed(new Int16Array(16000));
+    stt.commit();
+    for (let i = 0; i < 20; i++) stt.feed(new Int16Array(16000));
+    await new Promise((r) => setTimeout(r, 60));
+    assert.deepEqual(finals, [], 'safety timer did not fire while socket was still connecting');
+
+    const s = FakeWS.last;
+    s.readyState = 1; s.onopen?.();
+    const sent = s.sent.map((x) => JSON.parse(x));
+    const audioMsgs = sent.filter((m) => m.audio_base_64);
+    const commitMsgs = sent.filter((m) => m.commit === true);
+    assert.ok(audioMsgs.length <= 15, `outbox capped at ~15s (got ${audioMsgs.length} chunks)`);
+    assert.equal(commitMsgs.length, 1, 'queued commit marker was preserved during outbox trim');
+
+    // Server sends partial then drops committed reply → safety timer closes with lastPartial (not empty!)
+    s.recv({ message_type: 'partial_transcript', text: 'hello world' });
+    await new Promise((r) => setTimeout(r, 80));
+    assert.deepEqual(finals, ['hello world'], 'safety timer closed hung commit with last partial');
+
+    // Late committed arriving AFTER safety timer already closed the turn → dropped (no duplicate turn!)
+    s.recv({ message_type: 'committed_transcript', text: 'hello world' });
+    assert.deepEqual(finals, ['hello world'], 'late committed after safety timeout dropped');
+
+    // Unsolicited empty committed when no commit is pending → ignored!
+    s.recv({ message_type: 'committed_transcript', text: '' });
+    assert.deepEqual(finals, ['hello world'], 'unsolicited empty committed ignored');
+    stt.close();
+  } finally {
+    TUNING.STT.forceEndSafetyMs = origMs;
+  }
+}));

@@ -27,6 +27,15 @@ export const TUNING = {
   // snappier interruption. 0 = any single transcribed character interrupts (most aggressive).
   BARGE_IN_MIN_CHARS: 6,
 
+  // Short explicit interruption commands (English + Hungarian) that cut off TTS immediately even
+  // when under BARGE_IN_MIN_CHARS — still subject to the self-echo filter (if the reply itself
+  // contains the word, it is treated as echo). Backchannels ("mhm", "yeah", "ok", "igen") are
+  // deliberately excluded so they never cut the agent off.
+  // 4-5 char explicit commands only: 2-char words ("no", "ne") collide with misheard echo ("now"/"know")
+  // because fuzzy echo matching requires exact matches on <=3-char words; >=6-char words ("cancel")
+  // already pass BARGE_IN_MIN_CHARS.
+  BARGE_IN_STOP_WORDS: ['stop', 'wait', 'hold', 'quiet', 'várj', 'állj', 'elég', 'hagyd'],
+
   // Self-echo filter: on speakers the browser's AEC often fails to cancel our own Web-Audio TTS
   // playout, so the STT transcribes the agent's own voice — real words that cross BARGE_IN_MIN_CHARS
   // and make it interrupt ITSELF. Since we know EXACTLY what he's voicing, interims heard while
@@ -100,9 +109,15 @@ export const TUNING = {
   // `prefetchMs` (deepgram flux: 0 — see stt.js).
   PREFETCH_MS: 200,
 
-  // Audio chunks (~256ms each at 16kHz/4096-sample frames; ~1s total at 4) kept BEFORE VAD fires and
-  // replayed into STT when speech starts, so the first word isn't clipped. Raise if word-starts are
-  // getting cut; lower to shave a touch of latency/cost.
+  // Worklet capture chunk size at 16 kHz (1024 samples = 64 ms, down from 4096 = 256 ms: cuts
+  // ~96 ms average / ~192 ms worst-case audio delivery delay to STT and trims tail loss on stop).
+  // Baked into the AudioWorklet source at module load (not live-editable via HMR).
+  CAPTURE_CHUNK_SAMPLES: 1024,
+
+  // Audio kept BEFORE VAD fires (ms) and replayed into STT when speech starts, so the first word
+  // isn't clipped. Duration-based so 64 ms browser, 128 ms mobile, and 256 ms test chunks match.
+  PREROLL_MS: 1000,
+  // Legacy chunk count (kept for callers reading TUNING.PREROLL_CHUNKS; 4 × 256 ms = 1 s).
   PREROLL_CHUNKS: 4,
 
   // ── VAD (Silero v5) — speech detection sensitivity ────────────────────────────────────────────
@@ -131,21 +146,17 @@ export const TUNING = {
   // words spoken right after clicking the mic are never silently dropped from the (size-capped)
   // preroll buffer while waiting for Silero. Swapped out for Silero the moment it's ready, always at
   // an utterance boundary (never mid-speech) — see _swapToSileroWhenReady().
-  // NB: these frames are the raw ~256ms worklet capture chunks (4096 samples @16kHz) — much coarser
-  // than Silero's own ~32ms internal frames above, so the counts are on a different scale.
+  // Measured in milliseconds (converted to 16 kHz samples) so 64 ms browser chunks, 128 ms mobile
+  // chunks, and 256 ms test chunks all behave with identical real-time durations.
   BOOTSTRAP_VAD: {
     // RMS above this (0-1 scale, ~loudness of normal speech close to the mic) counts as speech.
-    // Deliberately looser/cruder than Silero — it only needs to survive the first second(s), not
-    // replace real speech detection.
     energyThreshold: 0.02,
-    // Consecutive ~256ms chunks above threshold before declaring speech-start. 1 = fires on the very
-    // first loud chunk — snappiest possible protection for the opening word(s).
-    minSpeechFrames: 1,
-    // Consecutive ~256ms chunks below threshold before declaring speech-end (~1.5s). Deliberately
-    // more patient than Silero's own redemptionFrames above: this stand-in only runs for the first
-    // second or two of a session, and the goal here is "never chop a continuous sentence", not tight
-    // endpointing — Silero takes over (with its tighter default) as soon as it's ready.
-    redemptionFrames: 6,
+    // Consecutive ms above threshold before declaring speech-start (128 ms = 2 browser chunks,
+    // ignoring single-chunk key taps/clicks while staying 2× snappier than the old 256 ms frame).
+    minSpeechMs: 128,
+    // Consecutive ms below threshold before declaring speech-end (~1.5 s). Deliberately patient so
+    // this stand-in never chops a sentence before Silero swaps in.
+    redemptionMs: 1500,
   },
 
   // ── Mic level (host visualisers) ──────────────────────────────────────────────────────────────
