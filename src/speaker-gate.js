@@ -35,6 +35,7 @@ export const SPEAKER_MODEL = {
 export const SPEAKER_GATE_DEFAULTS = {
   threshold: 0.48,       // label score ≥ → owner (lab: owner 0.90, intruders ≤ 0.27; real use: owner 0.50–0.75)
   windowThreshold: 0.40, // window-only verdict before the label has a score
+  strongWindow: 0.60,    // window ≥ → owner even under a low label (live owner windows 0.60–0.76, lab intruders ≤ 0.35)
   veto: 0.30,            // window below → not the owner even under the owner's label (tuned on ONE synthetic dialogue — re-measure)
   windowSec: 1.5, hopSec: 0.5,
   minRms: 0.01,          // quieter window = silence → no score
@@ -266,23 +267,24 @@ export class SpeakerGate {
     return l;
   }
 
-  // A word right after a kept word of the same label needs only to clear the veto, like under an
-  // owner label: the last word of a phrase sits in windows half-filled with the trailing silence
-  // (live: "…keletre volt." lost "volt." at 0.39).
+  // Never worse than no lock for the owner: a word is dropped only on EVIDENCE of another voice.
+  // Uncertain (no window score — trailing silence, quiet tail — or a window between veto and the
+  // window bar) → the word follows the previous kept word of the same label: the end of the
+  // owner's sentence is not cut (live: "…keletre volt." lost "volt." at 0.39). A strong window
+  // overrides a low label (live: label 0.44 while every window said 0.70+ → a whole sentence lost).
+  // Fail-closed stays only where nothing was accepted yet (the stranger-before-owner bug).
   _judgeDetail(t, prev) {
     if (t.start_ms == null || t.end_ms == null) return { keep: true, reason: 'no_ts', w: null, lab: null, labSec: 0 };
     const lab = this._label(t.speaker), w = this.windowScore((t.start_ms + t.end_ms) * SR / 2000), o = this.o, labSec = lab?.sec ?? 0;
+    const r = (keep, reason) => ({ keep, reason, w, lab: lab?.score ?? null, labSec });
+    if (w != null && w < o.veto) return r(false, lab?.score != null ? 'label_veto' : 'win_low');   // clearly someone else
     if (lab?.score != null) {
-      if (lab.score < o.threshold) return { keep: false, reason: 'label_low', w, lab: lab.score, labSec };
-      if (w != null && w < o.veto) return { keep: false, reason: 'label_veto', w, lab: lab.score, labSec };
-      return { keep: true, reason: 'label_ok', w, lab: lab.score, labSec };
+      if (lab.score >= o.threshold) return r(true, 'label_ok');
+      return w != null && w >= o.strongWindow ? r(true, 'win_strong') : r(false, 'label_low');
     }
-    if (w != null) {
-      if (w >= o.windowThreshold) return { keep: true, reason: 'win_ok', w, lab: null, labSec };
-      const follow = !!(prev?.keep && prev.speaker === t.speaker && w >= o.veto);
-      return { keep: follow, reason: follow ? 'win_follow' : 'win_low', w, lab: null, labSec };
-    }
-    return { keep: false, reason: this.model ? 'no_score' : 'no_model', w: null, lab: null, labSec };
+    if (w != null && w >= o.windowThreshold) return r(true, 'win_ok');
+    const follow = !!(prev?.keep && prev.speaker === t.speaker);
+    return r(follow, follow ? 'follow' : w != null ? 'win_low' : this.model ? 'no_score' : 'no_model');
   }
 
   /** Debug/UI snapshot: per-label scores + the latest window. */

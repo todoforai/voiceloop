@@ -96,3 +96,19 @@ test('window-only: a word after a kept same-voice word clears at the veto bar, a
   g.windowScore = () => 0.2;
   assert.equal(g.admit(w, { speaker: '1', keep: true }), false);
 });
+
+test('never worse than no lock for the owner: uncertain words follow the kept word, evidence drops', async () => {
+  const g = await gateWith([[2, 1]]);
+  const w = { text: ' vége', start_ms: 1000, end_ms: 1060, speaker: '1', is_final: false };
+  const kept = { speaker: '1', keep: true };
+  g.windowScore = () => undefined;                 // trailing silence: no window
+  assert.equal(g.admit(w, kept), true);
+  assert.equal(g.admit(w), false);                 // nothing accepted yet → still fail-closed
+  g.windowScore = () => 0.2;                       // clear evidence of another voice
+  assert.equal(g.admit(w, kept), false);
+  g.labels.set('1', { segs: [], sec: 3, scoredSec: 3, score: 0.44 });
+  g.windowScore = () => 0.7;                       // low label, but the window says owner
+  assert.equal(g.admit(w), true);
+  g.windowScore = () => 0.5;
+  assert.equal(g.admit(w, kept), false);           // low label, ambiguous window → dropped
+});

@@ -436,7 +436,7 @@ export function toolResultText(result: unknown): string;
 
 // ── Speaker gate (voice lock) ──
 export interface SpeakerGateOptions {
-  threshold?: number; windowThreshold?: number; veto?: number; windowSec?: number; hopSec?: number; minRms?: number;
+  threshold?: number; windowThreshold?: number; strongWindow?: number; veto?: number; windowSec?: number; hopSec?: number; minRms?: number;
   labelMinSec?: number; labelMaxSec?: number; labelRescoreSec?: number; poolPadMs?: number; poolGapMs?: number; bufferSec?: number; maxLogSec?: number;
 }
 export interface SpeakerGateTokenLog {
