@@ -70,3 +70,29 @@ test('onStreamLog captures PCM, per-token verdicts/reasons, windows, labels, and
   assert.equal(logs[0].meta.endReason, 'close');
   assert.equal(logs[0].meta.dropped, 1);
 });
+
+test('label pool: padded token stamps, short same-voice gaps bridged into one span', async () => {
+  const g = await gateWith([[4, 1]]);
+  // Soniox-style 60 ms stamps, 200 ms apart: pooled as ONE continuous span, not 60 ms crumbs
+  for (let ms = 300; ms < 2000; ms += 200) g.admit({ text: ' w', start_ms: ms, end_ms: ms + 60, speaker: '1', is_final: true });
+  const lab = g.labels.get('1');
+  assert.equal(lab.segs.length, 1);
+  assert.ok(lab.sec > 1.7, `pooled ${lab.sec}s`);
+  // A gap past poolGapMs starts a new span; another label never extends this one
+  g.admit({ text: ' x', start_ms: 3000, end_ms: 3060, speaker: '1', is_final: true });
+  assert.equal(lab.segs.length, 2);
+  g.admit({ text: ' y', start_ms: 3100, end_ms: 3160, speaker: '2', is_final: true });
+  g.admit({ text: ' z', start_ms: 3200, end_ms: 3260, speaker: '1', is_final: true });
+  assert.equal(lab.segs.length, 3);
+});
+
+test('window-only: a word after a kept same-voice word clears at the veto bar, a fresh one does not', async () => {
+  const g = await gateWith([[2, 1]]);
+  g.windowScore = () => 0.35;   // between veto (0.30) and windowThreshold (0.40): a phrase-final word
+  const w = { text: ' volt.', start_ms: 1000, end_ms: 1060, speaker: '1', is_final: false };
+  assert.equal(g.admit(w, { speaker: '1', keep: true }), true);
+  assert.equal(g.admit(w), false);
+  assert.equal(g.admit(w, { speaker: '2', keep: true }), false);
+  g.windowScore = () => 0.2;
+  assert.equal(g.admit(w, { speaker: '1', keep: true }), false);
+});

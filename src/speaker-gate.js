@@ -33,12 +33,14 @@ export const SPEAKER_MODEL = {
   fbank: { scale: 1.0, window: 'povey', numBins: 80, frameLenMs: 25, frameShiftMs: 10, lowFreq: 20, highFreq: 7600, cmvn: 'mean' },
 };
 export const SPEAKER_GATE_DEFAULTS = {
-  threshold: 0.52,       // label score ≥ → owner (lab: owner labels 0.90, intruders ≤ 0.27)
+  threshold: 0.48,       // label score ≥ → owner (lab: owner 0.90, intruders ≤ 0.27; real use: owner 0.50–0.75)
   windowThreshold: 0.40, // window-only verdict before the label has a score
   veto: 0.30,            // window below → not the owner even under the owner's label (tuned on ONE synthetic dialogue — re-measure)
   windowSec: 1.5, hopSec: 0.5,
   minRms: 0.01,          // quieter window = silence → no score
-  labelMinSec: 1.0,      // pooled audio a label needs before it's scored
+  labelMinSec: 2.0,      // pooled audio a label needs before it's scored (1 s scored the owner 0.30–0.43 live)
+  poolPadMs: 60,         // widen each final token's span: Soniox stamps a token as a ~60 ms point, not its sound
+  poolGapMs: 400,        // same-label tokens closer than this pool as ONE span (the speech between them too)
   labelMaxSec: 12,       // pool the latest N s per label (bounds the re-score cost)
   labelRescoreSec: 1.0,  // re-score a label after this much new audio
   bufferSec: 30,         // audio kept for label pooling (finals land ~3–5 s after the word)
@@ -107,6 +109,7 @@ export class SpeakerGate {
     this.windows = [];        // { end (sample), score | null }
     this.nextEnd = this.o.windowSec * SR;
     this.labels = new Map();  // label → { segs: [[s, e]], sec, scoredSec, score }
+    this._poolSpk = undefined; // label of the last pooled token (a span only grows while the same voice talks)
     this._busy = false; this.dropped = 0;
     this._log = this._onStreamLog ? { startedAt: Date.now(), pcmChunks: [], pcmSamples: 0, truncated: false, tokens: [], windows: [], labelScores: [], turns: [] } : null;
   }
@@ -218,7 +221,7 @@ export class SpeakerGate {
   admit(t, prev) {
     const cont = !!(prev && !/^\s/.test(t.text) && prev.speaker === t.speaker);
     if (t.is_final) this._pool(t);
-    const d = cont ? { keep: prev.keep, reason: 'cont', w: null, lab: null, labSec: 0 } : this._judgeDetail(t);
+    const d = cont ? { keep: prev.keep, reason: 'cont', w: null, lab: null, labSec: 0 } : this._judgeDetail(t, prev);
     if (!d.keep && t.is_final) this.dropped++;
     if (this._log && !this._log.truncated && this._log.tokens.length < 20000) {
       this._log.tokens.push({
@@ -234,11 +237,19 @@ export class SpeakerGate {
     return d.keep;
   }
 
+  // Soniox token times are ~60 ms stamps, not the word's sound: pooling them raw fed the model
+  // 60 ms crumbs (live: the owner's own label scored 0.30–0.43 and every later word was dropped).
+  // Pad each stamp and bridge short same-label gaps so the pool holds the actual continuous speech.
   _pool(t) {
     if (t.start_ms == null || t.end_ms == null) return;
-    const lab = this._label(t.speaker), s = Math.round(t.start_ms * SR / 1000), e = Math.round(t.end_ms * SR / 1000);
+    const lab = this._label(t.speaker), pad = this.o.poolPadMs * SR / 1000;
+    const s = Math.max(0, Math.round(t.start_ms * SR / 1000 - pad)), e = Math.min(this.total, Math.round(t.end_ms * SR / 1000 + pad));
     if (!lab || e <= s) return;
-    lab.segs.push([s, e]); lab.sec += (e - s) / SR;
+    const last = lab.segs.at(-1);
+    if (last && this._poolSpk === t.speaker && s <= last[1] + this.o.poolGapMs * SR / 1000) {
+      if (e > last[1]) { lab.sec += (e - last[1]) / SR; last[1] = e; }
+    } else { lab.segs.push([s, e]); lab.sec += (e - s) / SR; }
+    this._poolSpk = t.speaker;
     // Keep only what the ring still holds, and at most the pool budget — a long session must not
     // grow per-label history (or the re-score walk) without bound.
     const oldest = this.total - this.buf.length; let kept = 0;
@@ -255,7 +266,10 @@ export class SpeakerGate {
     return l;
   }
 
-  _judgeDetail(t) {
+  // A word right after a kept word of the same label needs only to clear the veto, like under an
+  // owner label: the last word of a phrase sits in windows half-filled with the trailing silence
+  // (live: "…keletre volt." lost "volt." at 0.39).
+  _judgeDetail(t, prev) {
     if (t.start_ms == null || t.end_ms == null) return { keep: true, reason: 'no_ts', w: null, lab: null, labSec: 0 };
     const lab = this._label(t.speaker), w = this.windowScore((t.start_ms + t.end_ms) * SR / 2000), o = this.o, labSec = lab?.sec ?? 0;
     if (lab?.score != null) {
@@ -263,7 +277,11 @@ export class SpeakerGate {
       if (w != null && w < o.veto) return { keep: false, reason: 'label_veto', w, lab: lab.score, labSec };
       return { keep: true, reason: 'label_ok', w, lab: lab.score, labSec };
     }
-    if (w != null) return { keep: w >= o.windowThreshold, reason: w >= o.windowThreshold ? 'win_ok' : 'win_low', w, lab: null, labSec };
+    if (w != null) {
+      if (w >= o.windowThreshold) return { keep: true, reason: 'win_ok', w, lab: null, labSec };
+      const follow = !!(prev?.keep && prev.speaker === t.speaker && w >= o.veto);
+      return { keep: follow, reason: follow ? 'win_follow' : 'win_low', w, lab: null, labSec };
+    }
     return { keep: false, reason: this.model ? 'no_score' : 'no_model', w: null, lab: null, labSec };
   }
 
