@@ -2,8 +2,9 @@
 // Causal replay of the REAL SpeakerGate on "Save logs for DEBUG" sessions (session.wav + tokens.json
 // + meta.json): audio pushed at the app's pace, each FINAL token admitted at its logged arrival_ms,
 // with the session's own voiceprint. Compares the logged live verdicts with today's gate code.
-// Benchmark: an optional <session>/truth.json — {"default":"owner"|"other", "other":[[startMs,endMs]…],
-// "owner":[[…]]} (spans override the default; a session without one counts as owner-only, unverified)
+// Benchmark: an optional <session>/truth.json — {"default":"owner"|"other"|"unknown", "other":[[startMs,endMs]…],
+// "owner":[[…]], "unknown":[[…]]} (spans override the default; unknown = nobody could tell, not scored;
+// a session without one counts as owner-only, unverified)
 // — scores owner words kept and other-voice words dropped, the two numbers to never trade blindly.
 // Usage: NODE_PATH=/path/node_modules node log-replay.mjs [~/voice-logs] [key=value gate options…]
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -24,7 +25,7 @@ const bench = { owner: [0, 0], other: [0, 0] };   // [right, total]
 const truthOf = (dir) => {
   const f = `${dir}/truth.json`, t = existsSync(f) ? JSON.parse(readFileSync(f)) : { default: 'owner', unverified: true };
   const inS = (spans, ms) => (spans ?? []).some(([a, b]) => a <= ms && ms <= b);
-  return { t, who: (ms) => (inS(t.other, ms) ? 'other' : inS(t.owner, ms) ? 'owner' : t.default) };
+  return { t, who: (ms) => (inS(t.unknown, ms) ? 'unknown' : inS(t.other, ms) ? 'other' : inS(t.owner, ms) ? 'owner' : t.default) };
 };
 for (const dir of dirs) {
   const meta = JSON.parse(readFileSync(`${dir}/meta.json`)), toks = JSON.parse(readFileSync(`${dir}/tokens.json`)).filter((t) => t.is_final);
@@ -43,7 +44,7 @@ for (const dir of dirs) {
     await idle();
   }
   const { t: truth, who } = truthOf(dir);
-  for (const o of out) { const w = who((o.t.start_ms + o.t.end_ms) / 2), b = bench[w]; b[1]++; if (o.keep === (w === 'owner')) b[0]++; }
+  for (const o of out) { const w = who((o.t.start_ms + o.t.end_ms) / 2), b = bench[w]; if (!b) continue; b[1]++; if (o.keep === (w === 'owner')) b[0]++; }
   const lv = out.filter((o) => !o.t.keep).length, nw = out.filter((o) => !o.keep).length;
   liveDrop += lv; nowDrop += nw; total += out.length;
   const txt = out.map((o) => (o.keep ? o.t.text : `[${o.t.text.trim()}]`)).join('');
