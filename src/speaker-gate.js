@@ -34,8 +34,8 @@ export const SPEAKER_MODEL = {
 };
 export const SPEAKER_GATE_DEFAULTS = {
   threshold: 0.48,       // label score ≥ → owner (lab: owner 0.90, intruders ≤ 0.27; real use: owner 0.50–0.75)
-  windowThreshold: 0.40, // window-only verdict before the label has a score
-  strongWindow: 0.60,    // window ≥ → owner even under a low label (live owner windows 0.60–0.76, lab intruders ≤ 0.35)
+  windowThreshold: 0.33, // window-only verdict before the label is sure (live owner start-of-turn windows 0.34–0.42; lab intruders: windows near 0.2, labels ≤ 0.27)
+  labelReject: 0.35,     // label below → clearly not the owner (lab intruders ≤ 0.27; live owner labels ≥ 0.39 even when short)
   veto: 0.30,            // window below → not the owner even under the owner's label (tuned on ONE synthetic dialogue — re-measure)
   windowSec: 1.5, hopSec: 0.5,
   minRms: 0.01,          // quieter window = silence → no score
@@ -271,7 +271,7 @@ export class SpeakerGate {
   // Uncertain (no window score — trailing silence, quiet tail — or a window between veto and the
   // window bar) → the word follows the previous kept word of the same label: the end of the
   // owner's sentence is not cut (live: "…keletre volt." lost "volt." at 0.39). A strong window
-  // overrides a low label (live: label 0.44 while every window said 0.70+ → a whole sentence lost).
+  // decides under an unsure label (live: label 0.44–0.46 while the windows said owner → sentences lost).
   // Fail-closed stays only where nothing was accepted yet (the stranger-before-owner bug).
   _judgeDetail(t, prev) {
     if (t.start_ms == null || t.end_ms == null) return { keep: true, reason: 'no_ts', w: null, lab: null, labSec: 0 };
@@ -280,8 +280,8 @@ export class SpeakerGate {
     if (w != null && w < o.veto) return r(false, lab?.score != null ? 'label_veto' : 'win_low');   // clearly someone else
     if (lab?.score != null) {
       if (lab.score >= o.threshold) return r(true, 'label_ok');
-      return w != null && w >= o.strongWindow ? r(true, 'win_strong') : r(false, 'label_low');
-    }
+      if (lab.score < o.labelReject) return r(false, 'label_low');   // the label is clearly someone else
+    }   // a label between labelReject and threshold is unsure (live owner 0.44–0.46 early on) → the window decides
     if (w != null && w >= o.windowThreshold) return r(true, 'win_ok');
     const follow = !!(prev?.keep && prev.speaker === t.speaker);
     return r(follow, follow ? 'follow' : w != null ? 'win_low' : this.model ? 'no_score' : 'no_model');

@@ -88,7 +88,7 @@ test('label pool: padded token stamps, short same-voice gaps bridged into one sp
 
 test('window-only: a word after a kept same-voice word clears at the veto bar, a fresh one does not', async () => {
   const g = await gateWith([[2, 1]]);
-  g.windowScore = () => 0.35;   // between veto (0.30) and windowThreshold (0.40): a phrase-final word
+  g.windowScore = () => 0.31;   // between veto (0.30) and windowThreshold (0.33): a phrase-final word
   const w = { text: ' volt.', start_ms: 1000, end_ms: 1060, speaker: '1', is_final: false };
   assert.equal(g.admit(w, { speaker: '1', keep: true }), true);
   assert.equal(g.admit(w), false);
@@ -107,8 +107,11 @@ test('never worse than no lock for the owner: uncertain words follow the kept wo
   g.windowScore = () => 0.2;                       // clear evidence of another voice
   assert.equal(g.admit(w, kept), false);
   g.labels.set('1', { segs: [], sec: 3, scoredSec: 3, score: 0.44 });
-  g.windowScore = () => 0.7;                       // low label, but the window says owner
+  g.windowScore = () => 0.5;                       // unsure label: the window decides
   assert.equal(g.admit(w), true);
-  g.windowScore = () => 0.5;
-  assert.equal(g.admit(w, kept), false);           // low label, ambiguous window → dropped
+  g.windowScore = () => 0.35;
+  assert.equal(g.admit(w, kept), true);            // unsure label + unsure window → follows the kept word
+  g.labels.get('1').score = 0.2;                   // clearly someone else's label
+  g.windowScore = () => 0.7;
+  assert.equal(g.admit(w, kept), false);
 });

@@ -5,7 +5,7 @@
 // gate-eval.py, which pools each label's audio over the WHOLE recording (an upper bound).
 // Limit: soniox-stream.mjs records finals only, so partial-tail gating isn't replayed (stt.js handles it).
 // Needs: soniox-stream.mjs --diarize output + onnxruntime-web in node (NODE_PATH=/path/node_modules).
-// Usage: node gate-replay.mjs [.cache/hu-dialogue/soniox_tokens.json]
+// Usage: node gate-replay.mjs [.cache/hu-dialogue/soniox_tokens.json] [key=value gate options…]
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { SpeakerGate, enrollSpeaker, SPEAKER_MODEL } from '../src/speaker-gate.js';
@@ -19,7 +19,8 @@ const model = { embed: async (pcm) => { const { data, numFrames, numBins } = com
 
 const meta = JSON.parse(readFileSync(H + 'dialogue_meta.json')), toks = JSON.parse(readFileSync(tokFile));
 const { voiceprint } = await enrollSpeaker(rd(H + 'enroll_attila.wav'), { model });
-const gate = new SpeakerGate({ voiceprint, model });
+const opts = Object.fromEntries(process.argv.slice(3).map((a) => a.split('=')).map(([k, v]) => [k, +v]));
+const gate = new SpeakerGate({ voiceprint, model, ...opts });
 await new Promise((r) => setTimeout(r, 0));
 const pcm = rd(H + 'dialogue_full.wav'), CH = 2048;   // 128 ms frames, like the app
 const idle = async () => { while (gate._busy) await new Promise((r) => setTimeout(r, 1)); };   // inference keeps up (≈30 ms / 0.5 s hop)
