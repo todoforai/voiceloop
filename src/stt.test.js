@@ -660,6 +660,38 @@ test('soniox: a 4xx error (auth/balance) is fatal, 429/5xx are not', () => withS
   stt.close();
 }));
 
+test('soniox: drain() finalizes the words still in flight and resolves after the last onFinal', () => withStubs(async () => {
+  const { stt, events, ws, frame } = await makeSX();
+  stt.feed(frame);
+  toks(ws(), tok('the last', true), tok(' wor', false));
+  const done = stt.drain(5000);
+  assert.ok(ws().sent.some((s) => typeof s === 'string' && JSON.parse(s).type === 'finalize'), 'finalize sent');
+  toks(ws(), tok(' words', true), tok('<end>', true));   // an endpoint mid-drain must not end the wait
+  toks(ws(), tok(' too', true), tok('<fin>', true));
+  await done;
+  assert.deepEqual(events.finals, ['the last words', 'too']);
+  stt.close();
+}));
+
+test('soniox: drain() times out with what arrived (interim tail kept), and is instant with nothing pending', () => withStubs(async () => {
+  const { stt, events, ws, frame } = await makeSX();
+  stt.feed(frame);
+  toks(ws(), tok('cut', true), tok(' off', false));
+  await stt.drain(20);
+  assert.deepEqual(events.finals, ['cut off']);
+  await stt.drain(5000);   // nothing fed since the close → resolves at once
+  assert.deepEqual(events.finals, ['cut off']);
+  stt.close();
+}));
+
+test('soniox: close() during a drain resolves it', () => withStubs(async () => {
+  const { stt, frame } = await makeSX();
+  stt.feed(frame);
+  const done = stt.drain(60000);
+  stt.close();
+  await done;
+}));
+
 test('soniox: commit() while still connecting queues the finalize for onopen', () => withStubs(async () => {
   const events = { finals: [] };
   const stt = makeSonioxSTT({

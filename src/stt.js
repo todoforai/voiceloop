@@ -735,6 +735,7 @@ export function makeSonioxSTT(opts) {
   let audioSinceFinal = false, awaitingFinal = false, safetyTimer = null;
   let held = '', holdTimer = null;   // turn closed on a continuation cue, waiting for the rest
   let gatePrev;   // speakerGate: verdict of the last FINAL token (a sub-word piece follows its word)
+  let drainDone = null, drainPromise = null, drainTimer = null;   // drain(): mic is off, waiting for the last words
   const usage = makeUsageReporter(sttUsageUrl, apiKey, 'soniox', { model }, opts.fetchFn);
   const OUTBOX_MAX_SAMPLES = 32000;   // ~2s preroll across the token mint + handshake (see Deepgram)
 
@@ -757,6 +758,7 @@ export function makeSonioxSTT(opts) {
     if ((finalText + tail).trim()) { holdTimer = setTimeout(flushHeld, SONIOX_HOLD_MS); return; }   // continuation in progress: its <end> merges
     const t = held, at = ms(); speakerGate?.logTurn?.('hold_flush', t, false); resetTurn(); audioSinceFinal = false; onFinal(t, at);
   };
+  const endDrain = () => { clearTimeout(drainTimer); drainTimer = null; const done = drainDone; drainDone = drainPromise = null; done?.(); };
   const closeTurn = (force = false, marker = '<end>') => {
     const seg = (finalText + tail).trim(), t = withHeld(seg), at = ms();
     const hold = !force && sonioxContinues(seg);
@@ -815,6 +817,7 @@ export function makeSonioxSTT(opts) {
       sock.onclose = ev => {
         usage.flush(); onClose?.();
         if (sock !== ws) return;   // superseded socket's late close: the new one's state is untouched
+        if (drainDone) { closeTurn(true, 'drain_close'); endDrain(); }   // nothing more can arrive: keep what we have
         speakerGate?.endStream?.('socket_close');
         clearInterval(keepalive); keepalive = null;
         if (!isClosed()) reportClose(ev, opened, onError);
@@ -838,7 +841,11 @@ export function makeSonioxSTT(opts) {
         // tokens): handle the markers at their POSITION, so text after one belongs to the next turn.
         let newTail = '', tailPrev = gatePrev;   // gate cursors: finals persist, the partial tail is rebuilt every response
         for (const t of m.tokens) {
-          if (t.text === '<end>' || t.text === '<fin>') { tail = newTail; newTail = ''; gatePrev = tailPrev = undefined; closeTurn(t.text === '<fin>', t.text); continue; }
+          if (t.text === '<end>' || t.text === '<fin>') {
+            tail = newTail; newTail = ''; gatePrev = tailPrev = undefined; closeTurn(t.text === '<fin>', t.text);
+            if (t.text === '<fin>' && drainDone) endDrain();   // the drain's finalize answered: every word is in
+            continue;
+          }
           if (!turnStart) turnStart = performance.now();   // turn's ms clock anchors at its first token
           if (speakerGate) {   // another voice's word: never shown, never sent
             const v = { speaker: t.speaker, keep: speakerGate.admit(t, t.is_final ? gatePrev : tailPrev) };
@@ -875,7 +882,23 @@ export function makeSonioxSTT(opts) {
       if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'finalize' }));   // else onopen sends it
       clearTimeout(safetyTimer); safetyTimer = setTimeout(() => closeTurn(true, 'safety'), TUNING.STT.forceEndSafetyMs);
     },
+    // The host stopped listening but wants what was already said: no more audio comes, so ask for a
+    // manual finalize and close the turn on its `<fin>` (Soniox's finals trail speech by 1–3 s, and a
+    // plain close() drops those words). On timeout the turn closes with what arrived, interim tail
+    // included. Resolves once the last onFinal has fired.
+    drain(timeoutMs = 2500) {
+      if (drainPromise) return drainPromise;
+      const live = ws ? ws.readyState <= 1 : opening;   // a socket that can still answer (or is connecting)
+      const pending = !!(held || (finalText + tail).trim());
+      if (!live || !(audioSinceFinal || pending)) { if (pending) closeTurn(true, 'drain'); return Promise.resolve(); }
+      drainPromise = new Promise((resolve) => { drainDone = resolve; });
+      clearTimeout(safetyTimer); safetyTimer = null; awaitingFinal = true;
+      if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'finalize' }));   // else onopen sends it
+      drainTimer = setTimeout(() => { closeTurn(true, 'drain_timeout'); endDrain(); }, timeoutMs);
+      return drainPromise;
+    },
     close() {
+      endDrain();
       resetTurn(); audioSinceFinal = false;
       clearInterval(keepalive); keepalive = null; outbox = []; outboxSamples = 0;
       speakerGate?.endStream?.('close');

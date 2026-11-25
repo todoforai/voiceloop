@@ -1669,3 +1669,25 @@ test('BOOTSTRAP VAD: 1024-sample (64ms) ignores 1-chunk click, all chunk sizes s
     agent.destroy();
   }
 });
+
+// finish(): the user stopped listening but the words still in flight must land, then the agent is gone.
+test('finish() drains the STT (late final still emitted), then destroys; destroy() mid-drain cuts it short', async () => {
+  const { STT_PROVIDERS } = await import('./stt.js');
+  const orig = STT_PROVIDERS.elevenlabs;
+  let cbs, closed = 0, release;
+  STT_PROVIDERS.elevenlabs = (opts) => { cbs = opts; return { open() {}, feed() {}, close() { closed++; release?.(); }, reset() {},
+    drain: () => new Promise((r) => { release = r; setTimeout(() => { cbs.onFinal('the last words', 10); r(); }, 5); }) }; };
+  try {
+    const { agent, events } = makeAgent({ opts: { sttProvider: 'elevenlabs' } });
+    agent.setHeld(true);
+    await agent.finish(1000);
+    assert.ok(events.some((e) => e.type === 'stt' && e.turnComplete && e.text === 'the last words'), 'late final emitted');
+    assert.equal(agent._destroyed, true);
+
+    STT_PROVIDERS.elevenlabs = (opts) => ({ open() {}, feed() {}, close() { release?.(); }, reset() {}, drain: () => new Promise((r) => { release = r; }) });
+    const c = makeAgent({ opts: { sttProvider: 'elevenlabs' } });
+    const p = c.agent.finish(60000);
+    c.agent.destroy();
+    await p;   // resolves: close() ended the drain
+  } finally { STT_PROVIDERS.elevenlabs = orig; }
+});

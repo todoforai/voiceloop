@@ -572,6 +572,20 @@ export class VoiceAgent {
   // never leaks the microphone.
   destroy() { this._destroyed = true; this.stop(); this.stt.close(); this.tts.close?.(); this._teardownPipeline(); }
 
+  // End the session but keep what was already said: the mic goes off at once, the STT finalizes the
+  // words still in flight (they arrive as normal stt events, the last with turnComplete), then
+  // destroy(). A destroy() meanwhile cuts it short. Providers without drain() end at once.
+  finish(timeoutMs) {
+    if (this._destroyed) return Promise.resolve();
+    if (!this._finishing) {
+      this._teardownPipeline();   // no new audio; the OS mic indicator goes off now
+      this._finishing = Promise.resolve(this._closed ? null : this.stt.drain?.(timeoutMs))
+        .catch(() => {})
+        .finally(() => { if (!this._destroyed) this.destroy(); });
+    }
+    return this._finishing;
+  }
+
   // Host-triggered barge-in: cut off the current in-flight turn (abort the LLM, stop TTS) WITHOUT
   // tearing down the pipeline — the mic keeps listening. Mirrors `_onBargeIn` but callable from a
   // UI "stop" control. No-op when nothing is in flight (already idle/listening).

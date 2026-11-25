@@ -256,6 +256,9 @@ export class VoiceAgent {
   /** End for real: pause + release the mic, audio graph and VAD model (turns off the OS mic indicator).
    *  Call this when dropping the agent reference so a paused-but-discarded agent never leaks the mic. */
   destroy(): void;
+  /** End the session but keep what was already said: mic off at once, the STT finalizes the words
+   *  still in flight (delivered as normal `stt` events), then destroy(). Resolves when done. */
+  finish(timeoutMs?: number): Promise<void>;
   listVoices(): Promise<Array<{ id: string; name: string; language: string }>>;
   setVoice(voiceId: string): void;
   setSpeed(speed: number): void;
@@ -344,6 +347,8 @@ export interface STTSession {
   feed?(pcm: Int16Array): void;
   /** End of utterance: ask the provider to finalize. No-op providers with nativeEOT. */
   commit?(): void;
+  /** No more audio comes: finalize the words still in flight, resolve after their last onFinal. */
+  drain?(timeoutMs?: number): Promise<void>;
   /** Mute/unmute without tearing the session down (selfCapture providers). */
   setEnabled?(enabled: boolean): void;
   close(): void;
