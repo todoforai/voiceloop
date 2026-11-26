@@ -14,7 +14,7 @@ import { SpeakerGate, SPEAKER_MODEL } from '../src/speaker-gate.js';
 import { computeFbank, l2Normalize } from '../src/fbank.js';
 const ort = createRequire(process.env.NODE_PATH + '/')('onnxruntime-web');
 const args = process.argv.slice(2), opts = {};
-for (const a of args.filter((a) => a.includes('='))) { const [k, v] = a.split('='); opts[k] = +v; }
+for (const a of args.filter((a) => a.includes('='))) { const [k, v] = a.split('='); opts[k] = v === 'null' ? null : Number.isNaN(+v) ? v : +v; }
 const root = args.find((a) => !a.includes('=')) ?? `${homedir()}/voice-logs`;
 const dirs = existsSync(`${root}/tokens.json`) ? [root] : readdirSync(root).sort().map((d) => `${root}/${d}`);
 const session = await ort.InferenceSession.create(readFileSync(new URL('.cache/models/campplus_200k.onnx', import.meta.url).pathname));

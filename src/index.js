@@ -14,4 +14,4 @@ export { ElevenLabsTTS } from './tts-elevenlabs.js';
 export { loadVoiceDeps, prewarmVoice } from './deps.js';
 export { makeOpenAILLM, toOpenAIMessages } from './llm-openai.js';
 export { TUNING } from './tuning.js';
-export { SpeakerGate, enrollSpeaker, loadSpeakerModel, SPEAKER_GATE_DEFAULTS, SPEAKER_MODEL } from './speaker-gate.js';
+export { SpeakerGate, enrollSpeaker, loadSpeakerModel, SPEAKER_GATE_DEFAULTS, SPEAKER_GATE_PRESETS, SPEAKER_MODEL } from './speaker-gate.js';

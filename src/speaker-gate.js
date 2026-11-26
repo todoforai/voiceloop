@@ -33,10 +33,11 @@ export const SPEAKER_MODEL = {
   fbank: { scale: 1.0, window: 'povey', numBins: 80, frameLenMs: 25, frameShiftMs: 10, lowFreq: 20, highFreq: 7600, cmvn: 'mean' },
 };
 export const SPEAKER_GATE_DEFAULTS = {
-  threshold: 0.48,       // label score ≥ → owner (lab: owner 0.90, intruders ≤ 0.27; real use: owner 0.50–0.75)
-  windowThreshold: 0.33, // window-only verdict before the label is sure (live owner start-of-turn windows 0.34–0.42; lab intruders: windows near 0.2, labels ≤ 0.27)
-  labelReject: 0.35,     // label below → clearly not the owner (lab intruders ≤ 0.27; live owner labels ≥ 0.39 even when short)
-  veto: 0.30,            // window below → not the owner even under the owner's label (tuned on ONE synthetic dialogue — re-measure)
+  threshold: 0.48,       // label score ≥ → owner (real use: owner 0.50–0.75)
+  windowThreshold: 0.30, // window-only verdict before the label is sure (or in the gray zone)
+  labelReject: 0.35,     // label below → clearly not the owner
+  labelMargin: 0.12,     // drop a label if another scored label leads by ≥ this (0 = top label only; null = off)
+  veto: null,            // optional window floor (null = off; e.g. 0.30 drops any word below it even on an owner label)
   windowSec: 1.5, hopSec: 0.5,
   minRms: 0.01,          // quieter window = silence → no score
   labelMinSec: 2.0,      // pooled audio a label needs before it's scored (1 s scored the owner 0.30–0.43 live)
@@ -46,6 +47,10 @@ export const SPEAKER_GATE_DEFAULTS = {
   labelRescoreSec: 1.0,  // re-score a label after this much new audio
   bufferSec: 30,         // audio kept for label pooling (finals land ~3–5 s after the word)
   maxLogSec: 600,        // cap diagnostic capture per stream (~19 MB PCM) when onStreamLog is set
+};
+export const SPEAKER_GATE_PRESETS = {
+  normal: { labelMargin: 0.12, threshold: 0.48, labelReject: 0.35, windowThreshold: 0.30, veto: null },
+  strict: { labelMargin: 0,    threshold: 0.35, labelReject: 0.35, windowThreshold: 0.30, veto: null },
 };
 
 let sessionP = null;
@@ -85,9 +90,10 @@ export async function enrollSpeaker(pcm, { onProgress, model } = {}) {
 export class SpeakerGate {
   /** `model` ({ embed(pcm) → unit vector }) overrides the CDN-loaded one — Node replays, tests.
    *  `onStreamLog(dump)` (optional, dev/diagnostics) receives the full stream PCM + per-token verdicts on stream end. */
-  constructor({ voiceprint, onProgress, model, onStreamLog, ...opts }) {
+  constructor({ voiceprint, onProgress, model, onStreamLog, mode, ...opts }) {
     this.vp = Float32Array.from(voiceprint);
-    this.o = { ...SPEAKER_GATE_DEFAULTS, ...opts };
+    const preset = mode && SPEAKER_GATE_PRESETS[mode] ? SPEAKER_GATE_PRESETS[mode] : null;
+    this.o = { ...SPEAKER_GATE_DEFAULTS, ...preset, ...opts };
     this._onStreamLog = onStreamLog || null;
     this._log = null;
     this._createdAt = Date.now();
@@ -267,24 +273,27 @@ export class SpeakerGate {
     return l;
   }
 
-  // Never worse than no lock for the owner: a word is dropped only on EVIDENCE of another voice.
-  // Uncertain (no window score — trailing silence, quiet tail — or a window between veto and the
-  // window bar) → the word follows the previous kept word of the same label: the end of the
-  // owner's sentence is not cut (live: "…keletre volt." lost "volt." at 0.39). A strong window
-  // decides under an unsure label (live: label 0.44–0.46 while the windows said owner → sentences lost).
-  // Fail-closed stays only where nothing was accepted yet (the stranger-before-owner bug).
+  // Relative label gate (normal: drop a label beaten by ≥0.12 by another label; strict: keep only
+  // the top-scoring label). A scored window decides before a label has a score or in its gray zone;
+  // only an unscored tail (silence / quiet end of a kept sentence) follows the previous kept word
+  // of the same label. Nothing known yet stays fail-closed.
   _judgeDetail(t, prev) {
     if (t.start_ms == null || t.end_ms == null) return { keep: true, reason: 'no_ts', w: null, lab: null, labSec: 0 };
     const lab = this._label(t.speaker), w = this.windowScore((t.start_ms + t.end_ms) * SR / 2000), o = this.o, labSec = lab?.sec ?? 0;
     const r = (keep, reason) => ({ keep, reason, w, lab: lab?.score ?? null, labSec });
-    if (w != null && w < o.veto) return r(false, lab?.score != null ? 'label_veto' : 'win_low');   // clearly someone else
+    if (o.veto != null && w != null && w < o.veto) return r(false, lab?.score != null ? 'label_veto' : 'win_low');
     if (lab?.score != null) {
+      if (o.labelMargin != null) {
+        let best = -Infinity;
+        for (const [k, l] of this.labels) if (k !== t.speaker && l.score != null && l.score > best) best = l.score;
+        if (o.labelMargin === 0 ? best > lab.score : best - lab.score >= o.labelMargin) return r(false, 'label_outscored');
+      }
       if (lab.score >= o.threshold) return r(true, 'label_ok');
-      if (lab.score < o.labelReject) return r(false, 'label_low');   // the label is clearly someone else
-    }   // a label between labelReject and threshold is unsure (live owner 0.44–0.46 early on) → the window decides
-    if (w != null && w >= o.windowThreshold) return r(true, 'win_ok');
+      if (lab.score < o.labelReject) return r(false, 'label_low');
+    }
+    if (w != null) return r(w >= o.windowThreshold, w >= o.windowThreshold ? 'win_ok' : 'win_low');
     const follow = !!(prev?.keep && prev.speaker === t.speaker);
-    return r(follow, follow ? 'follow' : w != null ? 'win_low' : this.model ? 'no_score' : 'no_model');
+    return r(follow, follow ? 'follow' : this.model ? 'no_score' : 'no_model');
   }
 
   /** Debug/UI snapshot: per-label scores + the latest window. */

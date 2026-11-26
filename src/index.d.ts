@@ -440,8 +440,10 @@ export function hasNovelStopWord(heard: string, reply: string, stopWords?: strin
 export function toolResultText(result: unknown): string;
 
 // ── Speaker gate (voice lock) ──
+export type SpeakerGateMode = 'normal' | 'strict';
 export interface SpeakerGateOptions {
-  threshold?: number; windowThreshold?: number; labelReject?: number; veto?: number; windowSec?: number; hopSec?: number; minRms?: number;
+  mode?: SpeakerGateMode;
+  threshold?: number; windowThreshold?: number; labelReject?: number; labelMargin?: number | null; veto?: number | null; windowSec?: number; hopSec?: number; minRms?: number;
   labelMinSec?: number; labelMaxSec?: number; labelRescoreSec?: number; poolPadMs?: number; poolGapMs?: number; bufferSec?: number; maxLogSec?: number;
 }
 export interface SpeakerGateTokenLog {
@@ -460,7 +462,8 @@ export interface SpeakerGateStreamLog {
     options: SpeakerGateOptions; finalLabels: Record<string, { sec: number; score?: number }>;
   };
 }
-export const SPEAKER_GATE_DEFAULTS: Required<SpeakerGateOptions>;
+export const SPEAKER_GATE_DEFAULTS: Required<Omit<SpeakerGateOptions, 'mode'>>;
+export const SPEAKER_GATE_PRESETS: Record<SpeakerGateMode, Pick<SpeakerGateOptions, 'labelMargin' | 'threshold' | 'labelReject' | 'windowThreshold' | 'veto'>>;
 export const SPEAKER_MODEL: { id: string; url: string; sizeMB: number; fbank: Record<string, unknown> };
 export interface Voiceprint { voiceprint: number[]; model: string; speechSec: number; segments: number }
 /** Load (download once, OPFS-cached) the CAM++ speaker model; `onProgress` fires on a cache miss. */

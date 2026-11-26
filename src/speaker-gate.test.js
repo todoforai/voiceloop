@@ -8,8 +8,8 @@ const model = { embed: async (pcm) => { let s = 0; for (const v of pcm) s += v; 
 const tick = () => new Promise((r) => setTimeout(r, 5));
 const tone = (sec, sign) => new Float32Array(sec * 16000).fill(0.1 * sign);
 
-async function gateWith(segments) {   // [[sec, sign]] → gate that has heard them, fully scored
-  const g = new SpeakerGate({ voiceprint: VP, model });
+async function gateWith(segments, opts = {}) {   // [[sec, sign]] → gate that has heard them, fully scored
+  const g = new SpeakerGate({ voiceprint: VP, model, ...opts });
   await tick();
   for (const [sec, sign] of segments) { g.pushSent(tone(sec, sign)); await tick(); }
   return g;
@@ -28,16 +28,41 @@ test('window decides before a label has a score; nothing known → dropped (fail
   assert.equal(cold.admit({ text: ' a', start_ms: 0, end_ms: 100, is_final: false }), false);
 });
 
-test('label score + window veto; sub-word piece follows its word', async () => {
-  const g = await gateWith([[3, 1], [3, -1]]);
+test('label score, optional window veto, and sub-word piece follows its word', async () => {
+  const g = await gateWith([[3, 1], [3, -1]], { veto: 0.30 });
   for (let ms = 0; ms < 3000; ms += 500) g.admit({ text: ' w', start_ms: ms, end_ms: ms + 400, speaker: '1', is_final: true });
   await tick();
   assert.ok(g.state.labels['1'].score > 0.9);
-  // Owner label, but the audio under the word is someone else → vetoed
+  // Owner label, but explicit veto drops a word whose audio is someone else
   assert.equal(g.admit({ text: ' x', start_ms: 4500, end_ms: 4900, speaker: '1', is_final: true }), false);
   const prev = { speaker: '1', keep: true };
   assert.equal(g.admit({ text: 'ing', start_ms: 4900, end_ms: 5000, speaker: '1', is_final: true }, prev), true);
   assert.equal(g.admit({ text: 'ing', start_ms: 4900, end_ms: 5000, speaker: '2', is_final: true }, prev), false);
+});
+
+test('relative labelMargin: normal mode drops labels lagging by ≥0.12; strict mode keeps only the top label', async () => {
+  const w = (speaker) => ({ text: ' szia', start_ms: 1000, end_ms: 1200, speaker, is_final: false });
+  // Normal mode (default): labelMargin = 0.12, no veto
+  const normal = await gateWith([[2, 1]]);
+  normal.labels.set('1', { segs: [], sec: 4, scoredSec: 4, score: 0.68 });
+  normal.labels.set('2', { segs: [], sec: 4, scoredSec: 4, score: 0.52 });   // twin/similar voice: ≥0.48 alone, but 0.16 behind S1 → dropped
+  normal.labels.set('3', { segs: [], sec: 4, scoredSec: 4, score: 0.60 });   // over-split owner: only 0.08 behind S1 → kept
+  normal.windowScore = () => 0.25;   // no veto by default: owner label is kept even on a noisy window
+  assert.equal(normal.admit(w('1')), true);
+  assert.equal(normal.admit(w('2')), false);
+  assert.equal(normal.admit(w('3')), true);
+
+  // Strict mode: labelMargin = 0 → only the top-scoring label passes (as long as ≥0.35)
+  const strict = await gateWith([[2, 1]], { mode: 'strict' });
+  strict.labels.set('1', { segs: [], sec: 4, scoredSec: 4, score: 0.68 });
+  strict.labels.set('2', { segs: [], sec: 4, scoredSec: 4, score: 0.60 });
+  strict.windowScore = () => 0.70;
+  assert.equal(strict.admit(w('1')), true);
+  assert.equal(strict.admit(w('2')), false);
+  // Strict still rejects a sole label below labelReject (0.35)
+  strict.labels.delete('1');
+  strict.labels.get('2').score = 0.30;
+  assert.equal(strict.admit(w('2')), false);
 });
 
 test('resetStream drops labels and windows', async () => {
@@ -86,31 +111,21 @@ test('label pool: padded token stamps, short same-voice gaps bridged into one sp
   assert.equal(lab.segs.length, 3);
 });
 
-test('window-only: a word after a kept same-voice word clears at the veto bar, a fresh one does not', async () => {
-  const g = await gateWith([[2, 1]]);
-  g.windowScore = () => 0.31;   // between veto (0.30) and windowThreshold (0.33): a phrase-final word
-  const w = { text: ' volt.', start_ms: 1000, end_ms: 1060, speaker: '1', is_final: false };
-  assert.equal(g.admit(w, { speaker: '1', keep: true }), true);
-  assert.equal(g.admit(w), false);
-  assert.equal(g.admit(w, { speaker: '2', keep: true }), false);
-  g.windowScore = () => 0.2;
-  assert.equal(g.admit(w, { speaker: '1', keep: true }), false);
-});
-
-test('never worse than no lock for the owner: uncertain words follow the kept word, evidence drops', async () => {
+test('unscored silence tail follows kept same-speaker word; scored low window drops', async () => {
   const g = await gateWith([[2, 1]]);
   const w = { text: ' vége', start_ms: 1000, end_ms: 1060, speaker: '1', is_final: false };
   const kept = { speaker: '1', keep: true };
   g.windowScore = () => undefined;                 // trailing silence: no window
   assert.equal(g.admit(w, kept), true);
   assert.equal(g.admit(w), false);                 // nothing accepted yet → still fail-closed
-  g.windowScore = () => 0.2;                       // clear evidence of another voice
+  assert.equal(g.admit(w, { speaker: '2', keep: true }), false);
+  g.windowScore = () => 0.25;                      // scored window below windowThreshold (0.30) → drops
   assert.equal(g.admit(w, kept), false);
   g.labels.set('1', { segs: [], sec: 3, scoredSec: 3, score: 0.44 });
-  g.windowScore = () => 0.5;                       // unsure label: the window decides
+  g.windowScore = () => 0.31;                      // unsure label (0.35..0.48) + window ≥ 0.30 → kept
   assert.equal(g.admit(w), true);
-  g.windowScore = () => 0.35;
-  assert.equal(g.admit(w, kept), true);            // unsure label + unsure window → follows the kept word
+  g.windowScore = () => 0.28;                      // unsure label + window < 0.30 → dropped
+  assert.equal(g.admit(w, kept), false);
   g.labels.get('1').score = 0.2;                   // clearly someone else's label
   g.windowScore = () => 0.7;
   assert.equal(g.admit(w, kept), false);
